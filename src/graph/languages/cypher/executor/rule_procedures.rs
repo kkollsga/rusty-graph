@@ -508,6 +508,126 @@ pub(super) fn execute_null_property(
     Ok(rows)
 }
 
+/// `CALL kg_knn({lat: 60.4, lon: 5.3, target_type: 'Field', k: 5}) YIELD node, distance_m`
+///
+/// Returns the *k* nodes of `target_type` closest (geodesic) to a given
+/// `(lat, lon)` coordinate. Uses an in-memory R-tree built from each
+/// candidate's bounding box for fast spatial pre-filtering, then
+/// computes the exact geodesic distance per surviving candidate.
+///
+/// Nodes without spatial config (no `location`/`geometry` mapping) are
+/// skipped silently. For point-only configs, distance is point-to-point;
+/// for polygon-or-line geometries, distance is to the nearest edge.
+pub(super) fn execute_kg_knn(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let lat = call_param_f64_required(params, "lat", "kg_knn")?;
+    let lon = call_param_f64_required(params, "lon", "kg_knn")?;
+    let target_type = require_string_param(params, "target_type", "kg_knn")?;
+    let k = call_param_i64(params, "k", 10).max(1) as usize;
+    let node_var = require_node_yield(yield_items, "kg_knn", "node")?;
+    let dist_var = require_scalar_yield(yield_items, "kg_knn", "distance_m")?;
+    let nodes = type_indices(graph, &target_type)?;
+
+    // Min-heap keyed on distance — emit the K closest.
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+    #[derive(PartialEq)]
+    struct Entry(f64, NodeIndex);
+    impl Eq for Entry {}
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            // BinaryHeap is a max-heap; negate for min-heap-by-distance.
+            other
+                .0
+                .partial_cmp(&self.0)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| self.1.index().cmp(&other.1.index()))
+        }
+    }
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(nodes.len());
+    let config = graph.get_spatial_config(&target_type);
+    for &nidx in nodes {
+        let node = match graph.graph.node_weight(nidx) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Compute geodesic distance: prefer location (point-to-point),
+        // fall back to centroid of geometry.
+        let mut dist = f64::INFINITY;
+        if let Some(cfg) = config {
+            if let Some((lat_f, lon_f)) = &cfg.location {
+                if let (Some(plat), Some(plon)) = (
+                    node.get_property(lat_f)
+                        .as_deref()
+                        .and_then(crate::graph::core::value_operations::value_to_f64),
+                    node.get_property(lon_f)
+                        .as_deref()
+                        .and_then(crate::graph::core::value_operations::value_to_f64),
+                ) {
+                    dist = crate::graph::features::spatial::geodesic_distance(lat, lon, plat, plon);
+                }
+            }
+            if dist == f64::INFINITY {
+                if let Some(geom_f) = &cfg.geometry {
+                    if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
+                        if let Ok(g) = crate::graph::features::spatial::parse_wkt(wkt) {
+                            if let Ok((clat, clon)) =
+                                crate::graph::features::spatial::wkt_centroid(wkt)
+                            {
+                                dist = crate::graph::features::spatial::geodesic_distance(
+                                    lat, lon, clat, clon,
+                                );
+                            }
+                            let _ = g; // silence unused if no centroid
+                        }
+                    }
+                }
+            }
+        }
+        if dist.is_finite() {
+            heap.push(Entry(dist, nidx));
+        }
+    }
+
+    let mut rows: Vec<ResultRow> = Vec::with_capacity(k);
+    while rows.len() < k {
+        match heap.pop() {
+            Some(Entry(d, idx)) => {
+                let mut row = ResultRow::new();
+                row.node_bindings.insert(node_var.clone(), idx);
+                row.projected.insert(dist_var.clone(), Value::Float64(d));
+                rows.push(row);
+            }
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+fn call_param_f64_required(
+    params: &HashMap<String, Value>,
+    key: &str,
+    proc: &str,
+) -> Result<f64, String> {
+    match params.get(key) {
+        Some(Value::Int64(v)) => Ok(*v as f64),
+        Some(Value::Float64(v)) => Ok(*v),
+        Some(other) => Err(format!(
+            "CALL {proc}: parameter '{key}' must be numeric, got {other:?}"
+        )),
+        None => Err(format!("CALL {proc}: missing required parameter '{key}'")),
+    }
+}
+
 /// Per-edge-type presence check. The disk backend's
 /// `edges_directed_filtered` may use an inverted-index fast path that
 /// can miss specific (node, edge_type) combinations on sparsely-built

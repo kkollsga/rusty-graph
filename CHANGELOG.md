@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Geospatial primitives (Phase 5 of the completeness round).** Round
+  out the spatial surface with the standard GIS toolkit operations.
+
+  Cypher scalar functions on WKT/node geometries:
+  - `geom_buffer(geom, meters)` — planar buffer.
+  - `geom_convex_hull(geoms)` — variadic or list arg.
+  - `geom_union(g1, g2)` / `geom_intersection(g1, g2)` /
+    `geom_difference(g1, g2)` — boolean ops.
+  - `geom_is_valid(geom)` — OGC validity.
+  - `geom_length(geom)` — geodesic length for LineStrings; perimeter
+    for polygons (sum of rings); 0 for points.
+
+  Cypher CALL procedure:
+  - `kg_knn({lat, lon, target_type, k})` YIELD `node, distance_m` —
+    *k* nearest nodes of a target type to a coordinate (geodesic;
+    location-first, falls back to geometry centroid).
+
+  ```cypher
+  CALL kg_knn({lat: 60.4, lon: 5.3, target_type: 'City', k: 5})
+  YIELD node, distance_m
+  RETURN node.title, round(distance_m / 1000.0, 1) AS km
+  ```
+
+  Backed by `geo = "0.33"` (`Buffer`, `BooleanOps`, `ConvexHull`,
+  `Validation`, `LengthMeasurable` traits). New helpers in
+  `src/graph/features/spatial.rs`; new `geom_arg` resolver in
+  `executor/expression.rs` accepts WKT strings, Points, and
+  spatial-configured node/property variables.
+
 - **Weighted shortest path (Phase 4 of the completeness round).**
   `graph.shortest_path()` and `graph.shortest_path_length()` now
   accept an optional `weight_property` parameter. When set, the

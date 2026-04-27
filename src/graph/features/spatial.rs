@@ -179,6 +179,169 @@ pub fn wkt_centroid(wkt_string: &str) -> Result<(f64, f64), String> {
     geometry_centroid(&geometry)
 }
 
+/// Serialize a [`Geometry<f64>`] back to a WKT string.
+pub fn geometry_to_wkt(geom: &Geometry<f64>) -> String {
+    use wkt::ToWkt;
+    geom.wkt_string()
+}
+
+/// Polygon | MultiPolygon | LineString | Point buffer in metres.
+///
+/// Implementation note: `geo`'s native `Buffer` is planar (cartesian).
+/// For our WGS84-on-the-fly pipeline that's a reasonable approximation
+/// at smallish radii (hundreds of metres to a few km) but degrades near
+/// the poles or for buffers that span more than a few degrees. We
+/// document the planar-approx limitation rather than re-implement
+/// geodesic buffering here.
+pub fn geometry_buffer(geom: &Geometry<f64>, meters: f64) -> Result<Geometry<f64>, String> {
+    use geo::Buffer;
+    if meters < 0.0 {
+        return Err("buffer(): negative distances are not supported".into());
+    }
+    // Convert metres → degrees at the geometry's centroid latitude. 1° lat
+    // ≈ 111_320 m globally; 1° lon ≈ 111_320 m * cos(lat). We use the
+    // average of the two so an axis-symmetric buffer renders close to
+    // circular for the most common temperate-latitude case.
+    let (cy, _cx) = geometry_centroid(geom).unwrap_or((0.0, 0.0));
+    let lat_rad = cy.to_radians();
+    let lon_factor = 111_320.0 * lat_rad.cos().max(1e-12);
+    let avg_per_degree = (111_320.0 + lon_factor) / 2.0;
+    let radius_deg = meters / avg_per_degree;
+    let buffered = match geom {
+        Geometry::Point(p) => Geometry::MultiPolygon(p.buffer(radius_deg)),
+        Geometry::Polygon(p) => Geometry::MultiPolygon(p.buffer(radius_deg)),
+        Geometry::MultiPolygon(mp) => Geometry::MultiPolygon(mp.buffer(radius_deg)),
+        Geometry::LineString(ls) => Geometry::MultiPolygon(ls.buffer(radius_deg)),
+        Geometry::MultiLineString(mls) => Geometry::MultiPolygon(mls.buffer(radius_deg)),
+        _ => return Err("buffer(): unsupported geometry type".into()),
+    };
+    Ok(buffered)
+}
+
+/// Convex hull of one or more geometries.
+pub fn geometries_convex_hull(geoms: &[Geometry<f64>]) -> Result<Geometry<f64>, String> {
+    use geo::{ConvexHull, MultiPoint, Point};
+    if geoms.is_empty() {
+        return Err("convex_hull(): no geometries provided".into());
+    }
+    // Collect every coordinate from every geometry into a MultiPoint, then
+    // hull the lot. This is the simplest correct implementation across all
+    // geometry types in geo 0.33.
+    let mut points: Vec<Point<f64>> = Vec::new();
+    for g in geoms {
+        match g {
+            Geometry::Point(p) => points.push(*p),
+            Geometry::MultiPoint(mp) => points.extend(mp.iter().copied()),
+            Geometry::LineString(ls) => points.extend(ls.points()),
+            Geometry::MultiLineString(mls) => {
+                for ls in &mls.0 {
+                    points.extend(ls.points());
+                }
+            }
+            Geometry::Polygon(p) => {
+                points.extend(p.exterior().points());
+                for inner in p.interiors() {
+                    points.extend(inner.points());
+                }
+            }
+            Geometry::MultiPolygon(mp) => {
+                for p in &mp.0 {
+                    points.extend(p.exterior().points());
+                    for inner in p.interiors() {
+                        points.extend(inner.points());
+                    }
+                }
+            }
+            Geometry::Rect(r) => {
+                let bbox = r.to_polygon();
+                points.extend(bbox.exterior().points());
+            }
+            _ => {}
+        }
+    }
+    if points.is_empty() {
+        return Err("convex_hull(): no points to hull".into());
+    }
+    let mp = MultiPoint::from(points);
+    Ok(Geometry::Polygon(mp.convex_hull()))
+}
+
+/// Boolean union of two geometries (returns a MultiPolygon).
+pub fn geometry_union(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>, String> {
+    let pa = to_multipolygon(a)?;
+    let pb = to_multipolygon(b)?;
+    use geo::BooleanOps;
+    Ok(Geometry::MultiPolygon(pa.union(&pb)))
+}
+
+/// Boolean intersection of two geometries (returns a MultiPolygon).
+pub fn geometry_intersection(
+    a: &Geometry<f64>,
+    b: &Geometry<f64>,
+) -> Result<Geometry<f64>, String> {
+    let pa = to_multipolygon(a)?;
+    let pb = to_multipolygon(b)?;
+    use geo::BooleanOps;
+    Ok(Geometry::MultiPolygon(pa.intersection(&pb)))
+}
+
+/// Boolean difference (a − b) of two geometries (returns a MultiPolygon).
+pub fn geometry_difference(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>, String> {
+    let pa = to_multipolygon(a)?;
+    let pb = to_multipolygon(b)?;
+    use geo::BooleanOps;
+    Ok(Geometry::MultiPolygon(pa.difference(&pb)))
+}
+
+fn to_multipolygon(g: &Geometry<f64>) -> Result<geo::MultiPolygon<f64>, String> {
+    match g {
+        Geometry::Polygon(p) => Ok(geo::MultiPolygon(vec![p.clone()])),
+        Geometry::MultiPolygon(mp) => Ok(mp.clone()),
+        Geometry::Rect(r) => Ok(geo::MultiPolygon(vec![r.to_polygon()])),
+        _ => Err(
+            "boolean ops require polygonal input — use buffer() to convert lines/points first"
+                .into(),
+        ),
+    }
+}
+
+/// OGC validity check. Returns true for all simple/well-formed geometries.
+pub fn geometry_is_valid(geom: &Geometry<f64>) -> bool {
+    use geo::Validation;
+    geom.is_valid()
+}
+
+/// Geodesic length in meters. For polygons returns the perimeter (sum of
+/// exterior + interior ring lengths); for lines returns the line length;
+/// for points returns 0.
+pub fn geometry_length_m(geom: &Geometry<f64>) -> f64 {
+    use geo::line_measures::LengthMeasurable;
+    use geo::Geodesic;
+    match geom {
+        Geometry::LineString(ls) => ls.length(&Geodesic),
+        Geometry::MultiLineString(mls) => mls.iter().map(|ls| ls.length(&Geodesic)).sum(),
+        Geometry::Polygon(p) => {
+            let mut total = p.exterior().length(&Geodesic);
+            for inner in p.interiors() {
+                total += inner.length(&Geodesic);
+            }
+            total
+        }
+        Geometry::MultiPolygon(mp) => mp
+            .iter()
+            .map(|p| {
+                let mut t = p.exterior().length(&Geodesic);
+                for inner in p.interiors() {
+                    t += inner.length(&Geodesic);
+                }
+                t
+            })
+            .sum(),
+        Geometry::Point(_) | Geometry::MultiPoint(_) => 0.0,
+        _ => 0.0,
+    }
+}
+
 /// Compute centroid of any geometry, returns (lat, lon).
 pub(crate) fn geometry_centroid(geom: &Geometry<f64>) -> Result<(f64, f64), String> {
     let centroid: Option<Point<f64>> = match geom {

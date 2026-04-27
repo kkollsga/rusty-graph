@@ -92,6 +92,7 @@ impl<'a> CypherExecutor<'a> {
             "cardinality_violation" => &["node", "count"],
             "type_domain_violation" | "type_range_violation" => &["source", "target"],
             "parallel_edges" => &["a", "b", "count"],
+            "kg_knn" => &["node", "distance_m"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
@@ -334,6 +335,9 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
+            "kg_knn" => {
+                super::rule_procedures::execute_kg_knn(self.graph, &params, &clause.yield_items)?
+            }
             "list_procedures" => {
                 let procedures = [
                     (
@@ -440,6 +444,11 @@ impl<'a> CypherExecutor<'a> {
                         "parallel_edges",
                         "Rule: (a, b) pairs connected by more than one edge of {edge}",
                         "a, b, count",
+                    ),
+                    (
+                        "kg_knn",
+                        "Spatial: k nearest nodes of {target_type} to ({lat}, {lon})",
+                        "node, distance_m",
                     ),
                     (
                         "list_procedures",

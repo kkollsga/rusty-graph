@@ -421,3 +421,106 @@ class TestSpatialJoin:
         g.add_nodes(areas, "Area", "id", "title", column_types={"geometry": "geometry"})
         rows = g.cypher("MATCH (a:Area), (c:City) WHERE contains(a, c) RETURN a.title").to_list()
         assert rows == []
+
+
+# ── 0.8.20: Geometry primitives + KNN ──────────────────────────
+
+
+class TestGeomPrimitives:
+    def test_geom_is_valid_true(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("RETURN geom_is_valid('POINT(10.7 59.9)') AS v"))
+        assert rows[0]["v"] is True
+
+    def test_geom_length_linestring(self):
+        g = kglite.KnowledgeGraph()
+        # Oslo (10.75, 59.91) → Bergen (5.32, 60.39) ≈ 305 km
+        rows = list(g.cypher("RETURN geom_length('LINESTRING(10.75 59.91, 5.32 60.39)') AS m"))
+        assert 290_000 < rows[0]["m"] < 320_000
+
+    def test_geom_length_point_is_zero(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("RETURN geom_length('POINT(10 60)') AS m"))
+        assert rows[0]["m"] == 0.0
+
+    def test_geom_convex_hull_list(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("RETURN geom_convex_hull(['POINT(0 0)', 'POINT(1 0)', 'POINT(1 1)', 'POINT(0 1)']) AS h"))
+        assert "POLYGON" in rows[0]["h"]
+
+    def test_geom_union_overlapping(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(
+            g.cypher("RETURN geom_union('POLYGON((0 0,2 0,2 2,0 2,0 0))', 'POLYGON((1 1,3 1,3 3,1 3,1 1))') AS u")
+        )
+        assert "MULTIPOLYGON" in rows[0]["u"]
+
+    def test_geom_intersection_disjoint_returns_empty(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(
+            g.cypher(
+                "RETURN geom_intersection('POLYGON((0 0,1 0,1 1,0 1,0 0))', "
+                "'POLYGON((10 10,11 10,11 11,10 11,10 10))') AS i"
+            )
+        )
+        # Empty MULTIPOLYGON when no intersection
+        assert "MULTIPOLYGON" in rows[0]["i"]
+
+    def test_geom_buffer_returns_multipolygon(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("RETURN geom_buffer('POINT(10.7 59.9)', 1000) AS b"))
+        assert "MULTIPOLYGON" in rows[0]["b"]
+
+    def test_geom_buffer_negative_errors(self):
+        g = kglite.KnowledgeGraph()
+        with pytest.raises((ValueError, RuntimeError), match="negative"):
+            list(g.cypher("RETURN geom_buffer('POINT(0 0)', -10) AS b"))
+
+
+class TestKgKnn:
+    @pytest.fixture
+    def cities(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": ["oslo", "bergen", "tromso", "tokyo"],
+                    "name": ["Oslo", "Bergen", "Tromso", "Tokyo"],
+                    "lat": [59.9, 60.4, 69.6, 35.7],
+                    "lon": [10.7, 5.3, 18.9, 139.7],
+                }
+            ),
+            "City",
+            "id",
+            "name",
+        )
+        g.set_spatial("City", location=("lat", "lon"))
+        return g
+
+    def test_knn_from_bergen(self, cities):
+        rows = list(
+            cities.cypher(
+                "CALL kg_knn({lat: 60.4, lon: 5.3, target_type: 'City', k: 3}) "
+                "YIELD node, distance_m RETURN node.title AS t, distance_m"
+            )
+        )
+        names = [r["t"] for r in rows]
+        assert names[0] == "Bergen"
+        assert names[1] == "Oslo"
+        assert names[2] == "Tromso"
+        assert rows[0]["distance_m"] == 0.0
+        assert 290_000 < rows[1]["distance_m"] < 320_000  # Oslo-Bergen ≈ 305km
+
+    def test_knn_k_limits_results(self, cities):
+        rows = list(
+            cities.cypher(
+                "CALL kg_knn({lat: 60.4, lon: 5.3, target_type: 'City', k: 1}) "
+                "YIELD node, distance_m RETURN node.title AS t"
+            )
+        )
+        assert len(rows) == 1
+        assert rows[0]["t"] == "Bergen"
+
+    def test_knn_missing_lat_errors(self, cities):
+        with pytest.raises((ValueError, RuntimeError), match="missing required parameter"):
+            list(cities.cypher("CALL kg_knn({lon: 5.3, target_type: 'City', k: 3}) YIELD node RETURN node"))

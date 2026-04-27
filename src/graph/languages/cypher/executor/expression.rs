@@ -740,6 +740,42 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
+    /// Resolve a Cypher argument to a [`geo::Geometry`]. Accepts:
+    /// - WKT string literal or property — parsed via the WKT crate
+    /// - Node variable / property access whose spatial config produces a Geometry
+    /// - Point variable / property — converted to a Geometry::Point
+    ///
+    /// Returns `Ok(None)` when the input is null.
+    pub(super) fn geom_arg(
+        &self,
+        expr: &Expression,
+        row: &ResultRow,
+    ) -> Result<Option<geo::Geometry<f64>>, String> {
+        // Try the spatial cache first (handles node/property variables).
+        if let Ok(Some(resolved)) = self.resolve_spatial(expr, row, true) {
+            return match resolved {
+                ResolvedSpatial::Geometry(g, _) => Ok(Some((*g).clone())),
+                ResolvedSpatial::Point(lat, lon) => {
+                    Ok(Some(geo::Geometry::Point(geo::Point::new(lon, lat))))
+                }
+            };
+        }
+        // Otherwise: evaluate the expression and try to parse a WKT string.
+        let val = self.evaluate_expression(expr, row)?;
+        match val {
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(crate::graph::features::spatial::parse_wkt(trimmed)?))
+            }
+            Value::Point { lat, lon } => Ok(Some(geo::Geometry::Point(geo::Point::new(lon, lat)))),
+            Value::Null => Ok(None),
+            _ => Err("expected a WKT string, Point, or spatial node/property".into()),
+        }
+    }
+
     /// Ensure that the per-node spatial cache entry exists for the given NodeIndex.
     /// Populates geometry+bbox, location, named shapes, and named points on first access.
     #[inline]
@@ -1963,6 +1999,110 @@ impl<'a> CypherExecutor<'a> {
                     Value::Point { lon, .. } => Ok(Value::Float64(lon)),
                     _ => Err("longitude() requires a Point argument".into()),
                 }
+            }
+            // ── Geometry primitives (0.8.20) ──────────────────────────
+            "geom_buffer" => {
+                if args.len() != 2 {
+                    return Err("geom_buffer() requires 2 arguments: (geom, meters)".into());
+                }
+                let geom = match self.geom_arg(&args[0], row)? {
+                    Some(g) => g,
+                    None => return Ok(Value::Null),
+                };
+                let meters = crate::graph::core::value_operations::value_to_f64(
+                    &self.evaluate_expression(&args[1], row)?,
+                )
+                .ok_or("geom_buffer(): second argument must be numeric (meters)")?;
+                let result = crate::graph::features::spatial::geometry_buffer(&geom, meters)?;
+                Ok(Value::String(
+                    crate::graph::features::spatial::geometry_to_wkt(&result),
+                ))
+            }
+            "geom_convex_hull" => {
+                if args.is_empty() {
+                    return Err("geom_convex_hull() requires at least 1 argument".into());
+                }
+                let mut geoms: Vec<geo::Geometry<f64>> = Vec::new();
+                // Single list argument: parse list of WKT strings.
+                if args.len() == 1 {
+                    let val = self.evaluate_expression(&args[0], row)?;
+                    if let Value::String(ref s) = val {
+                        if s.starts_with('[') && s.ends_with(']') {
+                            for item in parse_list_value(&val) {
+                                if let Value::String(wkt) = item {
+                                    if let Ok(g) = crate::graph::features::spatial::parse_wkt(&wkt)
+                                    {
+                                        geoms.push(g);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if geoms.is_empty() {
+                    for arg in args {
+                        if let Some(g) = self.geom_arg(arg, row)? {
+                            geoms.push(g);
+                        }
+                    }
+                }
+                if geoms.is_empty() {
+                    return Ok(Value::Null);
+                }
+                let hull = crate::graph::features::spatial::geometries_convex_hull(&geoms)?;
+                Ok(Value::String(
+                    crate::graph::features::spatial::geometry_to_wkt(&hull),
+                ))
+            }
+            "geom_union" | "geom_intersection" | "geom_difference" => {
+                if args.len() != 2 {
+                    return Err(format!("{name}() requires 2 arguments: (g1, g2)"));
+                }
+                let g1 = match self.geom_arg(&args[0], row)? {
+                    Some(g) => g,
+                    None => return Ok(Value::Null),
+                };
+                let g2 = match self.geom_arg(&args[1], row)? {
+                    Some(g) => g,
+                    None => return Ok(Value::Null),
+                };
+                let result = match name {
+                    "geom_union" => crate::graph::features::spatial::geometry_union(&g1, &g2)?,
+                    "geom_intersection" => {
+                        crate::graph::features::spatial::geometry_intersection(&g1, &g2)?
+                    }
+                    "geom_difference" => {
+                        crate::graph::features::spatial::geometry_difference(&g1, &g2)?
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Value::String(
+                    crate::graph::features::spatial::geometry_to_wkt(&result),
+                ))
+            }
+            "geom_is_valid" => {
+                if args.len() != 1 {
+                    return Err("geom_is_valid() requires 1 argument".into());
+                }
+                let geom = match self.geom_arg(&args[0], row)? {
+                    Some(g) => g,
+                    None => return Ok(Value::Null),
+                };
+                Ok(Value::Boolean(
+                    crate::graph::features::spatial::geometry_is_valid(&geom),
+                ))
+            }
+            "geom_length" => {
+                if args.len() != 1 {
+                    return Err("geom_length() requires 1 argument".into());
+                }
+                let geom = match self.geom_arg(&args[0], row)? {
+                    Some(g) => g,
+                    None => return Ok(Value::Null),
+                };
+                Ok(Value::Float64(
+                    crate::graph::features::spatial::geometry_length_m(&geom),
+                ))
             }
             // vector_score(node, embedding_property, query_vector [, metric])
             // Returns the similarity score (f32→f64) for the node's embedding vs query vector.

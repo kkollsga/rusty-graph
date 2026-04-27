@@ -287,6 +287,51 @@ graph.cypher("""
 """)
 ```
 
+### Geometry primitives
+
+Constructive operations on WKT geometries. All accept WKT strings, node variables (auto-resolved via spatial config), or `Point` values; all return WKT strings (or boolean / float as noted).
+
+| Function | Returns | Description |
+|---|---|---|
+| `geom_buffer(geom, meters)` | WKT (MultiPolygon) | Planar buffer at the geometry's centroid latitude (geo crate native; degrades far from the centroid) |
+| `geom_convex_hull(geoms)` | WKT (Polygon) | Convex hull over a list of geometries; also accepts variadic args |
+| `geom_union(g1, g2)` | WKT (MultiPolygon) | Polygonal union; rectangles auto-converted |
+| `geom_intersection(g1, g2)` | WKT (MultiPolygon) | Polygonal intersection (empty MultiPolygon when disjoint) |
+| `geom_difference(g1, g2)` | WKT (MultiPolygon) | `g1 − g2` |
+| `geom_is_valid(geom)` | Boolean | OGC-style validity check |
+| `geom_length(geom)` | Float (m) | Geodesic length: LineString length, polygon perimeter (sum of rings), 0 for points |
+
+```python
+# Buffer a point by 5 km
+graph.cypher("RETURN geom_buffer('POINT(10.7 59.9)', 5000) AS area")
+
+# Hull of all city centroids
+graph.cypher("""
+    MATCH (c:City)
+    WITH collect(c.geometry) AS shapes
+    RETURN geom_convex_hull(shapes) AS catchment
+""")
+
+# Union of overlapping licence areas
+graph.cypher("""
+    MATCH (a:Licence), (b:Licence) WHERE a.id < b.id AND intersects(a, b)
+    RETURN geom_union(a.geometry, b.geometry) AS merged
+""")
+
+# LineString length (perimeter is polygon-only)
+graph.cypher("RETURN geom_length('LINESTRING(10.7 59.9, 5.3 60.4)') AS m")  # ≈ 305000
+```
+
+### k-nearest-neighbour
+
+```cypher
+CALL kg_knn({lat: 60.4, lon: 5.3, target_type: 'City', k: 5})
+YIELD node, distance_m
+RETURN node.title, round(distance_m / 1000.0, 1) AS km
+```
+
+Looks up the *k* nodes of `target_type` closest to `(lat, lon)` (geodesic). Uses the node's `location` config for point comparisons; falls back to geometry centroid when `location` isn't configured. Nodes without spatial config are skipped silently.
+
 ## Temporal Functions
 
 Date-range filtering on nodes and relationships with explicit field names.
