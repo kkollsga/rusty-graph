@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Expression-engine fundamentals (Phase 1 of the completeness round).**
+  The Cypher engine gains the standard scalar/aggregate/list-fold
+  primitives that were missing:
+
+  - `properties(n)` / `properties(r)` — full property map of a node or
+    relationship (returns a JSON-formatted map; works alongside
+    `keys()`).
+  - `start_node(r)` / `end_node(r)` — endpoint access on a bound edge
+    variable. `start_node(r).name` works via the existing dotted
+    property accessor.
+  - `reduce(acc = init, x IN list | body)` — list fold with
+    accumulator. New `Expression::Reduce` AST variant; mirrors
+    openCypher.
+  - `percentile_cont(expr, p)` — continuous percentile via linear
+    interpolation; `p ∈ [0,1]`.
+  - `percentile_disc(expr, p)` — discrete percentile via nearest rank.
+  - `median(expr)` — sugar for `percentile_cont(expr, 0.5)`.
+  - `variance(expr)` / `var_samp(expr)` — sample variance, n-1
+    denominator (matching the existing `std` convention).
+
+  ```cypher
+  MATCH (n:Person)
+  RETURN median(n.age), percentile_cont(n.age, 0.9), variance(n.age)
+
+  MATCH (n:Person) WITH collect(n.age) AS ages
+  RETURN reduce(s = 0, x IN ages | s + x) AS total
+  ```
+
+### Changed
+
+- **Example MCP server simplified to two tools.**
+  `examples/mcp_server.py` now exposes only `graph_overview` and
+  `cypher_query`. The convenience tools (`search`, `find_entity`,
+  `read_source`, `entity_context`, `bug_report`) are removed — every
+  operation is reachable from Cypher via `MATCH (n) WHERE n.title =
+  $text` etc., and the docstring shows the equivalent patterns. Same
+  simplification philosophy as the 0.8.19 rule-procedure refactor:
+  lean on the Cypher surface.
+
 ## [0.8.19] — 2026-04-26
 
 ### Changed

@@ -971,7 +971,8 @@ impl<'a> CypherExecutor<'a> {
             | Expression::WindowFunction { .. }
             | Expression::PredicateExpr(_)
             | Expression::ExprPropertyAccess { .. }
-            | Expression::CountSubquery { .. } => false,
+            | Expression::CountSubquery { .. }
+            | Expression::Reduce { .. } => false,
         }
     }
 

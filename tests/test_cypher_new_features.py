@@ -227,3 +227,141 @@ class TestFormatCsv:
         """FORMAT CSV takes precedence — result is str even with to_df=True."""
         result = graph.cypher("MATCH (n:Person) RETURN n.name FORMAT CSV", to_df=True)
         assert isinstance(result, str)
+
+
+# ── 0.8.20: properties() / start_node() / end_node() ────────────
+
+
+@pytest.fixture
+def stats_graph():
+    g = KnowledgeGraph()
+    people = pd.DataFrame(
+        {
+            "person_id": [1, 2, 3, 4, 5],
+            "name": ["Alice", "Bob", "Carol", "Dan", "Eve"],
+            "age": [10, 20, 30, 40, 50],
+        }
+    )
+    g.add_nodes(people, "Person", "person_id", "name")
+    edges = pd.DataFrame(
+        {
+            "from_id": [1, 2, 3],
+            "to_id": [2, 3, 4],
+            "weight": [1.5, 2.5, 3.5],
+        }
+    )
+    g.add_connections(edges, "KNOWS", "Person", "from_id", "Person", "to_id", columns=["weight"])
+    return g
+
+
+class TestPropertiesFunction:
+    def test_properties_node(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN properties(n) AS p"))
+        assert len(rows) == 1
+        p = rows[0]["p"]
+        assert p["title"] == "Alice"
+        assert p["type"] == "Person"
+        assert p["age"] == 10
+        assert p["id"] == 1
+
+    def test_properties_edge(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (a {name: 'Alice'})-[r:KNOWS]->() RETURN properties(r) AS p"))
+        assert len(rows) == 1
+        p = rows[0]["p"]
+        assert p["type"] == "KNOWS"
+        assert p["weight"] == 1.5
+
+    def test_properties_unbound_returns_null(self, stats_graph):
+        rows = list(stats_graph.cypher("RETURN properties(x) AS p"))
+        assert rows[0]["p"] is None
+
+
+class TestStartEndNode:
+    def test_start_end_node(self, stats_graph):
+        rows = list(
+            stats_graph.cypher("MATCH (a {name: 'Alice'})-[r:KNOWS]->(b) RETURN start_node(r) AS s, end_node(r) AS e")
+        )
+        assert len(rows) == 1
+        assert rows[0]["s"] == "Alice"
+        assert rows[0]["e"] == "Bob"
+
+
+# ── 0.8.20: percentile / median / variance ─────────────────────
+
+
+class TestPercentileAggregates:
+    def test_percentile_cont_median(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN percentile_cont(n.age, 0.5) AS p"))
+        assert rows[0]["p"] == 30.0
+
+    def test_percentile_cont_quartile(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN percentile_cont(n.age, 0.25) AS p"))
+        # On [10,20,30,40,50], p=0.25 → rank=1.0 → values[1] = 20
+        assert rows[0]["p"] == 20.0
+
+    def test_percentile_cont_interp(self, stats_graph):
+        # On [10,20,30,40,50], p=0.1 → rank=0.4 → 10 + (20-10)*0.4 = 14
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN percentile_cont(n.age, 0.1) AS p"))
+        assert abs(rows[0]["p"] - 14.0) < 1e-9
+
+    def test_percentile_disc_median(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN percentile_disc(n.age, 0.5) AS p"))
+        assert rows[0]["p"] == 30.0
+
+    def test_percentile_invalid_p(self, stats_graph):
+        with pytest.raises((ValueError, RuntimeError), match="between 0 and 1"):
+            list(stats_graph.cypher("MATCH (n:Person) RETURN percentile_cont(n.age, 1.5) AS p"))
+
+    def test_median(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN median(n.age) AS m"))
+        assert rows[0]["m"] == 30.0
+
+    def test_median_even_count(self):
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"], "v": [10, 30]}), "T", "id", "name")
+        rows = list(g.cypher("MATCH (n:T) RETURN median(n.v) AS m"))
+        assert rows[0]["m"] == 20.0  # average of 10, 30
+
+    def test_variance(self, stats_graph):
+        # Sample variance of [10,20,30,40,50] with n-1 denominator = 250
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN variance(n.age) AS v"))
+        assert rows[0]["v"] == 250.0
+
+    def test_var_samp_alias(self, stats_graph):
+        rows = list(stats_graph.cypher("MATCH (n:Person) RETURN var_samp(n.age) AS v"))
+        assert rows[0]["v"] == 250.0
+
+
+# ── 0.8.20: reduce ─────────────────────────────────────────────
+
+
+class TestReduce:
+    def test_reduce_sum(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN reduce(s = 0, x IN [1,2,3,4,5] | s + x) AS total"))
+        assert rows[0]["total"] == 15
+
+    def test_reduce_concat(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher('RETURN reduce(s = "", x IN ["a","b","c"] | s + x) AS r'))
+        assert rows[0]["r"] == "abc"
+
+    def test_reduce_empty_list(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN reduce(s = 42, x IN [] | s + x) AS r"))
+        assert rows[0]["r"] == 42
+
+    def test_reduce_in_match(self, stats_graph):
+        rows = list(
+            stats_graph.cypher(
+                "MATCH (n:Person) WITH collect(n.age) AS ages RETURN reduce(s = 0, x IN ages | s + x) AS total"
+            )
+        )
+        assert rows[0]["total"] == 150  # 10+20+30+40+50
+
+    def test_reduce_max(self):
+        g = KnowledgeGraph()
+        rows = list(
+            g.cypher("RETURN reduce(m = 0, x IN [5, 3, 8, 1, 7] | CASE WHEN x > m THEN x ELSE m END) AS max_val")
+        )
+        assert rows[0]["max_val"] == 8

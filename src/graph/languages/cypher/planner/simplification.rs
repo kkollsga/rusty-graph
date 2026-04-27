@@ -641,6 +641,17 @@ impl TextScoreCollector {
                 }
                 Ok(())
             }
+            Expression::Reduce {
+                init,
+                list_expr,
+                body,
+                ..
+            } => {
+                self.rewrite_expr(init, params)?;
+                self.rewrite_expr(list_expr, params)?;
+                self.rewrite_expr(body, params)?;
+                Ok(())
+            }
         }
     }
 

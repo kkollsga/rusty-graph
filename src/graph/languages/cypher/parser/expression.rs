@@ -330,6 +330,13 @@ impl CypherParser {
                             return self.parse_list_quantifier_expr(q);
                         }
                     }
+                    // Check for reduce(acc = init, var IN list | body)
+                    if name.eq_ignore_ascii_case("reduce")
+                        && matches!(self.peek_at(1), Some(CypherToken::Identifier(_)))
+                        && self.peek_at(2) == Some(&CypherToken::Equals)
+                    {
+                        return self.parse_reduce_expr();
+                    }
                     let func_expr = self.parse_function_call(name)?;
                     // Check for property access on function result: func().property
                     if self.check(&CypherToken::Dot) {
@@ -726,6 +733,52 @@ impl CypherParser {
             variable,
             list_expr: Box::new(list_expr),
             filter: Box::new(predicate),
+        })
+    }
+
+    /// Parse `reduce(acc = init, var IN list | body)`.
+    /// The `reduce` identifier has been consumed; LParen is next.
+    pub(super) fn parse_reduce_expr(&mut self) -> Result<Expression, String> {
+        self.expect(&CypherToken::LParen)?;
+
+        // accumulator name
+        let accumulator = match self.advance().cloned() {
+            Some(CypherToken::Identifier(name)) => name,
+            other => {
+                return Err(format!(
+                    "Expected accumulator name after reduce(, got {:?}",
+                    other
+                ))
+            }
+        };
+
+        self.expect(&CypherToken::Equals)?;
+        let init = self.parse_expression()?;
+        self.expect(&CypherToken::Comma)?;
+
+        // iteration variable
+        let variable = match self.advance().cloned() {
+            Some(CypherToken::Identifier(name)) => name,
+            other => {
+                return Err(format!(
+                    "Expected iteration variable in reduce(), got {:?}",
+                    other
+                ))
+            }
+        };
+
+        self.expect(&CypherToken::In)?;
+        let list_expr = self.parse_expression()?;
+        self.expect(&CypherToken::Pipe)?;
+        let body = self.parse_expression()?;
+        self.expect(&CypherToken::RParen)?;
+
+        Ok(Expression::Reduce {
+            accumulator,
+            init: Box::new(init),
+            variable,
+            list_expr: Box::new(list_expr),
+            body: Box::new(body),
         })
     }
 

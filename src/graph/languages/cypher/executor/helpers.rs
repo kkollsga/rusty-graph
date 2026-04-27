@@ -210,6 +210,17 @@ pub(super) fn expression_to_string(expr: &Expression) -> String {
             // Patterns don't render usefully here, so emit the subquery marker.
             "count{...}".to_string()
         }
+        Expression::Reduce {
+            accumulator,
+            variable,
+            list_expr,
+            ..
+        } => format!(
+            "reduce({} = ..., {} IN {} | ...)",
+            accumulator,
+            variable,
+            expression_to_string(list_expr)
+        ),
     }
 }
 

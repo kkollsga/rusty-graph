@@ -578,6 +578,95 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Float64(variance.sqrt()))
                     }
                 }
+                "variance" | "var_samp" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.len() < 2 {
+                        Ok(Value::Null)
+                    } else {
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                            / (values.len() - 1) as f64;
+                        Ok(Value::Float64(var))
+                    }
+                }
+                "median" => {
+                    let mut values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        values
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let n = values.len();
+                        let m = if n % 2 == 1 {
+                            values[n / 2]
+                        } else {
+                            (values[n / 2 - 1] + values[n / 2]) / 2.0
+                        };
+                        Ok(Value::Float64(m))
+                    }
+                }
+                "percentile_cont" => {
+                    if args.len() != 2 {
+                        return Err(
+                            "percentile_cont() requires 2 arguments: percentile_cont(expr, p)"
+                                .into(),
+                        );
+                    }
+                    let mut values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    let dummy = ResultRow::new();
+                    let row = rows.first().copied().unwrap_or(&dummy);
+                    let p = match value_to_f64(&self.evaluate_expression(&args[1], row)?) {
+                        Some(p) if (0.0..=1.0).contains(&p) => p,
+                        Some(_) => {
+                            return Err("percentile_cont(): p must be between 0 and 1".into())
+                        }
+                        None => return Err("percentile_cont(): p must be numeric".into()),
+                    };
+                    if values.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        values
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let n = values.len();
+                        if n == 1 {
+                            return Ok(Value::Float64(values[0]));
+                        }
+                        let rank = p * (n as f64 - 1.0);
+                        let lo = rank.floor() as usize;
+                        let hi = rank.ceil() as usize;
+                        let frac = rank - rank.floor();
+                        let result = values[lo] + (values[hi] - values[lo]) * frac;
+                        Ok(Value::Float64(result))
+                    }
+                }
+                "percentile_disc" => {
+                    if args.len() != 2 {
+                        return Err(
+                            "percentile_disc() requires 2 arguments: percentile_disc(expr, p)"
+                                .into(),
+                        );
+                    }
+                    let mut values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    let dummy = ResultRow::new();
+                    let row = rows.first().copied().unwrap_or(&dummy);
+                    let p = match value_to_f64(&self.evaluate_expression(&args[1], row)?) {
+                        Some(p) if (0.0..=1.0).contains(&p) => p,
+                        Some(_) => {
+                            return Err("percentile_disc(): p must be between 0 and 1".into())
+                        }
+                        None => return Err("percentile_disc(): p must be numeric".into()),
+                    };
+                    if values.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        values
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let n = values.len();
+                        // Nearest-rank method: ceil(p * n), clamped to [1, n]
+                        let idx = ((p * n as f64).ceil() as usize).max(1).min(n) - 1;
+                        Ok(Value::Float64(values[idx]))
+                    }
+                }
                 // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
                 // Evaluate args through aggregate path, then evaluate the function normally.
                 _ => {

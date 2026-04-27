@@ -394,6 +394,16 @@ pub enum Expression {
         list_expr: Box<Expression>,
         filter: Box<Predicate>,
     },
+    /// List fold: `reduce(acc = init, x IN list | body)`. Evaluates body
+    /// once per element with `acc` and `x` bound; returns the final
+    /// accumulator value.
+    Reduce {
+        accumulator: String,
+        init: Box<Expression>,
+        variable: String,
+        list_expr: Box<Expression>,
+        body: Box<Expression>,
+    },
     /// A predicate used in expression position (e.g. `RETURN n.name STARTS WITH 'A'`).
     /// Evaluates to Boolean(true/false) or Null for three-valued logic.
     PredicateExpr(Box<Predicate>),
@@ -669,6 +679,11 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
                     | "collect"
                     | "std"
                     | "stdev"
+                    | "variance"
+                    | "var_samp"
+                    | "median"
+                    | "percentile_cont"
+                    | "percentile_disc"
             ) {
                 return true;
             }

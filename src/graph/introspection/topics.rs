@@ -270,8 +270,9 @@ pub(super) fn write_topic_functions(xml: &mut String) {
     xml.push_str("    <desc>All built-in functions grouped by category.</desc>\n");
     xml.push_str("    <group name=\"math\">abs(x), ceil(x)/ceiling(x), floor(x), round(x [,decimals]), sqrt(x), sign(x), log(x)/ln(x), log10(x), exp(x), pow(x,y), pi(), rand(), toInteger(x)/toInt(x), toFloat(x)</group>\n");
     xml.push_str("    <group name=\"string\">toString(x), toUpper(s), toLower(s), trim(s), lTrim(s), rTrim(s), replace(s,from,to), substring(s,start[,len]), left(s,n), right(s,n), split(s,delim), reverse(s), size(s)</group>\n");
-    xml.push_str("    <group name=\"aggregate\">count(*)/count(expr), sum(expr), avg(expr), min(expr), max(expr), collect(expr), stDev(expr)/std(expr)</group>\n");
-    xml.push_str("    <group name=\"graph\">size(list), length(path), id(node), labels(node), type(rel), coalesce(expr,...) — first non-null, range(start,end[,step]), keys(node)</group>\n");
+    xml.push_str("    <group name=\"aggregate\">count(*)/count(expr), sum(expr), avg(expr), min(expr), max(expr), collect(expr), stDev(expr)/std(expr), variance(expr)/var_samp(expr), median(expr), percentile_cont(expr,p), percentile_disc(expr,p)</group>\n");
+    xml.push_str("    <group name=\"graph\">size(list), length(path), id(node), labels(node), type(rel), coalesce(expr,...) — first non-null, range(start,end[,step]), keys(node), properties(node)/properties(rel) — full property map, start_node(rel)/end_node(rel) — endpoints</group>\n");
+    xml.push_str("    <group name=\"list\">reduce(acc = init, x IN list | body) — fold accumulator over list; any/all/none/single(x IN list WHERE pred); [x IN list WHERE pred | map_expr] — comprehension</group>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
         "      <ex desc=\"round precision\">RETURN round(n.depth / 1000.0, 1) AS depth_km</ex>\n",

@@ -414,6 +414,24 @@ impl<'a> CypherExecutor<'a> {
                 };
                 Ok(Value::Boolean(result))
             }
+            Expression::Reduce {
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                body,
+            } => {
+                let mut acc = self.evaluate_expression(init, row)?;
+                let list_val = self.evaluate_expression(list_expr, row)?;
+                let items = parse_list_value(&list_val);
+                for item in items {
+                    let mut temp_row = row.clone();
+                    temp_row.projected.insert(accumulator.clone(), acc.clone());
+                    temp_row.projected.insert(variable.clone(), item);
+                    acc = self.evaluate_expression(body, &temp_row)?;
+                }
+                Ok(acc)
+            }
             Expression::WindowFunction { .. } => {
                 // Window functions are evaluated in a separate pass (apply_window_functions),
                 // not per-row. If we reach here, the value should already be in projected bindings.
@@ -1262,6 +1280,84 @@ impl<'a> CypherExecutor<'a> {
                     let val = self.evaluate_expression(arg, row)?;
                     if !matches!(val, Value::Null) {
                         return Ok(val);
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "properties" => {
+                // properties(n) / properties(r) → JSON-formatted property map
+                if args.len() != 1 {
+                    return Err("properties() requires 1 argument: a node or relationship".into());
+                }
+                if let Expression::Variable(var) = &args[0] {
+                    if let Some(&idx) = row.node_bindings.get(var.as_str()) {
+                        if let Some(node) = self.graph.graph.node_weight(idx) {
+                            let mut props: Vec<String> = Vec::new();
+                            for &builtin in &["id", "title", "type"] {
+                                let val = resolve_node_property(node, builtin, self.graph);
+                                if !matches!(val, Value::Null) {
+                                    props.push(format!(
+                                        "{}: {}",
+                                        format_value_json(&Value::String(builtin.to_string())),
+                                        format_value_json(&val)
+                                    ));
+                                }
+                            }
+                            for key in node.property_keys(&self.graph.interner) {
+                                let val = resolve_node_property(node, key, self.graph);
+                                props.push(format!(
+                                    "{}: {}",
+                                    format_value_json(&Value::String(key.to_string())),
+                                    format_value_json(&val)
+                                ));
+                            }
+                            return Ok(Value::String(format!("{{{}}}", props.join(", "))));
+                        }
+                    }
+                    if let Some(edge) = row.edge_bindings.get(var.as_str()) {
+                        if let Some(edge_data) = {
+                            let g = &self.graph.graph;
+                            g.edge_weight(edge.edge_index)
+                        } {
+                            let mut props: Vec<String> = Vec::new();
+                            props.push(format!(
+                                "{}: {}",
+                                format_value_json(&Value::String("type".to_string())),
+                                format_value_json(&Value::String(
+                                    edge_data
+                                        .connection_type_str(&self.graph.interner)
+                                        .to_string()
+                                ))
+                            ));
+                            for key in edge_data.property_keys(&self.graph.interner) {
+                                if let Some(val) = edge_data.get_property(key) {
+                                    props.push(format!(
+                                        "{}: {}",
+                                        format_value_json(&Value::String(key.to_string())),
+                                        format_value_json(val)
+                                    ));
+                                }
+                            }
+                            return Ok(Value::String(format!("{{{}}}", props.join(", "))));
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "start_node" | "startnode" => {
+                // start_node(r) → source node of the bound relationship
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(edge) = row.edge_bindings.get(var.as_str()) {
+                        return Ok(Value::NodeRef(edge.source.index() as u32));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "end_node" | "endnode" => {
+                // end_node(r) → target node of the bound relationship
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(edge) = row.edge_bindings.get(var.as_str()) {
+                        return Ok(Value::NodeRef(edge.target.index() as u32));
                     }
                 }
                 Ok(Value::Null)

@@ -77,6 +77,24 @@ graph.cypher("MATCH (n:Person) RETURN DISTINCT n.city")
 graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
 ```
 
+| Aggregate | Description |
+|---|---|
+| `count(expr)` / `count(*)` / `count(DISTINCT expr)` | Row or value count |
+| `sum(expr)` | Numeric sum (preserves Int64 when source is integer) |
+| `avg(expr)` / `mean(expr)` / `average(expr)` | Arithmetic mean |
+| `min(expr)` / `max(expr)` | Minimum / maximum |
+| `collect(expr)` / `collect(DISTINCT expr)` | Gather values into a list |
+| `std(expr)` / `stdev(expr)` | Sample standard deviation (n-1) |
+| `variance(expr)` / `var_samp(expr)` | Sample variance (n-1) |
+| `median(expr)` | Median value |
+| `percentile_cont(expr, p)` | Continuous percentile (linear interpolation), `p ∈ [0,1]` |
+| `percentile_disc(expr, p)` | Discrete percentile (nearest rank), `p ∈ [0,1]` |
+
+```python
+graph.cypher("MATCH (n:Person) RETURN median(n.age), percentile_cont(n.age, 0.9)")
+graph.cypher("MATCH (n:Person) RETURN variance(n.age), std(n.age)")
+```
+
 ## HAVING
 
 Post-aggregation filter — use after RETURN or WITH with aggregates:
@@ -159,6 +177,9 @@ graph.cypher("""
 | `id(n)` | Node ID |
 | `labels(n)` | Node type (string, not list — single-label) |
 | `keys(n)` / `keys(r)` | Property names of a node or relationship (as JSON list) |
+| `properties(n)` / `properties(r)` | Full property map of a node or relationship (as JSON map) |
+| `start_node(r)` | Source node of a bound relationship; supports dotted access: `start_node(r).name` |
+| `end_node(r)` | Target node of a bound relationship; supports dotted access: `end_node(r).name` |
 | `date(str)` / `datetime(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
 | `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
@@ -446,6 +467,31 @@ graph.cypher("RETURN single(x IN [1, 2, 3] WHERE x = 2) AS has_one_two")  # true
 ```
 
 Works in WHERE, RETURN, and WITH clauses.
+
+## Reduce (List Fold)
+
+`reduce(acc = init, x IN list | body)` — fold a list with an accumulator. The body is evaluated once per element with `acc` and `x` bound; the final accumulator value is returned.
+
+```python
+# Sum
+graph.cypher("RETURN reduce(s = 0, x IN [1, 2, 3, 4, 5] | s + x) AS total")  # 15
+
+# Concat
+graph.cypher('RETURN reduce(s = "", x IN ["a", "b", "c"] | s + x) AS r')  # "abc"
+
+# Max via CASE
+graph.cypher("""
+    RETURN reduce(m = 0, x IN [5, 3, 8, 1, 7] |
+        CASE WHEN x > m THEN x ELSE m END
+    ) AS max_val
+""")  # 8
+
+# Pair with collect()
+graph.cypher("""
+    MATCH (n:Person) WITH collect(n.age) AS ages
+    RETURN reduce(s = 0, x IN ages | s + x) AS total
+""")
+```
 
 ## List Slicing
 

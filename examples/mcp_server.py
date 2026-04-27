@@ -8,18 +8,23 @@ or any other KGLite graph.
 Tools:
     graph_overview  — progressive schema disclosure (types, connections, Cypher ref)
     cypher_query    — run any Cypher query (up to 15 rows inline, FORMAT CSV for full export)
-    search          — name-based node lookup (requires global label index)
-    bug_report      — file a timestamped Cypher bug report
 
-Code graph tools (auto-enabled when the graph has Function/Class nodes):
-    find_entity     — search code entities by name
-    read_source     — resolve entities to source file locations
-    entity_context  — get neighborhood of a code entity
+Everything else — name lookup, code-entity navigation, structural
+validators — is callable from Cypher itself. Agents discover the
+surface via graph_overview(cypher=True). Examples:
 
-Structural validators are exposed natively as Cypher procedures —
-agents invoke them via cypher_query, no separate tool needed.
-See describe(cypher=True) for the full procedure list, or for
-example: CALL orphan_node({type: 'X'}) YIELD node RETURN node.
+    # Name lookup (formerly `search`)
+    MATCH (n) WHERE n.title = $text RETURN n LIMIT 10
+
+    # Code entity navigation (formerly `find_entity` / `read_source`)
+    MATCH (f:Function) WHERE f.qualified_name = $name
+    RETURN f.file_path, f.line_number, f.end_line, f.signature
+
+    # Entity neighborhood (formerly `entity_context`)
+    MATCH (f {qualified_name: $name})-[r]-(other) RETURN type(r), other
+
+    # Structural validators
+    CALL orphan_node({type: 'X'}) YIELD node RETURN node
 
 Usage:
     python mcp_server.py --graph legal_graph.kgl
@@ -186,110 +191,6 @@ def cypher_query(query: str, timeout_ms: int | None = None) -> str:
         return header + ":\n" + "\n".join(rows)
     except Exception as e:
         return f"Cypher error: {e}"
-
-
-@mcp.tool()
-def search(text: str, property: str = "label", limit: int = 10) -> str:
-    """Find nodes whose `property` (default 'label') matches `text`.
-
-    Tries exact match first, then prefix match. Returns up to `limit`
-    hits with type, title, and id. Requires a global index — the graph
-    author runs `graph.create_global_index('label')` once to build it.
-
-    Use this when you have a human-readable name (e.g. 'Equinor',
-    'Viking Age') but don't know which node type it belongs to. Skips
-    the "guess the type" ceremony that MATCH (n:Type {...}) requires."""
-    try:
-        hits = graph.search(text, property=property, limit=limit)
-        if not hits:
-            return (
-                f"No nodes matching '{text}' on property '{property}'. "
-                "If this is unexpected, confirm a global index exists: "
-                "graph.create_global_index('{property}')."
-            )
-        lines = [f"{len(hits)} hit(s):"]
-        for h in hits:
-            lines.append(f"  [{h['type']}] {h['title']}  id={h['id_value']}  (node={h['id']})")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Search error: {e}"
-
-
-@mcp.tool()
-def bug_report(query: str, result: str, expected: str, description: str) -> str:
-    """File a Cypher bug report to reported_bugs.md."""
-    try:
-        return graph.bug_report(query, result, expected, description)
-    except Exception as e:
-        return f"Error: {e}"
-
-
-# -- Code graph tools (auto-enabled for code_tree graphs) ------------------
-
-CODE_TYPES = {"Function", "Class", "Struct", "Enum", "Module", "File"}
-has_code = bool(CODE_TYPES & set(schema.get("node_types", {}).keys()))
-
-if has_code:
-
-    @mcp.tool()
-    def find_entity(
-        name: str,
-        node_type: str | None = None,
-        match_type: str | None = None,
-    ) -> str:
-        """Search code entities by name. Returns qualified_name, file_path, line.
-
-        match_type: 'exact' (default), 'contains', or 'starts_with'."""
-        try:
-            results = graph.find(name, node_type=node_type, match_type=match_type)
-            if not results:
-                return f"No entities matching '{name}'."
-            lines = [f"{len(results)} match(es):"]
-            for r in results:
-                qn = r.get("qualified_name", r.get("id", "?"))
-                lines.append(f"  {r.get('type', '?')}: {qn}  ({r.get('file_path', '?')}:{r.get('line_number', '?')})")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: {e}"
-
-    @mcp.tool()
-    def read_source(names: list[str], node_type: str | None = None) -> str:
-        """Resolve code entity names to source file locations.
-        Returns file_path, line range, and signature."""
-        try:
-            results = graph.source(names, node_type=node_type)
-            lines = []
-            for r in results:
-                if r.get("error"):
-                    lines.append(f"{r.get('name', '?')}: {r['error']}")
-                elif r.get("ambiguous"):
-                    lines.append(f"{r.get('name', '?')}: ambiguous — use find_entity to disambiguate")
-                else:
-                    sig = f"  {r['signature']}" if r.get("signature") else ""
-                    lines.append(f"{r.get('type', '?')}: {r.get('qualified_name', '?')}")
-                    lines.append(
-                        f"  {r.get('file_path', '?')}:{r.get('line_number', '?')}-{r.get('end_line', '?')}{sig}"
-                    )
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: {e}"
-
-    @mcp.tool()
-    def entity_context(name: str, node_type: str | None = None, hops: int = 1) -> str:
-        """Get all relationships of a code entity (calls, callers, methods, types).
-        Set hops > 1 for multi-hop expansion."""
-        try:
-            import json
-
-            ctx = graph.context(name, node_type=node_type, hops=hops)
-            if ctx.get("error"):
-                return ctx["error"]
-            if ctx.get("ambiguous"):
-                matches = ctx.get("matches", [])
-                return f"Ambiguous: {len(matches)} matches. Use a qualified_name."
-            return json.dumps(ctx, indent=2, default=str)
-        except Exception as e:
-            return f"Error: {e}"
 
 
 # -- Main ------------------------------------------------------------------
