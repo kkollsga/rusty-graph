@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **macOS x86_64 wheels.** `x86_64-apple-darwin` is no longer built or
+  published to PyPI. Apple Silicon (`aarch64-apple-darwin`) remains. Intel
+  Mac users on existing installs are unaffected; new installs will need to
+  build from source.
+
 ## [0.8.25] — 2026-04-27
 
 ### Fixed

@@ -15,7 +15,7 @@ Use **Cypher** for querying, mutations, and semantic search. Use the **fluent AP
 | Single-label nodes | Each node has exactly one type |
 | Fluent bulk loading | Import DataFrames with `add_nodes()` / `add_connections()` |
 
-**Requirements:** Python 3.10+ (CPython) | macOS (ARM/Intel), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
+**Requirements:** Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
 
 ```bash
 pip install kglite

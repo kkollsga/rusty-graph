@@ -321,7 +321,7 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**:
 
 ## Requirements
 
-Python 3.10+ (CPython) | macOS (ARM/Intel), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
+Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
 
 ## License
 
