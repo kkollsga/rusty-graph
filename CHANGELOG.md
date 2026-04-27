@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.23] — 2026-04-27
+
+C++ macro-aware parsing, Go method return-type fix, and receiver attribution
+across Go and Rust. Cross-library validation: testify signature-fallback
+49% → 0%, KGLite self-graph USES_TYPE edges 2078 → 3197 (+54%), spdlog
+macro names eliminated from top return-type list.
+
 ### Added
 
 - **`ParameterKind::Receiver`** — Go method receivers (`(c *Call)`) and Rust
