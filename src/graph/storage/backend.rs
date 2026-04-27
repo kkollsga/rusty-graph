@@ -55,12 +55,6 @@ impl GraphBackend {
         GraphBackend::Memory(MemoryGraph::new())
     }
 
-    #[inline]
-    #[allow(dead_code)]
-    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
-        GraphBackend::Memory(MemoryGraph::with_capacity(nodes, edges))
-    }
-
     /// Borrow the inner heap `StableDiGraph` for petgraph algorithms
     /// (e.g. `kosaraju_scc`) that require concrete petgraph types.
     /// Disk panics — callers must gate on [`GraphRead::is_disk`].

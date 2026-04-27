@@ -128,7 +128,6 @@ pub struct PatternMatch {
 #[derive(Debug, Clone)]
 pub enum MatchBinding {
     Node {
-        #[allow(dead_code)]
         index: NodeIndex,
         node_type: String,
         title: String,

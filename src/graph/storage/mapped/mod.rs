@@ -5,6 +5,5 @@
 //! subdir owns the mmap primitives (`mmap_vec`) and the mmap-backed
 //! column store used by the mapped backend.
 
-#[allow(dead_code)]
 pub mod column_store;
 pub mod mmap_vec;

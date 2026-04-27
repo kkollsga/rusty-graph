@@ -28,19 +28,12 @@ pub struct BatchMetrics {
 
 // Node Processing
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
         title: Option<Value>, // Changed to Option to indicate if title should be updated
         properties: HashMap<String, Value>,
         conflict_mode: ConflictHandling, // Added conflict mode
-    },
-    Create {
-        node_type: String,
-        id: Value,
-        title: Value,
-        properties: HashMap<String, Value>,
     },
     /// Create with pre-interned property keys (avoids re-interning per row)
     CreateInterned {
@@ -74,14 +67,6 @@ fn sum_values(existing: &Value, new: &Value) -> Value {
 }
 
 #[derive(Debug)]
-struct NodeCreation {
-    node_type: String,
-    id: Value,
-    title: Value,
-    properties: HashMap<String, Value>,
-}
-
-#[derive(Debug)]
 struct NodeCreationInterned {
     node_type: String,
     id: Value,
@@ -112,7 +97,6 @@ impl BatchStats {
 
 #[derive(Debug)]
 pub struct BatchProcessor {
-    creates: Vec<NodeCreation>,
     creates_interned: Vec<NodeCreationInterned>,
     updates: Vec<NodeUpdate>,
     capacity: usize,
@@ -130,7 +114,6 @@ impl BatchProcessor {
         };
 
         BatchProcessor {
-            creates: Vec::with_capacity(capacity),
             creates_interned: Vec::with_capacity(capacity),
             updates: Vec::with_capacity(capacity),
             capacity,
@@ -142,19 +125,6 @@ impl BatchProcessor {
 
     pub fn add_action(&mut self, action: NodeAction, graph: &mut DirGraph) -> Result<(), String> {
         match action {
-            NodeAction::Create {
-                node_type,
-                id,
-                title,
-                properties,
-            } => {
-                self.creates.push(NodeCreation {
-                    node_type,
-                    id,
-                    title,
-                    properties,
-                });
-            }
             NodeAction::CreateInterned {
                 node_type,
                 id,
@@ -185,7 +155,7 @@ impl BatchProcessor {
 
         // For large batches, flush if we hit capacity
         if let BatchType::Large = self.batch_type {
-            if self.creates.len() + self.creates_interned.len() >= self.capacity {
+            if self.creates_interned.len() >= self.capacity {
                 let stats = self.flush_chunk(graph)?;
                 self.accumulated_stats.combine(&stats); // Accumulate stats from intermediate flushes
             }
@@ -211,12 +181,10 @@ impl BatchProcessor {
             HashMap::new();
 
         if mapped {
-            // Collect affected node types from both create queues
             let affected_types: HashSet<String> = self
-                .creates
+                .creates_interned
                 .iter()
                 .map(|c| c.node_type.clone())
-                .chain(self.creates_interned.iter().map(|c| c.node_type.clone()))
                 .collect();
 
             // For each affected type: detach existing nodes and extract the store
@@ -239,128 +207,6 @@ impl BatchProcessor {
                     owned_stores.insert(node_type.clone(), store);
                 }
             }
-        }
-
-        // Process creates in current chunk
-        for creation in self.creates.drain(..) {
-            let id_for_index = creation.id.clone();
-            let node_type_for_index = creation.node_type.clone();
-
-            let mut node_data = if mapped {
-                // Mapped mode: create node with Map properties, then push to ColumnStore
-                NodeData::new(
-                    creation.id,
-                    creation.title,
-                    creation.node_type.clone(),
-                    creation.properties,
-                    &mut graph.interner,
-                )
-            } else {
-                // Default mode: use compact storage if a TypeSchema exists
-                let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
-                if let Some(ref ts) = schema {
-                    NodeData::new_compact(
-                        creation.id,
-                        creation.title,
-                        creation.node_type.clone(),
-                        creation.properties,
-                        &mut graph.interner,
-                        ts,
-                    )
-                } else {
-                    NodeData::new(
-                        creation.id,
-                        creation.title,
-                        creation.node_type.clone(),
-                        creation.properties,
-                        &mut graph.interner,
-                    )
-                }
-            };
-
-            // Mapped mode: push properties into owned ColumnStore (pass 1)
-            let mapped_row_id = if mapped {
-                let interned_props = node_data
-                    .properties
-                    .drain_to_interned_pairs(&graph.interner);
-                let keys: Vec<_> = interned_props.iter().map(|(k, _)| *k).collect();
-                graph.ensure_type_schema_keys(&creation.node_type, &keys);
-                // Get or create owned store (not behind Arc)
-                let store = owned_stores
-                    .entry(creation.node_type.clone())
-                    .or_insert_with(|| {
-                        let schema = graph
-                            .type_schemas
-                            .get(&creation.node_type)
-                            .cloned()
-                            .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
-                        let meta = graph
-                            .node_type_metadata
-                            .get(&creation.node_type)
-                            .cloned()
-                            .unwrap_or_default();
-                        crate::graph::storage::column_store::ColumnStore::new(
-                            schema,
-                            &meta,
-                            &graph.interner,
-                        )
-                    });
-                // Extend columns if schema grew
-                let current_schema = graph.type_schemas.get(&creation.node_type).cloned();
-                if let Some(ref cs) = current_schema {
-                    if store.schema().len() < cs.len() {
-                        // Schema grew — need to rebuild store with new schema
-                        let meta = graph
-                            .node_type_metadata
-                            .get(&creation.node_type)
-                            .cloned()
-                            .unwrap_or_default();
-                        let old_store = std::mem::replace(
-                            store,
-                            crate::graph::storage::column_store::ColumnStore::new(
-                                cs.clone(),
-                                &meta,
-                                &graph.interner,
-                            ),
-                        );
-                        for rid in 0..old_store.row_count() {
-                            // Always push id/title — use Null as fallback to keep
-                            // columns in sync with row_count
-                            store.push_id(&old_store.get_id(rid).unwrap_or(Value::Null));
-                            store.push_title(&old_store.get_title(rid).unwrap_or(Value::Null));
-                            let props = old_store.row_properties(rid);
-                            store.push_row(&props);
-                        }
-                    }
-                }
-                store.push_id(&node_data.id);
-                store.push_title(&node_data.title);
-                let row_id = store.push_row(&interned_props);
-                node_data.id = Value::Null;
-                node_data.title = Value::Null;
-                node_data.properties = PropertyStorage::Map(HashMap::new());
-                Some(row_id)
-            } else {
-                None
-            };
-
-            let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
-
-            if let Some(row_id) = mapped_row_id {
-                deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
-            }
-
-            graph
-                .type_indices
-                .entry(creation.node_type)
-                .or_default()
-                .push(node_idx);
-            graph
-                .id_indices
-                .entry(node_type_for_index)
-                .or_default()
-                .insert(id_for_index, node_idx);
-            stats.creates += 1;
         }
 
         // Process pre-interned creates (fast path — no string interning needed)
@@ -638,7 +484,7 @@ impl BatchProcessor {
         // Update metrics
         self.metrics.processing_time += start.elapsed().as_secs_f64();
         self.metrics.batch_count += 1;
-        self.metrics.memory_used = self.creates.capacity() + self.updates.capacity();
+        self.metrics.memory_used = self.creates_interned.capacity() + self.updates.capacity();
 
         Ok(stats)
     }
@@ -655,10 +501,7 @@ impl BatchProcessor {
             }
             BatchType::Large => {
                 // Process any remaining items
-                if !self.creates.is_empty()
-                    || !self.creates_interned.is_empty()
-                    || !self.updates.is_empty()
-                {
+                if !self.creates_interned.is_empty() || !self.updates.is_empty() {
                     let stats = self.flush_chunk(graph)?;
                     total_stats.combine(&stats);
                 }

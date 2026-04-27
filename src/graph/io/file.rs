@@ -58,10 +58,6 @@ const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
 const CURRENT_CORE_DATA_VERSION: u32 = 1;
 
-/// File format version exposed for tests and diagnostics.
-#[allow(dead_code)]
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
-
 /// Column section metadata for v3 format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct V3ColumnSection {

@@ -22,11 +22,6 @@ use indexmap::IndexMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub struct BuildOptions {
-    #[allow(dead_code)]
-    pub verbose: bool,
-}
-
 pub struct BuildReport {
     pub nodes_by_type: BTreeMap<String, usize>,
     pub edges_by_type: BTreeMap<String, usize>,
@@ -38,7 +33,6 @@ pub fn build(
     graph: &mut DirGraph,
     blueprint: Blueprint,
     blueprint_dir: &Path,
-    opts: &BuildOptions,
 ) -> Result<BuildReport, String> {
     let root = blueprint
         .settings
@@ -113,7 +107,6 @@ pub fn build(
         &root,
         &csv_cache,
         &mut report,
-        opts,
         "core nodes",
     )?;
     if profile {
@@ -126,7 +119,6 @@ pub fn build(
         &root,
         &csv_cache,
         &mut report,
-        opts,
         "sub-nodes",
     )?;
     if profile {
@@ -149,14 +141,14 @@ pub fn build(
     // Phase 4: FK edges
     let all_specs: Vec<&FlatSpec> = core_specs.iter().chain(sub_specs.iter()).collect();
     let t = std::time::Instant::now();
-    load_fk_edges(graph, &all_specs, &root, &csv_cache, &mut report, opts)?;
+    load_fk_edges(graph, &all_specs, &root, &csv_cache, &mut report)?;
     if profile {
         eprintln!("  load_fk_edges: {} ms", t.elapsed().as_millis());
     }
 
     // Phase 5: junction edges
     let t = std::time::Instant::now();
-    load_junction_edges(graph, &all_specs, &root, &csv_cache, &mut report, opts)?;
+    load_junction_edges(graph, &all_specs, &root, &csv_cache, &mut report)?;
     if profile {
         eprintln!("  load_junction_edges: {} ms", t.elapsed().as_millis());
         eprintln!("  TOTAL build: {} ms", t0.elapsed().as_millis());
@@ -570,7 +562,6 @@ fn load_node_specs(
     root: &Path,
     cache: &CsvCache,
     report: &mut BuildReport,
-    _opts: &BuildOptions,
     _phase_name: &str,
 ) -> Result<(), String> {
     use rayon::prelude::*;
@@ -841,7 +832,6 @@ fn load_fk_edges(
     root: &Path,
     cache: &CsvCache,
     report: &mut BuildReport,
-    _opts: &BuildOptions,
 ) -> Result<(), String> {
     use rayon::prelude::*;
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
@@ -1083,7 +1073,6 @@ fn load_junction_edges(
     root: &Path,
     cache: &CsvCache,
     report: &mut BuildReport,
-    _opts: &BuildOptions,
 ) -> Result<(), String> {
     use rayon::prelude::*;
 

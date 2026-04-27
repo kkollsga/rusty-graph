@@ -982,7 +982,6 @@ impl<'a> CypherExecutor<'a> {
                                             pa.variable.clone(),
                                             crate::graph::languages::cypher::result::PathBinding {
                                                 source: eb.source,
-                                                target: eb.target,
                                                 hops: 1,
                                                 path: vec![(eb.target, conn_type)],
                                             },
@@ -1163,7 +1162,6 @@ impl<'a> CypherExecutor<'a> {
                         path_assignment.variable.clone(),
                         PathBinding {
                             source: source_idx,
-                            target: target_idx,
                             hops: path_result.cost,
                             path: path_nodes,
                         },
@@ -1188,6 +1186,7 @@ pub mod helpers;
 pub mod match_clause;
 pub mod return_clause;
 pub mod rule_procedures;
+pub mod scalar_functions;
 pub mod spatial_join;
 #[cfg(test)]
 pub mod tests;

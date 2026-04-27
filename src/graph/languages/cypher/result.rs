@@ -35,7 +35,6 @@ impl<V> Bindings<V> {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
-    #[allow(dead_code)]
     pub fn get_mut(&mut self, key: &str) -> Option<&mut V> {
         self.entries
             .iter_mut()
@@ -52,7 +51,6 @@ impl<V> Bindings<V> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn contains_key(&self, key: &str) -> bool {
         self.entries.iter().any(|(k, _)| k == key)
     }
@@ -141,12 +139,8 @@ pub struct EdgeBinding {
 /// Variable-length path binding
 #[derive(Debug, Clone)]
 pub struct PathBinding {
-    #[allow(dead_code)]
     pub source: NodeIndex,
-    #[allow(dead_code)]
-    pub target: NodeIndex,
     pub hops: usize,
-    #[allow(dead_code)]
     pub path: Vec<(NodeIndex, String)>,
 }
 

@@ -43,14 +43,10 @@ Before starting any performance-related code changes:
 - **All `#[pymethods] impl` blocks live under `src/graph/pyapi/`.** Private `impl KnowledgeGraph` helpers stay in `src/graph/mod.rs` (pub(crate) when called from pyapi). The `#[pyclass]` *struct attribute* may stay with the struct definition where the data model lives — this applies to `KnowledgeGraph` itself (in `src/graph/mod.rs`) and `ResultView` (in `src/graph/languages/cypher/result_view.rs` / `pyapi/result_view.rs`). The rule is about where PyO3 *method implementations* live, not struct declarations.
 - Value conversion: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
 
-## Storage-backend work (0.8.0 refactor)
-
-Live architecture doc: `ARCHITECTURE.md` at repo root. Full refactor
-plan + per-phase report-outs + findings: `dev-documentation/` (gitignored
-— repo-checkout only).
+## Storage-backend work
 
 - **Reads go on `GraphRead`, mutations on `GraphWrite: GraphRead`.** Add new storage ops to the trait first, not as inherent `GraphBackend` methods. Both traits live in `src/graph/storage/mod.rs`.
-- **Transactions stay on `DirGraph`.** OCC `version`, `read_only`, `schema_locked`, and validation helpers are not trait surface — see ARCHITECTURE.md.
+- **Transactions stay on `DirGraph`.** OCC `version`, `read_only`, `schema_locked`, and validation helpers are not trait surface — they're DirGraph-inherent.
 - **No shims / no `#[deprecated]`.** Obsoleted code gets deleted in the same PR as its replacement. Clean break for 0.8.0.
 - **`&impl GraphRead` / `&mut impl GraphWrite` everywhere.** Phase 3 added GATs to every iterator-returning method on `GraphRead`, which makes the trait non-object-safe. `&dyn GraphRead` does not compile; use `&impl GraphRead` (monomorphised) for every consumer. Iterator-returning methods must declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
 - **Parity oracles**: `tests/test_storage_parity.py`, `tests/test_phase1_parity.py`, `tests/test_phase2_parity.py`, `tests/test_phase3_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.

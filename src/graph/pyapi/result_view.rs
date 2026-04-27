@@ -18,31 +18,12 @@ use crate::graph::languages::cypher::result::{
 };
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::storage::GraphRead;
-use petgraph::Direction;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-
-/// A single connection summary for display: connection type, target type, id, title.
-#[derive(Clone)]
-#[allow(dead_code)]
-struct ConnectionSummary {
-    connection_type: String,
-    target_type: String,
-    target_id: String,
-    target_title: String,
-    outgoing: bool, // true = this node → target, false = target → this node
-}
-
-/// Connection summaries for a single node.
-#[derive(Clone, Default)]
-#[allow(dead_code)]
-struct NodeConnections {
-    connections: Vec<ConnectionSummary>,
-}
 
 /// Lazy result container — data stays in Rust until you access it.
 ///
@@ -100,8 +81,6 @@ pub struct ResultView {
     stats: Option<MutationStats>,
     profile: Option<Vec<ClauseStats>>,
     diagnostics: Option<QueryDiagnostics>,
-    /// Per-row connection summaries (only populated for node-based results).
-    node_connections: Option<Vec<NodeConnections>>,
     /// When `Some`, `rows` is empty and reads route through `lazy`. The
     /// executor flagged the RETURN as `lazy_eligible` and the receiver
     /// hands cells back row-by-row from `pending`.
@@ -132,7 +111,6 @@ impl ResultView {
             stats,
             profile,
             diagnostics,
-            node_connections: None,
             lazy: None,
         }
     }
@@ -146,7 +124,6 @@ impl ResultView {
             stats: result.stats,
             profile: result.profile,
             diagnostics: result.diagnostics,
-            node_connections: None,
             lazy: None,
         }
     }
@@ -167,7 +144,6 @@ impl ResultView {
                 stats: result.stats,
                 profile: result.profile,
                 diagnostics: result.diagnostics,
-                node_connections: None,
                 lazy: Some(LazyRows {
                     pending: lazy_desc.pending_rows,
                     return_items: lazy_desc.return_items,
@@ -212,7 +188,6 @@ impl ResultView {
             stats: None,
             profile: None,
             diagnostics: None,
-            node_connections: None,
             lazy: None,
         }
     }
@@ -239,10 +214,7 @@ impl ResultView {
     pub fn from_nodes_with_graph(
         graph: &DirGraph,
         node_indices: &[petgraph::graph::NodeIndex],
-        temporal_context: &crate::graph::TemporalContext,
     ) -> Self {
-        use crate::datatypes::values::format_value;
-
         let nodes_vec: Vec<&NodeData> = node_indices
             .iter()
             .filter_map(|&idx| graph.get_node(idx))
@@ -296,112 +268,12 @@ impl ResultView {
             })
             .collect();
 
-        // Resolve temporal context to a concrete ref_date or range for edge filtering
-        use crate::graph::TemporalContext;
-        let is_all = matches!(temporal_context, TemporalContext::All);
-        let ref_date = match temporal_context {
-            TemporalContext::Today => Some(chrono::Local::now().date_naive()),
-            TemporalContext::At(d) => Some(*d),
-            _ => None,
-        };
-        let range_dates = match temporal_context {
-            TemporalContext::During(s, e) => Some((*s, *e)),
-            _ => None,
-        };
-
-        // Cap connections per node for display purposes
-        const MAX_CONNS_PER_NODE: usize = 50;
-
-        // Inline helper: check if edge passes temporal filter.
-        let edge_temporal_ok = |edge_data: &crate::graph::schema::EdgeData| -> bool {
-            if is_all {
-                return true;
-            }
-            let ct_str = edge_data.connection_type_str(&graph.interner);
-            if let Some(configs) = graph.temporal_edge_configs.get(ct_str) {
-                if let Some(d) = &ref_date {
-                    return crate::graph::features::temporal::is_temporally_valid_multi(
-                        &edge_data.properties,
-                        configs,
-                        d,
-                    );
-                }
-                if let Some((s, e)) = &range_dates {
-                    return crate::graph::features::temporal::overlaps_range_multi(
-                        &edge_data.properties,
-                        configs,
-                        s,
-                        e,
-                    );
-                }
-            }
-            true
-        };
-
-        // Gather connection summaries per node, filtering temporal connections
-        let g = &graph.graph;
-        let node_connections: Vec<NodeConnections> = node_indices
-            .iter()
-            .map(|&idx| {
-                let mut conns = Vec::with_capacity(16);
-
-                // Outgoing: this node → target
-                for edge in g.edges_directed(idx, Direction::Outgoing) {
-                    if conns.len() >= MAX_CONNS_PER_NODE {
-                        break;
-                    }
-                    if !edge_temporal_ok(edge.weight()) {
-                        continue;
-                    }
-                    let target_idx = edge.target();
-                    if let Some(target) = graph.get_node(target_idx) {
-                        conns.push(ConnectionSummary {
-                            connection_type: edge
-                                .weight()
-                                .connection_type_str(&graph.interner)
-                                .to_string(),
-                            target_type: target.node_type_str(&graph.interner).to_string(),
-                            target_id: format_value(&target.id),
-                            target_title: format_value(&target.title),
-                            outgoing: true,
-                        });
-                    }
-                }
-
-                // Incoming: source → this node
-                for edge in g.edges_directed(idx, Direction::Incoming) {
-                    if conns.len() >= MAX_CONNS_PER_NODE {
-                        break;
-                    }
-                    if !edge_temporal_ok(edge.weight()) {
-                        continue;
-                    }
-                    let source_idx = edge.source();
-                    if let Some(source) = graph.get_node(source_idx) {
-                        conns.push(ConnectionSummary {
-                            connection_type: edge
-                                .weight()
-                                .connection_type_str(&graph.interner)
-                                .to_string(),
-                            target_type: source.node_type_str(&graph.interner).to_string(),
-                            target_id: format_value(&source.id),
-                            target_title: format_value(&source.title),
-                            outgoing: false,
-                        });
-                    }
-                }
-
-                NodeConnections { connections: conns }
-            })
-            .collect();
-
         ResultView {
             columns,
             rows,
             stats: None,
             profile: None,
             diagnostics: None,
-            node_connections: Some(node_connections),
             lazy: None,
         }
     }
@@ -612,7 +484,6 @@ impl ResultView {
                     stats: None,
                     profile: None,
                     diagnostics: None,
-                    node_connections: None,
                     lazy: None,
                 },
             )
@@ -761,7 +632,6 @@ impl ResultView {
             stats: None,
             profile: None,
             diagnostics: None,
-            node_connections: self.node_connections.as_ref().map(|nc| nc[..take].to_vec()),
             lazy: None,
         }
     }
@@ -789,10 +659,6 @@ impl ResultView {
             stats: None,
             profile: None,
             diagnostics: None,
-            node_connections: self
-                .node_connections
-                .as_ref()
-                .map(|nc| nc[start..].to_vec()),
             lazy: None,
         }
     }
@@ -1063,74 +929,4 @@ fn truncate_middle(s: &str, max_len: usize) -> String {
     }
     let keep = (max_len - 5) / 2; // 5 chars for " ... "
     format!("{} ... {}", &s[..keep], &s[s.len() - keep..])
-}
-
-#[allow(dead_code)]
-fn format_result_view_multiline(
-    columns: &[String],
-    rows: &[Vec<PreProcessedValue>],
-    node_connections: Option<&[NodeConnections]>,
-) -> String {
-    if rows.is_empty() {
-        return "(empty result)".to_string();
-    }
-
-    // Find the widest column name for alignment
-    let key_width = columns.iter().map(|c| c.len()).max().unwrap_or(0);
-
-    let mut buf = String::with_capacity(rows.len() * 300);
-
-    for (i, row) in rows.iter().enumerate() {
-        if i > 0 {
-            buf.push('\n');
-        }
-
-        // Properties
-        for (j, val) in row.iter().enumerate() {
-            if j < columns.len() {
-                let s = format_preprocessed_value(val);
-                let display = truncate_middle(&s, 80);
-                buf.push_str(&format!(
-                    "  {:width$}  {}\n",
-                    columns[j],
-                    display,
-                    width = key_width
-                ));
-            }
-        }
-
-        // Connection summaries
-        if let Some(all_conns) = node_connections {
-            if let Some(nc) = all_conns.get(i) {
-                if !nc.connections.is_empty() {
-                    buf.push_str(&format!("  {:width$}\n", "───", width = key_width + 4));
-                    for c in &nc.connections {
-                        if c.outgoing {
-                            buf.push_str(&format!(
-                                "  {:width$}  ◆ --{}--> {}({}, {})\n",
-                                "",
-                                c.connection_type,
-                                c.target_type,
-                                c.target_id,
-                                c.target_title,
-                                width = key_width,
-                            ));
-                        } else {
-                            buf.push_str(&format!(
-                                "  {:width$}  {}({}, {}) --{}--> ◆\n",
-                                "",
-                                c.target_type,
-                                c.target_id,
-                                c.target_title,
-                                c.connection_type,
-                                width = key_width,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    buf
 }

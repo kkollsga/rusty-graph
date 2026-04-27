@@ -8,5 +8,5 @@ pub mod geometry;
 pub mod schema;
 pub mod timeseries;
 
-pub use build::{build, BuildOptions};
+pub use build::build;
 pub use schema::load_blueprint_file;

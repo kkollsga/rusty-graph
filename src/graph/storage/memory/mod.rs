@@ -6,5 +6,4 @@
 //! both `MemoryGraph` and `MappedGraph` (they share the columnar
 //! internals today; the struct types diverge in the trait layer).
 
-pub mod build_column_store;
 pub mod property_log;

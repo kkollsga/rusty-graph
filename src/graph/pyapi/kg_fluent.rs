@@ -661,7 +661,6 @@ impl KnowledgeGraph {
         let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
             &self.inner,
             &node_indices,
-            &self.temporal_context,
         );
         Python::attach(|py| Py::new(py, view).map(|v| v.into_any()))
     }

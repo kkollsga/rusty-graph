@@ -55,6 +55,13 @@ pub enum PropRange {
     StringBloomPlaceholder,
 }
 
+// Manifest query methods (`PropRange::numeric` / `expand_with` /
+// `might_contain_numeric`, plus `SegmentSummary::find_indexed_range` and the
+// `SegmentManifest::candidates_for_*` helpers below) are kept under
+// `#[allow(dead_code)]` because the manifest is built and persisted on every
+// disk save but no executor path consults it yet — they form the API surface
+// for a future segment-pruning optimiser pass.
+#[allow(dead_code)]
 impl PropRange {
     /// New numeric range covering a single observed value. Future calls
     /// to `expand_with` widen the min/max.
@@ -147,6 +154,7 @@ impl SegmentSummary {
 
     /// Find the range summary for `(node_type, prop)` if present.
     /// Linear scan; per-segment list is small.
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn find_indexed_range(&self, node_type_hash: u64, prop_hash: u64) -> Option<&PropRange> {
         self.indexed_prop_ranges
             .iter()
@@ -156,6 +164,7 @@ impl SegmentSummary {
 
     /// True if this segment's [lo, hi) range covers the given node id.
     #[inline]
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn covers_node(&self, node_id: u32) -> bool {
         node_id >= self.node_id_lo && node_id < self.node_id_hi
     }
@@ -163,12 +172,14 @@ impl SegmentSummary {
     /// True if this segment has at least one edge of the given type.
     /// Used by the planner to prune typed-edge matches.
     #[inline]
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn has_conn_type(&self, conn_type_hash: u64) -> bool {
         self.conn_types.contains(&conn_type_hash)
     }
 
     /// True if this segment has at least one node of the given type.
     #[inline]
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn has_node_type(&self, node_type_hash: u64) -> bool {
         self.node_type_counts.contains_key(&node_type_hash)
     }
@@ -177,6 +188,7 @@ impl SegmentSummary {
     /// `prop == value`? Conservative: returns `true` when the index
     /// covers no data for this (type, prop) pair (meaning we can't
     /// rule the segment out).
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn might_match_numeric_prop(
         &self,
         node_type_hash: u64,
@@ -214,6 +226,7 @@ impl SegmentManifest {
     }
 
     /// Number of segments.
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn len(&self) -> usize {
         self.segments.len()
     }
@@ -236,12 +249,14 @@ impl SegmentManifest {
     /// Borrow a segment by position in the manifest. Prefer this over
     /// searching by `segment_id` on the hot path — the planner
     /// iterates in manifest order.
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn get(&self, index: usize) -> Option<&SegmentSummary> {
         self.segments.get(index)
     }
 
     /// Iterate segments that *might* contain nodes in [lo, hi).
     /// Inclusive-exclusive. Returned in manifest order.
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn candidates_for_node_range<'a>(
         &'a self,
         lo: u32,
@@ -254,6 +269,7 @@ impl SegmentManifest {
     }
 
     /// Iterate segments that *might* contain edges of `conn_type`.
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn candidates_for_conn_type<'a>(
         &'a self,
         conn_type_hash: u64,
@@ -264,6 +280,7 @@ impl SegmentManifest {
     }
 
     /// Iterate segments that *might* contain nodes of `node_type`.
+    #[allow(dead_code)] // Future segment-pruning optimiser; see PropRange comment above.
     pub fn candidates_for_node_type<'a>(
         &'a self,
         node_type_hash: u64,

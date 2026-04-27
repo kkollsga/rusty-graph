@@ -40,10 +40,7 @@ impl<'a> CypherExecutor<'a> {
                     );
                 }
                 MatchBinding::VariableLengthPath {
-                    source,
-                    target,
-                    hops,
-                    path,
+                    source, hops, path, ..
                 } => {
                     let string_path: Vec<(petgraph::graph::NodeIndex, String)> = path
                         .iter()
@@ -53,7 +50,6 @@ impl<'a> CypherExecutor<'a> {
                         var,
                         PathBinding {
                             source,
-                            target,
                             hops,
                             path: string_path,
                         },
@@ -88,10 +84,7 @@ impl<'a> CypherExecutor<'a> {
                     );
                 }
                 MatchBinding::VariableLengthPath {
-                    source,
-                    target,
-                    hops,
-                    path,
+                    source, hops, path, ..
                 } => {
                     let string_path: Vec<(petgraph::graph::NodeIndex, String)> = path
                         .iter()
@@ -101,7 +94,6 @@ impl<'a> CypherExecutor<'a> {
                         var.clone(),
                         PathBinding {
                             source: *source,
-                            target: *target,
                             hops: *hops,
                             path: string_path,
                         },
@@ -136,7 +128,6 @@ impl<'a> CypherExecutor<'a> {
             return None;
         }
         let source_idx = row.node_bindings.get(node_vars[0])?;
-        let target_idx = row.node_bindings.get(node_vars[node_vars.len() - 1])?;
 
         // Build full path: for each edge, record the target node and edge type
         let mut path = Vec::with_capacity(edge_types.len());
@@ -147,7 +138,6 @@ impl<'a> CypherExecutor<'a> {
 
         Some(PathBinding {
             source: *source_idx,
-            target: *target_idx,
             hops: edge_types.len(),
             path,
         })

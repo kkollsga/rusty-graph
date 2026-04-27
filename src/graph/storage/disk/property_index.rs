@@ -169,7 +169,7 @@ fn read_meta(path: &Path) -> std::io::Result<(usize, usize)> {
 
 impl PropertyIndex {
     /// Number of indexed `(key, node_id)` entries.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Test-only.
     pub fn len(&self) -> usize {
         self.count
     }
@@ -344,27 +344,12 @@ impl PropertyIndex {
         }))
     }
 
-    /// Delete the on-disk files for this index. Used when a
-    /// `drop_index` is routed to disk.
+    /// Delete the on-disk files for this index. Used in tests covering
+    /// `drop_index` for the disk path.
+    #[allow(dead_code)] // Test-only.
     pub fn remove_files(data_dir: &Path, node_type: &str, property: &str) -> std::io::Result<()> {
         let paths = file_paths(data_dir, node_type, property);
-        Self::remove_files_at(&paths.0, &paths.1, &paths.2, &paths.3)
-    }
-
-    /// Delete the on-disk files for a cross-type global index.
-    #[allow(dead_code)]
-    pub fn remove_global_files(data_dir: &Path, property: &str) -> std::io::Result<()> {
-        let paths = global_file_paths(data_dir, property);
-        Self::remove_files_at(&paths.0, &paths.1, &paths.2, &paths.3)
-    }
-
-    fn remove_files_at(
-        meta_path: &Path,
-        keys_path: &Path,
-        offsets_path: &Path,
-        ids_path: &Path,
-    ) -> std::io::Result<()> {
-        for p in [meta_path, keys_path, offsets_path, ids_path] {
+        for p in [&paths.0, &paths.1, &paths.2, &paths.3] {
             if p.exists() {
                 fs::remove_file(p)?;
             }

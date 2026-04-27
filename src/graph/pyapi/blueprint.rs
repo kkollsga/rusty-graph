@@ -75,8 +75,7 @@ pub fn from_blueprint_rust(
                     .parent()
                     .unwrap_or_else(|| Path::new("."))
                     .to_path_buf();
-                let opts = blueprint::BuildOptions { verbose };
-                let report = blueprint::build(&mut graph, blueprint, &bp_dir, &opts)?;
+                let report = blueprint::build(&mut graph, blueprint, &bp_dir)?;
 
                 if verbose {
                     let n_total: usize = report.nodes_by_type.values().sum();

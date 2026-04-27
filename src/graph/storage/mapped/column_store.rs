@@ -99,29 +99,6 @@ pub struct MmapColumnStore {
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 impl MmapColumnStore {
-    /// Create an empty store with no columns. Caller should set fields directly
-    /// or use a builder before calling read methods.
-    pub fn new(mmap: Arc<MmapMut>, row_count: u32) -> Self {
-        MmapColumnStore {
-            mmap,
-            row_count,
-            id_is_string: false,
-            id_fixed: None,
-            id_str: None,
-            title: StrColumnMeta {
-                data: Region::EMPTY,
-                offsets: Region::EMPTY,
-                nulls: Region::EMPTY,
-            },
-            col_map: HashMap::new(),
-            fixed_cols: Vec::new(),
-            str_cols: Vec::new(),
-            overflow_offsets: Region::EMPTY,
-            overflow_data: Region::EMPTY,
-            has_overflow: false,
-        }
-    }
-
     /// Number of rows in this type.
     #[inline]
     pub fn row_count(&self) -> u32 {
@@ -195,7 +172,6 @@ impl MmapColumnStore {
 
 // ─── Public accessors ────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 impl MmapColumnStore {
     /// Read the node ID for a given row.
     pub fn get_id(&self, row_id: u32) -> Option<Value> {
@@ -362,7 +338,6 @@ impl MmapColumnStore {
 // Type tags: 0=Null, 1=Int64(8B), 2=Float64(8B), 3=UniqueId(4B),
 //            4=Bool(1B), 5=Date(4B i32), 6=String(u32 len + bytes)
 
-#[allow(dead_code)]
 impl MmapColumnStore {
     /// Look up a single property in the overflow bag for a given row.
     pub fn get_overflow_property(&self, row_id: u32, key: InternedKey) -> Option<Value> {

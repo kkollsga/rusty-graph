@@ -428,7 +428,6 @@ impl DirGraph {
     /// Look up a node by type and ID value without building index.
     /// Use this for read-only access when index already exists.
     /// Handles type normalization for integer types.
-    #[allow(dead_code)]
     pub fn lookup_by_id_readonly(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         self.lookup_by_id_normalized(node_type, id)
     }
@@ -469,18 +468,6 @@ impl DirGraph {
             }
         }
         None
-    }
-
-    /// Invalidate the ID index for a node type (call when nodes are added/removed)
-    #[allow(dead_code)]
-    pub fn invalidate_id_index(&mut self, node_type: &str) {
-        self.id_indices.remove(node_type);
-    }
-
-    /// Clear all ID indices (call after bulk operations)
-    #[allow(dead_code)]
-    pub fn clear_id_indices(&mut self) {
-        self.id_indices.clear();
     }
 
     /// Set the schema definition for this graph
@@ -624,12 +611,6 @@ impl DirGraph {
     /// Get metadata for a node type (property names → type strings).
     pub fn get_node_type_metadata(&self, node_type: &str) -> Option<&HashMap<String, String>> {
         self.node_type_metadata.get(node_type)
-    }
-
-    /// Get metadata for a connection type.
-    #[allow(dead_code)]
-    pub fn get_connection_type_info(&self, conn_type: &str) -> Option<&ConnectionTypeInfo> {
-        self.connection_type_metadata.get(conn_type)
     }
 
     /// Upsert node type metadata — merges new property types into existing.
@@ -846,13 +827,6 @@ impl DirGraph {
     pub fn drop_range_index(&mut self, node_type: &str, property: &str) -> bool {
         let key = (node_type.to_string(), property.to_string());
         self.range_indices.remove(&key).is_some()
-    }
-
-    /// Check if a range index exists.
-    #[allow(dead_code)]
-    pub fn has_range_index(&self, node_type: &str, property: &str) -> bool {
-        let key = (node_type.to_string(), property.to_string());
-        self.range_indices.contains_key(&key)
     }
 
     /// Range lookup: returns node indices where property value falls in the given range.
@@ -1268,7 +1242,6 @@ impl DirGraph {
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
     /// Called after deserialization to convert the transient Map storage to dense slot-vec.
     /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
-    #[allow(dead_code)]
     pub fn compact_properties(&mut self) {
         // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
@@ -1704,44 +1677,6 @@ impl DirGraph {
                 .map_err(|e| format!("Failed to write timeseries: {}", e))?;
         }
 
-        Ok(())
-    }
-
-    /// Temporarily convert Disk backend to InMemory for serialization.
-    /// Rebuilds a StableDiGraph from the DiskGraph's nodes and CSR edges.
-    #[allow(dead_code)]
-    pub fn rebuild_for_save(&mut self) -> Result<(), String> {
-        let node_bound = self.graph.node_bound();
-        let edge_count = self.graph.edge_count();
-        let node_count = self.graph.node_count();
-
-        let mut g = StableDiGraph::with_capacity(node_count, edge_count);
-
-        // Re-add nodes in index order, preserving NodeIndex values
-        let mut index_map = HashMap::with_capacity(node_count);
-        for i in 0..node_bound {
-            let idx = NodeIndex::new(i);
-            if let Some(node) = self.graph.node_weight(idx) {
-                let new_idx = g.add_node(node.clone());
-                index_map.insert(idx, new_idx);
-            }
-        }
-
-        // Re-add edges with remapped indices
-        for edge_ref in self.graph.edge_references() {
-            if let (Some(&new_src), Some(&new_tgt)) = (
-                index_map.get(&edge_ref.source()),
-                index_map.get(&edge_ref.target()),
-            ) {
-                let edge_data = EdgeData {
-                    connection_type: edge_ref.weight().connection_type,
-                    properties: edge_ref.weight().properties.clone(),
-                };
-                g.add_edge(new_src, new_tgt, edge_data);
-            }
-        }
-
-        self.graph = GraphBackend::Memory(MemoryGraph(g));
         Ok(())
     }
 

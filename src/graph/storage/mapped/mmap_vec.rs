@@ -48,7 +48,6 @@ pub enum MmapOrVec<T: Copy + Default + 'static> {
     },
 }
 
-#[allow(dead_code)]
 impl<T: Copy + Default + 'static> MmapOrVec<T> {
     /// Create a new heap-backed buffer.
     pub fn new() -> Self {
@@ -175,34 +174,6 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             mmap,
             len,
             capacity,
-            file,
-            path: path.to_path_buf(),
-            _phantom: std::marker::PhantomData,
-        })
-    }
-
-    /// Load a region of an existing file as a mapped buffer.
-    /// `offset` is the byte offset into the file, `len` is the number of elements.
-    /// The mmap covers only the region [offset..offset + len * sizeof(T)].
-    pub fn load_mapped_region(path: &Path, offset: usize, len: usize) -> io::Result<Self> {
-        if len == 0 {
-            return Ok(MmapOrVec::new());
-        }
-        let elem_size = std::mem::size_of::<T>();
-        let byte_len = len * elem_size;
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        // SAFETY: caller guarantees `offset + len*size_of::<T>() ≤ file size`
-        // (documented on the public method); see module invariants.
-        let mmap = unsafe {
-            MmapOptions::new()
-                .offset(offset as u64)
-                .len(byte_len)
-                .map_mut(&file)?
-        };
-        Ok(MmapOrVec::Mapped {
-            mmap,
-            len,
-            capacity: len,
             file,
             path: path.to_path_buf(),
             _phantom: std::marker::PhantomData,
@@ -342,14 +313,6 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         }
     }
 
-    /// Get a slice of the data (heap only). Returns None for mapped.
-    pub fn as_slice(&self) -> Option<&[T]> {
-        match self {
-            MmapOrVec::Heap { data } => Some(data.as_slice()),
-            MmapOrVec::Mapped { .. } => None,
-        }
-    }
-
     /// Get a mutable slice of the data. Works for both Heap and Mapped variants.
     ///
     /// SAFETY: For `Mapped`, the returned slice aliases the mmap's backing
@@ -364,23 +327,6 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             MmapOrVec::Mapped { mmap, len, .. } => unsafe {
                 std::slice::from_raw_parts_mut(mmap.as_mut_ptr() as *mut T, *len)
             },
-        }
-    }
-
-    /// Get a mutable byte-level view of the backing storage.
-    /// Works for both Heap and Mapped variants.
-    /// Useful for bulk byte operations (memset, copy_from_slice) during build.
-    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
-        match self {
-            // SAFETY: Vec<T> layout is contiguous; `T: Copy` has no drop
-            // glue; reinterpreting the backing store as u8 is well-defined.
-            MmapOrVec::Heap { data } => unsafe {
-                std::slice::from_raw_parts_mut(
-                    data.as_mut_ptr() as *mut u8,
-                    data.len() * std::mem::size_of::<T>(),
-                )
-            },
-            MmapOrVec::Mapped { mmap, len, .. } => &mut mmap[..*len * std::mem::size_of::<T>()],
         }
     }
 
@@ -431,6 +377,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     }
 
     /// Convert from Mapped back to Heap. No-op if already heap.
+    #[allow(dead_code)] // Test-only chain (TypedColumn::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
         if matches!(self, MmapOrVec::Heap { .. }) {
             return;
@@ -456,14 +403,6 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         match self {
             MmapOrVec::Heap { data } => data.len() * std::mem::size_of::<T>(),
             MmapOrVec::Mapped { .. } => 0,
-        }
-    }
-
-    /// Flush mmap to disk (no-op for heap).
-    pub fn flush(&self) -> io::Result<()> {
-        match self {
-            MmapOrVec::Heap { .. } => Ok(()),
-            MmapOrVec::Mapped { mmap, .. } => mmap.flush(),
         }
     }
 
@@ -620,15 +559,9 @@ pub enum MmapBytes {
     },
 }
 
-#[allow(dead_code)]
 impl MmapBytes {
     pub fn new() -> Self {
         MmapBytes::Heap { data: Vec::new() }
-    }
-
-    /// Create a heap-backed byte buffer from an existing Vec.
-    pub fn from_vec(data: Vec<u8>) -> Self {
-        MmapBytes::Heap { data }
     }
 
     pub fn mapped(path: &Path, initial_cap: usize) -> io::Result<Self> {
@@ -676,10 +609,6 @@ impl MmapBytes {
             MmapBytes::Heap { data } => data.len(),
             MmapBytes::Mapped { len, .. } => *len,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Append bytes, return the start offset.
@@ -754,6 +683,7 @@ impl MmapBytes {
         Ok(())
     }
 
+    #[allow(dead_code)] // Test-only chain (TypedColumn::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
         if matches!(self, MmapBytes::Heap { .. }) {
             return;
@@ -778,13 +708,6 @@ impl MmapBytes {
         }
     }
 
-    pub fn flush(&self) -> io::Result<()> {
-        match self {
-            MmapBytes::Heap { .. } => Ok(()),
-            MmapBytes::Mapped { mmap, .. } => mmap.flush(),
-        }
-    }
-
     /// Return the raw bytes.
     pub fn as_raw_bytes(&self) -> &[u8] {
         match self {
@@ -798,6 +721,7 @@ impl MmapBytes {
         writer.write_all(self.as_raw_bytes())
     }
 
+    #[allow(dead_code)] // Test-only.
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
         match self {
             MmapBytes::Heap { data } => std::fs::write(path, data),

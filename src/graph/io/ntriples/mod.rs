@@ -12,28 +12,32 @@
 //! - [`parser`] — triple AST (Subject/Predicate/Object/EdgeBuffer), line
 //!   parser, XSD literal → Value coercion, language filters.
 //! - [`writer`] — edge-creation dispatch (compact, strings, qnum map).
-//! - [`loader`] — `load_ntriples` entry point + columnar build pipeline +
-//!   metadata structs + `flush_entity`.
+//! - [`loader`] — `load_ntriples` entry point + per-entity flush.
+//! - [`column_builder`] — direct-write columnar build pipeline +
+//!   `ColumnTypeMeta` (saved to disk for mmap reload).
 
 use std::collections::{HashMap, HashSet};
 
+pub mod column_builder;
 pub mod label_spill;
 pub mod loader;
 pub mod parallel_bz2;
 pub mod parser;
 pub mod writer;
 
-pub use loader::{load_ntriples, ColumnTypeMeta};
+pub use column_builder::ColumnTypeMeta;
+pub use loader::load_ntriples;
 
 /// Per-counter value carried by [`ProgressEvent`]. Pure Rust — the
 /// pyapi layer maps this into Python types when (and only when)
 /// adapting a Python callback into a [`ProgressSink`]. `F64` and
 /// `Str` are reserved for sub-step labels emitted from Phase 1b / 2 / 3
 /// once those phases get internal progress reporting.
-#[allow(dead_code)]
 pub enum ProgressValue<'a> {
     U64(u64),
+    #[allow(dead_code)] // Reserved for sub-step labels in Phase 1b/2/3.
     F64(f64),
+    #[allow(dead_code)] // Reserved for sub-step labels in Phase 1b/2/3.
     Str(&'a str),
 }
 

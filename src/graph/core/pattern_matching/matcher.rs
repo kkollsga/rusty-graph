@@ -109,21 +109,6 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
-    /// Lightweight executor for Cypher: skips cloning node properties/title/id
-    /// since the Cypher executor only uses `index` from MatchBinding::Node.
-    #[allow(dead_code)]
-    pub fn new_lightweight(graph: &'a DirGraph, max_matches: Option<usize>) -> Self {
-        PatternExecutor {
-            graph,
-            max_matches,
-            pre_bindings: &EMPTY_BINDINGS,
-            lightweight: true,
-            params: &EMPTY_PARAMS,
-            deadline: None,
-            distinct_target_var: None,
-        }
-    }
-
     /// Lightweight executor with query parameters for resolving $param in inline properties
     pub fn new_lightweight_with_params(
         graph: &'a DirGraph,
@@ -136,23 +121,6 @@ impl<'a> PatternExecutor<'a> {
             pre_bindings: &EMPTY_BINDINGS,
             lightweight: true,
             params,
-            deadline: None,
-            distinct_target_var: None,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn with_bindings(
-        graph: &'a DirGraph,
-        max_matches: Option<usize>,
-        pre_bindings: &'a Bindings<NodeIndex>,
-    ) -> Self {
-        PatternExecutor {
-            graph,
-            max_matches,
-            pre_bindings,
-            lightweight: true,
-            params: &EMPTY_PARAMS,
             deadline: None,
             distinct_target_var: None,
         }

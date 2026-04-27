@@ -142,15 +142,6 @@ impl EdgePropertyStore {
         Self::default()
     }
 
-    /// Preallocate overlay capacity. Overlay is the HashMap that grows
-    /// with mutations, so this is a hint for workloads with known churn.
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            base: None,
-            overlay: HashMap::with_capacity(cap),
-        }
-    }
-
     /// Construct from a pre-populated HashMap. Used when migrating a
     /// legacy format=0 graph — the caller bincode-deserializes the old
     /// blob and passes it here.

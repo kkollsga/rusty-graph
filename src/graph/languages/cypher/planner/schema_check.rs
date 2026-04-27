@@ -35,7 +35,7 @@ pub enum SchemaErrorKind {
 
 #[derive(Debug, Clone)]
 pub struct SchemaError {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Test-only.
     pub kind: SchemaErrorKind,
     pub message: String,
 }

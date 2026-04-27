@@ -208,6 +208,8 @@ pub(super) fn parse_line(line: &str) -> Option<(Subject<'_>, Predicate<'_>, Obje
     if bytes.get(pred_end + 1) != Some(&b' ') {
         return None;
     }
+    // SAFETY: `bytes` originates from an N-Triples line read as UTF-8;
+    // valid byte ranges within it remain valid UTF-8.
     let pred_uri = unsafe { std::str::from_utf8_unchecked(&bytes[pred_start + 1..pred_end]) };
     let predicate = if let Some(pcode) = pred_uri.strip_prefix(WD_PROP_DIRECT) {
         if pcode.starts_with('P') {

@@ -8,7 +8,6 @@
 pub mod calculations;
 pub mod data_retrieval;
 pub mod filtering;
-#[allow(dead_code)]
 pub mod iterators;
 pub mod pattern_matching;
 pub mod statistics;

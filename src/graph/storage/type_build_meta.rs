@@ -18,7 +18,6 @@ pub enum ColType {
     Str,
 }
 
-#[allow(dead_code)]
 impl ColType {
     /// Bytes per value for fixed-width types. None for Str.
     pub fn value_size(&self) -> Option<usize> {

@@ -96,37 +96,6 @@ impl TypeSchema {
     }
 }
 
-/// Helper enum for returning one of two iterator types without boxing.
-#[allow(dead_code)]
-pub(crate) enum Either<L, R> {
-    Left(L),
-    Right(R),
-}
-
-impl<L, R, T> Iterator for Either<L, R>
-where
-    L: Iterator<Item = T>,
-    R: Iterator<Item = T>,
-{
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<T> {
-        match self {
-            Either::Left(l) => l.next(),
-            Either::Right(r) => r.next(),
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Either::Left(l) => l.size_hint(),
-            Either::Right(r) => r.size_hint(),
-        }
-    }
-}
-
 /// Compact property storage for nodes.
 /// - `Map`: transient during deserialization (before compaction).
 /// - `Compact`: steady state with a shared `TypeSchema` and dense `Vec<Value>`.
@@ -827,21 +796,6 @@ impl TypeIdIndex {
         }
     }
 
-    /// Check if the index contains a given ID.
-    #[allow(dead_code)]
-    pub fn contains_key(&self, id: &Value) -> bool {
-        self.get(id).is_some()
-    }
-
-    /// Number of entries.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        match self {
-            TypeIdIndex::Integer(map) => map.len(),
-            TypeIdIndex::General(map) => map.len(),
-        }
-    }
-
     /// Iterate over all (Value, NodeIndex) pairs.
     pub fn iter(&self) -> Box<dyn Iterator<Item = (Value, NodeIndex)> + '_> {
         match self {
@@ -1064,13 +1018,6 @@ impl CowSelection {
         CowSelection {
             inner: Arc::new(CurrentSelection::new()),
         }
-    }
-
-    /// Check if we have exclusive ownership (no cloning needed for mutation).
-    #[inline]
-    #[allow(dead_code)]
-    pub fn is_unique(&self) -> bool {
-        Arc::strong_count(&self.inner) == 1
     }
 }
 
@@ -1456,7 +1403,6 @@ impl NodeData {
     /// Returns true if the node has the given property key.
     /// Uses hash-based lookup — no interner needed.
     #[inline]
-    #[allow(dead_code)]
     pub fn has_property(&self, key: &str) -> bool {
         self.properties.contains(InternedKey::from_str(key))
     }
@@ -1653,18 +1599,6 @@ impl EdgeData {
             .iter()
             .map(|(k, v)| (interner.resolve(*k).to_string(), v.clone()))
             .collect()
-    }
-
-    /// Insert or update an edge property, interning the key.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn set_property(&mut self, key: &str, value: Value, interner: &mut StringInterner) {
-        let interned = interner.get_or_intern(key);
-        if let Some((_, v)) = self.properties.iter_mut().find(|(k, _)| *k == interned) {
-            *v = value;
-        } else {
-            self.properties.push((interned, value));
-        }
     }
 }
 

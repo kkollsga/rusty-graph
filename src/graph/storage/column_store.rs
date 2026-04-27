@@ -432,14 +432,7 @@ impl TypedColumn {
         let _ = self.push(&Value::Null);
     }
 
-    /// Whether this column can be mmap'd (all non-Mixed types can).
-    #[allow(dead_code)]
-    pub fn can_mmap(&self) -> bool {
-        !matches!(self, TypedColumn::Mixed { .. })
-    }
-
     /// Whether this column's data is currently file-backed.
-    #[allow(dead_code)]
     pub fn is_mapped(&self) -> bool {
         match self {
             TypedColumn::Int64 { data, .. } => data.is_mapped(),
@@ -471,7 +464,6 @@ impl TypedColumn {
 
     /// Materialize this column's data to file-backed mmap.
     /// `base_path` is the directory; files are named `{col_name}.{ext}`.
-    #[allow(dead_code)]
     pub fn materialize_to_file(&mut self, base_dir: &Path, col_name: &str) -> io::Result<()> {
         match self {
             TypedColumn::Int64 { data, nulls } => {
@@ -511,7 +503,7 @@ impl TypedColumn {
     }
 
     /// Convert this column back to heap-backed storage.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Test-only chain (ColumnStore::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
         match self {
             TypedColumn::Int64 { data, nulls } => {
@@ -591,7 +583,6 @@ impl TypedColumn {
     }
 
     /// Return the type tag string for serialization.
-    #[allow(dead_code)]
     pub fn type_tag(&self) -> &'static str {
         match self {
             TypedColumn::Int64 { .. } => "int64",
@@ -647,7 +638,6 @@ impl Clone for ColumnStore {
     }
 }
 
-#[allow(dead_code)]
 impl ColumnStore {
     /// Create a new ColumnStore from a TypeSchema and type metadata.
     /// `type_meta` maps property name → type string (e.g., "int64", "string").
@@ -678,17 +668,17 @@ impl ColumnStore {
         }
     }
 
-    /// Create a ColumnStore from pre-built columns (for direct-write Phase 1b).
-    pub fn from_raw_columns(
-        schema: Arc<TypeSchema>,
-        columns: Vec<TypedColumn>,
-        row_count: u32,
-    ) -> Self {
+    /// Create a ColumnStore from an existing schema with all Mixed columns (for unknown types).
+    #[allow(dead_code)] // Test-only.
+    pub fn new_mixed(schema: Arc<TypeSchema>) -> Self {
+        let columns = (0..schema.len())
+            .map(|_| TypedColumn::Mixed { data: Vec::new() })
+            .collect();
         ColumnStore {
             schema,
             columns,
-            row_count,
-            tombstones: vec![false; row_count as usize],
+            row_count: 0,
+            tombstones: Vec::new(),
             id_column: None,
             title_column: None,
             overflow_offsets: None,
@@ -714,42 +704,6 @@ impl ColumnStore {
             overflow_data: None,
             mmap_store: Some(mmap_store),
         }
-    }
-
-    /// Create a ColumnStore from an existing schema with all Mixed columns (for unknown types).
-    pub fn new_mixed(schema: Arc<TypeSchema>) -> Self {
-        let columns = (0..schema.len())
-            .map(|_| TypedColumn::Mixed { data: Vec::new() })
-            .collect();
-        ColumnStore {
-            schema,
-            columns,
-            row_count: 0,
-            tombstones: Vec::new(),
-            id_column: None,
-            title_column: None,
-            overflow_offsets: None,
-            overflow_data: None,
-            mmap_store: None,
-        }
-    }
-
-    // ─── Setters for BuildColumnStore conversion ─────────────────────────
-
-    /// Replace the id column with a pre-built TypedColumn.
-    pub fn set_id_column(&mut self, col: TypedColumn) {
-        self.id_column = Some(col);
-    }
-
-    /// Replace the title column with a pre-built TypedColumn.
-    pub fn set_title_column(&mut self, col: TypedColumn) {
-        self.title_column = Some(col);
-    }
-
-    /// Set the overflow bag for sparse properties.
-    pub fn set_overflow(&mut self, offsets: MmapOrVec<u64>, data: MmapBytes) {
-        self.overflow_offsets = Some(offsets);
-        self.overflow_data = Some(data);
     }
 
     /// Look up a property in the overflow bag for a given row.
@@ -970,18 +924,6 @@ impl ColumnStore {
         }
     }
 
-    /// Replace a property column at the given slot index.
-    pub fn set_column(&mut self, slot: usize, col: TypedColumn) {
-        if slot < self.columns.len() {
-            self.columns[slot] = col;
-        }
-    }
-
-    /// Set the row count (used after bulk column construction).
-    pub fn set_row_count(&mut self, count: u32) {
-        self.row_count = count;
-    }
-
     // ─── Id/Title column methods (mapped mode only) ──────────────────────
 
     /// Push a node ID value into the id column. Creates a Mixed column if None.
@@ -1042,25 +984,6 @@ impl ColumnStore {
         true
     }
 
-    /// Overwrite the id value at `row_id`. Same contract as [`Self::set_title`].
-    #[allow(dead_code)]
-    pub fn set_id(&mut self, row_id: u32, value: &Value) -> bool {
-        let Some(col) = self.id_column.as_mut() else {
-            return false;
-        };
-        if (row_id as usize) >= col.len() {
-            return false;
-        }
-        if col.set(row_id, value).is_err() {
-            let mut mixed: Vec<Value> = (0..col.len())
-                .map(|i| col.get(i as u32).unwrap_or(Value::Null))
-                .collect();
-            mixed[row_id as usize] = value.clone();
-            *col = TypedColumn::Mixed { data: mixed };
-        }
-        true
-    }
-
     /// Get the node ID from the id column at the given row.
     #[inline]
     pub fn get_id(&self, row_id: u32) -> Option<Value> {
@@ -1085,18 +1008,13 @@ impl ColumnStore {
         self.id_column.is_some() || self.title_column.is_some() || self.mmap_store.is_some()
     }
 
-    /// Whether this store is backed by a shared mmap (disk mode direct-write).
-    #[inline]
-    pub fn has_mmap_store(&self) -> bool {
-        self.mmap_store.is_some()
-    }
-
     /// Number of rows (including tombstoned).
     pub fn row_count(&self) -> u32 {
         self.row_count
     }
 
     /// Number of live (non-tombstoned) rows.
+    #[allow(dead_code)] // Test-only.
     pub fn live_count(&self) -> u32 {
         self.row_count - self.tombstones.iter().filter(|&&t| t).count() as u32
     }
@@ -1213,6 +1131,7 @@ impl ColumnStore {
 
     /// Resolve a property name to a column slot index.
     #[inline]
+    #[allow(dead_code)] // Test-only.
     pub fn slot(&self, key: InternedKey) -> Option<u16> {
         self.schema.slot(key)
     }
@@ -1220,6 +1139,7 @@ impl ColumnStore {
     /// Fast property access by pre-resolved slot index.
     /// Caller must ensure row_id is valid and not tombstoned.
     #[inline]
+    #[allow(dead_code)] // Test-only.
     pub fn get_by_slot(&self, row_id: u32, slot: u16) -> Option<Value> {
         self.columns.get(slot as usize)?.get(row_id)
     }
@@ -1232,6 +1152,7 @@ impl ColumnStore {
 
     /// Fast string comparison by pre-resolved slot. No allocation.
     #[inline]
+    #[allow(dead_code)] // Test-only.
     pub fn compare_str_by_slot(&self, row_id: u32, slot: u16, target: &str) -> bool {
         self.columns
             .get(slot as usize)
@@ -1282,6 +1203,7 @@ impl ColumnStore {
     }
 
     /// Check if a row has a property (non-null, non-tombstoned).
+    #[allow(dead_code)] // Test-only.
     pub fn contains(&self, row_id: u32, key: InternedKey) -> bool {
         self.get(row_id, key).is_some()
     }
@@ -1314,6 +1236,7 @@ impl ColumnStore {
     }
 
     /// Reconstruct all properties for a row as a HashMap<String, Value>.
+    #[allow(dead_code)] // Test-only.
     pub fn row_properties_map(
         &self,
         row_id: u32,
@@ -1359,6 +1282,7 @@ impl ColumnStore {
     }
 
     /// Convert all columns back to heap-backed storage.
+    #[allow(dead_code)] // Test-only.
     pub fn materialize_to_heap(&mut self) {
         for col in &mut self.columns {
             col.materialize_to_heap();

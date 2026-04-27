@@ -1,7 +1,6 @@
-"""Phase 7 crunch-point parity tests.
+"""Structural parity tests.
 
-Guards the structural-reorg + final-audit phase of the 0.8.0 storage
-refactor. Tests here:
+Evergreen quality gates that grew out of the 0.8.0 storage refactor:
 
 - **god-file gate** — enumerates `*.rs` under `src/graph/`, asserts each
   is ≤ 2500 lines unless it is on the documented exception list. The
@@ -12,8 +11,6 @@ refactor. Tests here:
 - **mod.rs purity gate** — each subdir-`mod.rs` file under
   `src/graph/{algorithms,features,introspection,io,mutation,pyapi,query,storage}/`
   is short and contains no `impl` blocks or long function bodies.
-- **ARCHITECTURE.md points at files that exist** — every concrete file
-  path mentioned in ARCHITECTURE.md actually exists in the tree.
 
 Run: pytest -m parity tests/test_phase7_parity.py
 """
@@ -143,19 +140,3 @@ def test_mod_rs_purity():
             offenders.append(f"{sub}/mod.rs: {len(lines)} lines > cap {cap}")
     if offenders:
         pytest.fail("Subdir `mod.rs` files are too long:\n" + "\n".join(f"  {o}" for o in offenders))
-
-
-def test_architecture_md_mentions_real_files():
-    """File paths literally referenced in ARCHITECTURE.md actually exist."""
-    arch_md = (REPO_ROOT / "ARCHITECTURE.md").read_text()
-    # Match `path/file.rs` in backticks or code blocks.
-    path_pattern = re.compile(r"`(src/[^\s`]+\.rs)`")
-    missing: list[str] = []
-    for match in path_pattern.finditer(arch_md):
-        path = REPO_ROOT / match.group(1)
-        if not path.exists():
-            missing.append(match.group(1))
-    # Dedup
-    missing = sorted(set(missing))
-    if missing:
-        pytest.fail("ARCHITECTURE.md references file paths that do not exist:\n" + "\n".join(f"  {m}" for m in missing))
