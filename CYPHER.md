@@ -712,6 +712,25 @@ result = graph.cypher("""
 
 **Path functions:** `length(p)` returns hop count, `nodes(p)` returns node list, `relationships(p)` returns edge type list.
 
+### Weighted shortest path
+
+The fluent `shortest_path()` accepts an optional `weight_property` that flips the search from BFS (hop count) to Dijkstra (sum of edge weights). Edges missing the property fall back to weight 1.0; negative weights cause the path to be reported as missing.
+
+```python
+# Cheapest path by edge.cost (a property on each edge)
+result = graph.shortest_path(
+    "Stop", "A", "Stop", "Z",
+    weight_property="cost",
+)
+# {'path': [...], 'connections': [...], 'length': 3, 'weight': 4.7}
+
+# Length-only variant returns float when weighted, int otherwise
+graph.shortest_path_length("Stop", "A", "Stop", "Z", weight_property="cost")  # → 4.7
+graph.shortest_path_length("Stop", "A", "Stop", "Z")                          # → 3
+```
+
+Same Louvain plumbing — `weight_property=None` falls back to BFS.
+
 ## CREATE / SET / DELETE / REMOVE / MERGE
 
 ```python

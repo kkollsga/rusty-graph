@@ -437,3 +437,81 @@ class TestNormalMatchNotBroken:
         result = graph.cypher("MATCH (n:Person) WHERE n.age > 28 RETURN n.name")
         assert len(result) == 1
         assert result[0]["n.name"] == "Alice"
+
+
+# ── 0.8.20: weighted shortest path ─────────────────────────────
+
+
+class TestWeightedShortestPath:
+    @pytest.fixture
+    def weighted_graph(self):
+        import pandas as pd
+
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"id": ["A", "B", "C", "D"], "name": ["A", "B", "C", "D"]}),
+            "P",
+            "id",
+            "name",
+        )
+        # A→B direct weight 1.0; A→C→B detour 0.4 + 0.4 = 0.8 (cheaper)
+        # A→D detour weight 5.0
+        g.add_connections(
+            pd.DataFrame(
+                {
+                    "f": ["A", "A", "C", "A"],
+                    "t": ["B", "C", "B", "D"],
+                    "w": [1.0, 0.4, 0.4, 5.0],
+                }
+            ),
+            "L",
+            "P",
+            "f",
+            "P",
+            "t",
+            columns=["w"],
+        )
+        return g
+
+    def test_unweighted_returns_hops(self, weighted_graph):
+        result = weighted_graph.shortest_path("P", "A", "P", "B")
+        assert result["length"] == 1  # direct hop
+        assert "weight" not in result
+
+    def test_weighted_picks_cheaper_detour(self, weighted_graph):
+        result = weighted_graph.shortest_path("P", "A", "P", "B", weight_property="w")
+        assert result["length"] == 2  # A → C → B
+        assert abs(result["weight"] - 0.8) < 1e-9
+        ids = [n["id"] for n in result["path"]]
+        assert ids == ["A", "C", "B"]
+
+    def test_weighted_length_returns_float(self, weighted_graph):
+        d = weighted_graph.shortest_path_length("P", "A", "P", "B", weight_property="w")
+        assert isinstance(d, float)
+        assert abs(d - 0.8) < 1e-9
+
+    def test_unweighted_length_returns_int(self, weighted_graph):
+        d = weighted_graph.shortest_path_length("P", "A", "P", "B")
+        assert isinstance(d, int)
+        assert d == 1
+
+    def test_missing_property_falls_back_to_one(self):
+        import pandas as pd
+
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": ["A", "B"], "name": ["A", "B"]}), "P", "id", "name")
+        # No 'w' property at all — every edge defaults to weight 1.0
+        g.add_connections(pd.DataFrame({"f": ["A"], "t": ["B"]}), "L", "P", "f", "P", "t")
+        result = g.shortest_path("P", "A", "P", "B", weight_property="w")
+        assert result["weight"] == 1.0
+        assert result["length"] == 1
+
+    def test_no_path(self):
+        import pandas as pd
+
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": ["A", "B"], "name": ["A", "B"]}), "P", "id", "name")
+        # No edges
+        result = g.shortest_path("P", "A", "P", "B", weight_property="w")
+        assert result is None
+        assert g.shortest_path_length("P", "A", "P", "B", weight_property="w") is None

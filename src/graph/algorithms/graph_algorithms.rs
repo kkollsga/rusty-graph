@@ -1940,7 +1940,7 @@ pub fn label_propagation(
 }
 
 /// Get edge weight from a property, or 1.0 if not specified.
-fn edge_weight(
+pub(crate) fn edge_weight(
     graph: &DirGraph,
     edge_id: petgraph::graph::EdgeIndex,
     weight_property: Option<&str>,
@@ -1954,6 +1954,167 @@ fn edge_weight(
         }
     }
     1.0
+}
+
+/// Result of a weighted path-finding operation. Distinct from [`PathResult`]
+/// (which carries an integer hop count) so the f64 weight survives a round
+/// trip through the Python layer without coercion.
+#[derive(Debug, Clone)]
+pub struct WeightedPathResult {
+    pub path: Vec<NodeIndex>,
+    pub weight: f64,
+}
+
+/// Dijkstra-based weighted shortest path. Treats the graph as undirected
+/// (mirrors [`shortest_path`]) and reads `weight_property` from each edge,
+/// defaulting to 1.0 when the property is absent or non-numeric — the same
+/// fallback Louvain uses for its weighted-adjacency build.
+///
+/// Returns `None` when no path exists, when the deadline expires, or when
+/// any traversed edge has a negative weight (Dijkstra requires non-negative
+/// edges; the procedure errs on the side of returning no path rather than
+/// silently producing wrong answers).
+pub fn shortest_path_weighted(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    weight_property: &str,
+    connection_types: Option<&[String]>,
+    via_types: Option<&[String]>,
+    deadline: Option<Instant>,
+) -> Option<WeightedPathResult> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    if source == target {
+        return Some(WeightedPathResult {
+            path: vec![source],
+            weight: 0.0,
+        });
+    }
+
+    let via_set: Option<HashSet<&str>> =
+        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let interned = intern_connection_types(connection_types);
+    let conn_filter = interned.as_deref();
+
+    let node_bound = graph.graph.node_bound();
+    let mut dist: Vec<f64> = vec![f64::INFINITY; node_bound];
+    let mut parent: Vec<u32> = vec![u32::MAX; node_bound];
+    dist[source.index()] = 0.0;
+
+    // Min-heap keyed on (distance, node_index). f64 isn't Ord, so wrap in a
+    // newtype that flips the order to make BinaryHeap a min-heap.
+    #[derive(PartialEq)]
+    struct State(f64, usize);
+    impl Eq for State {}
+    impl Ord for State {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other
+                .0
+                .partial_cmp(&self.0)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| self.1.cmp(&other.1))
+        }
+    }
+    impl PartialOrd for State {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut heap: BinaryHeap<State> = BinaryHeap::new();
+    heap.push(State(0.0, source.index()));
+
+    let mut visit_count = 0u32;
+    while let Some(State(d, current_idx)) = heap.pop() {
+        // Stale entry — already processed via a shorter path.
+        if d > dist[current_idx] {
+            continue;
+        }
+        if current_idx == target.index() {
+            // Reconstruct path
+            let mut path = Vec::with_capacity(16);
+            let mut idx = current_idx;
+            while idx != source.index() {
+                path.push(NodeIndex::new(idx));
+                idx = parent[idx] as usize;
+            }
+            path.push(source);
+            path.reverse();
+            return Some(WeightedPathResult { path, weight: d });
+        }
+
+        visit_count += 1;
+        if visit_count.is_multiple_of(1000) {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return None;
+                }
+            }
+        }
+
+        let current = NodeIndex::new(current_idx);
+        for edge in graph
+            .graph
+            .edges_directed(current, petgraph::Direction::Outgoing)
+            .chain(
+                graph
+                    .graph
+                    .edges_directed(current, petgraph::Direction::Incoming),
+            )
+        {
+            if let Some(types) = conn_filter {
+                if !types.iter().any(|t| *t == edge.weight().connection_type) {
+                    continue;
+                }
+            }
+            let neighbor = if edge.source() == current {
+                edge.target()
+            } else {
+                edge.source()
+            };
+            let n_idx = neighbor.index();
+            if n_idx != target.index() && !node_passes_via_filter(graph, neighbor, &via_set) {
+                continue;
+            }
+            let w = edge_weight(graph, edge.id(), Some(weight_property));
+            if w < 0.0 {
+                // Dijkstra is invalid with negative weights — abort.
+                return None;
+            }
+            let next = d + w;
+            if next < dist[n_idx] {
+                dist[n_idx] = next;
+                parent[n_idx] = current_idx as u32;
+                heap.push(State(next, n_idx));
+            }
+        }
+    }
+    None
+}
+
+/// Lightweight variant of [`shortest_path_weighted`] that returns only the
+/// total weight without reconstructing the path.
+pub fn shortest_path_cost_weighted(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    weight_property: &str,
+    connection_types: Option<&[String]>,
+    via_types: Option<&[String]>,
+    deadline: Option<Instant>,
+) -> Option<f64> {
+    shortest_path_weighted(
+        graph,
+        source,
+        target,
+        weight_property,
+        connection_types,
+        via_types,
+        deadline,
+    )
+    .map(|r| r.weight)
 }
 
 /// Sum of edge weights for all nodes in a community.

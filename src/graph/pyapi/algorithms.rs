@@ -34,7 +34,7 @@ impl KnowledgeGraph {
     ///         - 'connections': List of connection types between nodes
     ///         - 'length': Number of hops in the path
     ///     Returns None if no path exists.
-    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn shortest_path(
         &self,
@@ -45,6 +45,7 @@ impl KnowledgeGraph {
         target_id: &Bound<'_, PyAny>,
         connection_types: Option<Vec<String>>,
         via_types: Option<Vec<String>>,
+        weight_property: Option<String>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         // Look up source node
@@ -75,9 +76,61 @@ impl KnowledgeGraph {
             ))
         })?;
 
-        // Find shortest path
+        // Find shortest path — Dijkstra when weight_property is set,
+        // BFS otherwise.
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+
+        if let Some(prop) = weight_property {
+            let result = crate::graph::algorithms::graph_algorithms::shortest_path_weighted(
+                &self.inner,
+                source_idx,
+                target_idx,
+                &prop,
+                connection_types.as_deref(),
+                via_types.as_deref(),
+                deadline,
+            );
+            return Ok(match result {
+                Some(wp) => {
+                    let dict = PyDict::new(py);
+                    let path_list = PyList::empty(py);
+                    for &node_idx in &wp.path {
+                        if let Some(info) =
+                            crate::graph::algorithms::graph_algorithms::get_node_info(
+                                &self.inner,
+                                node_idx,
+                            )
+                        {
+                            let node_dict = PyDict::new(py);
+                            node_dict.set_item("type", &info.node_type)?;
+                            node_dict.set_item("title", &info.title)?;
+                            node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
+                            path_list.append(node_dict)?;
+                        }
+                    }
+                    dict.set_item("path", path_list)?;
+                    let connections =
+                        crate::graph::algorithms::graph_algorithms::get_path_connections(
+                            &self.inner,
+                            &wp.path,
+                        );
+                    let conn_list = PyList::empty(py);
+                    for conn in connections {
+                        match conn {
+                            Some(c) => conn_list.append(&c)?,
+                            None => conn_list.append(py.None())?,
+                        }
+                    }
+                    dict.set_item("connections", conn_list)?;
+                    dict.set_item("length", wp.path.len().saturating_sub(1))?;
+                    dict.set_item("weight", wp.weight)?;
+                    dict.into()
+                }
+                None => py.None(),
+            });
+        }
+
         let result = crate::graph::algorithms::graph_algorithms::shortest_path(
             &self.inner,
             source_idx,
@@ -140,14 +193,18 @@ impl KnowledgeGraph {
     ///     target_id: The unique ID of the target node
     ///
     /// Returns:
-    ///     The number of hops (edges) in the shortest path, or None if no path exists.
+    ///     Hop count (int) when ``weight_property`` is None; total weight
+    ///     (float) otherwise. ``None`` if no path exists.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, weight_property=None))]
     fn shortest_path_length(
         &self,
+        py: Python<'_>,
         source_type: &str,
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
-    ) -> PyResult<Option<usize>> {
+        weight_property: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
@@ -171,13 +228,33 @@ impl KnowledgeGraph {
                 ))
             })?;
 
+        if let Some(prop) = weight_property {
+            return Ok(
+                match crate::graph::algorithms::graph_algorithms::shortest_path_cost_weighted(
+                    &self.inner,
+                    source_idx,
+                    target_idx,
+                    &prop,
+                    None,
+                    None,
+                    None,
+                ) {
+                    Some(w) => w.into_pyobject(py)?.unbind().into_any(),
+                    None => py.None(),
+                },
+            );
+        }
+
         // Find shortest path cost only (no path reconstruction — faster)
         Ok(
-            crate::graph::algorithms::graph_algorithms::shortest_path_cost(
+            match crate::graph::algorithms::graph_algorithms::shortest_path_cost(
                 &self.inner,
                 source_idx,
                 target_idx,
-            ),
+            ) {
+                Some(c) => c.into_pyobject(py)?.unbind().into_any(),
+                None => py.None(),
+            },
         )
     }
 

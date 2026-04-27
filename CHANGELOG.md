@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Weighted shortest path (Phase 4 of the completeness round).**
+  `graph.shortest_path()` and `graph.shortest_path_length()` now
+  accept an optional `weight_property` parameter. When set, the
+  search switches from BFS (hop count) to Dijkstra (sum of edge
+  weights). Edges missing the property fall back to weight 1.0
+  (matching Louvain's existing weighted-adjacency convention);
+  negative weights cause the path to be reported as missing.
+
+  ```python
+  result = graph.shortest_path(
+      "Stop", "A", "Stop", "Z",
+      weight_property="cost",
+  )
+  # {'path': [...], 'connections': [...], 'length': 3, 'weight': 4.7}
+
+  graph.shortest_path_length(
+      "Stop", "A", "Stop", "Z",
+      weight_property="cost",
+  )  # → 4.7 (float; int when unweighted)
+  ```
+
+  Internals: new `shortest_path_weighted()` and
+  `shortest_path_cost_weighted()` in `algorithms/graph_algorithms.rs`,
+  Dijkstra with a `BinaryHeap<State>` keyed on `(distance, node_idx)`.
+  The existing BFS path remains the default — no overhead for
+  unweighted callers.
+
 - **Structural validators v2 — rule packs extension (Phase 3 of the
   completeness round).** Seven new CALL procedures complete the
   rule-pack family from 0.8.19 by covering *n*-ary and declarative

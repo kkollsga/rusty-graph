@@ -2356,6 +2356,7 @@ class KnowledgeGraph:
         target_id: Any,
         connection_types: Optional[list[str]] = None,
         via_types: Optional[list[str]] = None,
+        weight_property: Optional[str] = None,
         timeout_ms: Optional[int] = None,
     ) -> Optional[dict[str, Any]]:
         """Find the shortest path between two nodes.
@@ -2367,12 +2368,20 @@ class KnowledgeGraph:
             target_id: Target node ID.
             connection_types: Only traverse edges of these types. Default all.
             via_types: Only traverse through nodes of these types. Default all.
+            weight_property: Edge property to use as cost. When set, the
+                search uses Dijkstra and minimises total weight; when
+                ``None``, BFS minimises hop count. Edges missing the
+                property fall back to weight 1.0 (matches Louvain's
+                weighted-adjacency convention). Negative weights cause
+                the path to be reported as missing.
             timeout_ms: Abort after this many milliseconds and return ``None``.
 
         Returns:
             Dict with ``path`` (list of node info dicts), ``connections``
-            (list of edge types), and ``length`` (hop count).
-            ``None`` if no path exists or timeout is reached.
+            (list of edge types), and ``length`` (hop count). When
+            ``weight_property`` is set, also includes ``weight`` (sum
+            of edge weights). ``None`` if no path exists or timeout is
+            reached.
         """
         ...
 
@@ -2382,14 +2391,20 @@ class KnowledgeGraph:
         source_id: Any,
         target_type: str,
         target_id: Any,
-    ) -> Optional[int]:
-        """Get just the hop count of the shortest path.
+        weight_property: Optional[str] = None,
+    ) -> Optional[Union[int, float]]:
+        """Get just the cost of the shortest path.
 
         Faster than :meth:`shortest_path` when you only need the distance.
         Does not support ``connection_types`` or ``via_types`` filtering.
 
+        Args:
+            weight_property: When set, uses Dijkstra and returns total
+                weight (float). When ``None``, BFS returns hop count (int).
+
         Returns:
-            Number of hops, or ``None`` if no path exists.
+            Hop count (int) or total weight (float), or ``None`` if no
+            path exists.
         """
         ...
 

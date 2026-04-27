@@ -890,6 +890,16 @@ indices = graph.shortest_path_indices('Person', 'alice', 'Person', 'dave')
 # All paths up to max hops
 paths = graph.all_paths('Person', 'alice', 'Person', 'dave',
     max_hops=5, max_results=100, timeout_ms=10000)
+
+# Weighted shortest path (Dijkstra) — pass weight_property to minimise
+# total edge weight rather than hop count. Edges missing the property
+# default to 1.0; negative weights cause the path to be reported as
+# missing.
+path = graph.shortest_path('Stop', 'A', 'Stop', 'Z', weight_property='cost')
+# {'path': [...], 'connections': [...], 'length': 3, 'weight': 4.7}
+
+# Length-only variant returns float when weighted, int otherwise
+graph.shortest_path_length('Stop', 'A', 'Stop', 'Z', weight_property='cost')  # → 4.7
 ```
 
 ### Connectivity

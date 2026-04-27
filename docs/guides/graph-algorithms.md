@@ -21,6 +21,22 @@ graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fa
 
 All path methods support `connection_types`, `via_types`, and `timeout_ms` for filtering and safety.
 
+### Weighted shortest path
+
+Pass `weight_property` to switch from BFS (hop count) to Dijkstra (sum of edge weights). Edges missing the property default to weight 1.0; negative weights cause the path to be reported as missing.
+
+```python
+# Cheapest path by edge.cost
+result = graph.shortest_path(
+    "Stop", "A", "Stop", "Z",
+    weight_property="cost",
+)
+# {'path': [...], 'connections': [...], 'length': 3, 'weight': 4.7}
+
+# Length-only variant returns float when weighted, int otherwise
+graph.shortest_path_length("Stop", "A", "Stop", "Z", weight_property="cost")  # → 4.7
+```
+
 Batch variant for computing many distances at once:
 
 ```python
