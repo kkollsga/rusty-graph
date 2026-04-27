@@ -100,6 +100,55 @@ def test_orphan_node_missing_param_error_lists_accepted_params(integrity_graph):
         pytest.fail("expected a ValueError/RuntimeError")
 
 
+def test_orphan_node_link_type_in_finds_section_with_no_inbound(integrity_graph):
+    """`direction='in'` + `link_type` = "no node has an inbound matching edge".
+
+    None of the LawSections have inbound SECTION_OF edges (the edges
+    flow LawSection -[SECTION_OF]-> Law), so all four sections must be
+    reported as orphans by an inbound-CALLS-style query.
+    """
+    rows = list(
+        integrity_graph.cypher(
+            "CALL orphan_node({type: 'LawSection', link_type: 'SECTION_OF', direction: 'in'}) "
+            "YIELD node RETURN node.id AS id ORDER BY id"
+        )
+    )
+    ids = [r["id"] for r in rows]
+    assert ids == ["sec1", "sec2", "sec3", "sec4"]
+
+
+def test_orphan_node_link_type_out_excludes_connected_sections(integrity_graph):
+    """`direction='out'` + `link_type='SECTION_OF'` reports only sections
+    with NO outbound SECTION_OF edge — i.e. the orphan sec3 (no edges
+    at all).
+    """
+    rows = list(
+        integrity_graph.cypher(
+            "CALL orphan_node({type: 'LawSection', link_type: 'SECTION_OF', direction: 'out'}) "
+            "YIELD node RETURN node.id AS id"
+        )
+    )
+    assert [r["id"] for r in rows] == ["sec3"]
+
+
+def test_orphan_node_link_type_filters_to_specific_edge_type(integrity_graph):
+    """A non-existent `link_type` makes every node an orphan because
+    none have edges of that connection type — proves the filter is
+    actually applied (vs. silently falling back to "any edge").
+    """
+    rows = list(
+        integrity_graph.cypher(
+            "CALL orphan_node({type: 'LawSection', link_type: 'NON_EXISTENT_EDGE'}) YIELD node RETURN count(node) AS c"
+        )
+    )
+    assert rows[0]["c"] == 4
+
+
+def test_orphan_node_invalid_direction_errors(integrity_graph):
+    with pytest.raises((ValueError, RuntimeError), match="invalid direction"):
+        integrity_graph.cypher("CALL orphan_node({type: 'LawSection', direction: 'sideways'}) YIELD node RETURN node")
+
+
 def test_cardinality_violation_error_lists_optional_params(integrity_graph):
     """Optional params (min, max) should also appear in the schema hint."""
     try:

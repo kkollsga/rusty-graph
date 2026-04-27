@@ -24,36 +24,55 @@ use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 
-/// `CALL orphan_node({type: 'Wellbore'}) YIELD node`
+/// `CALL orphan_node({type, link_type?, direction?}) YIELD node`
 ///
-/// Yields one row per node of the requested type that has zero edges in
-/// any direction. Useful as a baseline integrity check — orphans are
-/// almost always ingest artifacts.
+/// Yields one row per node of `type` that has zero matching edges.
+///
+/// - **Default** (no `link_type`, no `direction`) — node has zero edges
+///   in any direction (the historical "graph-theoretically isolated"
+///   semantics). Useful as a baseline integrity check.
+/// - **`link_type: 'CALLS'`** — restrict the edge-existence check to
+///   that connection type only. Other edges (e.g. `DEFINES`, `HAS_METHOD`)
+///   don't disqualify the node.
+/// - **`direction: 'in' | 'out' | 'both'`** — which side(s) to check
+///   (default `'both'`). `'in'` finds nodes with no inbound matching
+///   edge; symmetric for `'out'`.
+///
+/// The combination is the natural "find functions never called" query:
+/// `CALL orphan_node({type: 'Function', link_type: 'CALLS', direction: 'in'})`.
 pub(super) fn execute_orphan_node(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
     yield_items: &[YieldItem],
 ) -> Result<Vec<ResultRow>, String> {
     let node_type = require_string_param(params, "type", "orphan_node")?;
+    let link_type = optional_string_param(params, "link_type", "orphan_node")?;
+    let direction = optional_string_param(params, "direction", "orphan_node")?
+        .unwrap_or_else(|| "both".to_string());
+    let check_out = matches!(direction.as_str(), "out" | "both");
+    let check_in = matches!(direction.as_str(), "in" | "both");
+    if !check_out && !check_in {
+        return Err(format!(
+            "CALL orphan_node: invalid direction '{direction}'. Use 'in', 'out', or 'both'."
+        ));
+    }
+    let edge_key = link_type.as_deref().map(InternedKey::from_str);
     let yield_var = require_node_yield(yield_items, "orphan_node", "node")?;
     let nodes = type_indices(graph, &node_type)?;
 
-    let mut rows = Vec::with_capacity(0);
+    let mut rows = Vec::new();
     for &nidx in nodes {
-        if graph
-            .graph
-            .edges_directed(nidx, Direction::Outgoing)
-            .next()
-            .is_some()
-        {
+        let has_match = |dir: Direction| -> bool {
+            let mut iter = graph.graph.edges_directed(nidx, dir);
+            match edge_key {
+                Some(key) => iter.any(|er| er.weight().connection_type == key),
+                None => iter.next().is_some(),
+            }
+        };
+        if check_out && has_match(Direction::Outgoing) {
             continue;
         }
-        if graph
-            .graph
-            .edges_directed(nidx, Direction::Incoming)
-            .next()
-            .is_some()
-        {
+        if check_in && has_match(Direction::Incoming) {
             continue;
         }
         rows.push(make_node_row(&yield_var, nidx));
@@ -662,7 +681,10 @@ const RULE_PARAM_SCHEMAS: &[(&str, &[(&str, bool)])] = &[
     ("missing_inbound_edge", &[("type", true), ("edge", true)]),
     ("missing_required_edge", &[("type", true), ("edge", true)]),
     ("null_property", &[("type", true), ("property", true)]),
-    ("orphan_node", &[("type", true)]),
+    (
+        "orphan_node",
+        &[("type", true), ("link_type", false), ("direction", false)],
+    ),
     ("parallel_edges", &[("edge", true)]),
     ("self_loop", &[("type", true), ("edge", true)]),
     ("transitivity_violation", &[("rel", true)]),
@@ -753,6 +775,23 @@ fn require_string_param(
              Use map syntax — e.g. CALL {proc}({{{key}: 'X'}}).{}",
             param_schema_hint(proc)
         )),
+    }
+}
+
+/// Optional-string param. Returns `Ok(None)` when absent; `Err` when
+/// present but not a string (so misuse surfaces loudly instead of
+/// silently falling back to the default).
+fn optional_string_param(
+    params: &HashMap<String, Value>,
+    key: &str,
+    proc: &str,
+) -> Result<Option<String>, String> {
+    match params.get(key) {
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "CALL {proc}: parameter '{key}' must be a string, got {other:?}"
+        )),
+        None => Ok(None),
     }
 }
 

@@ -382,7 +382,8 @@ impl<'a> CypherExecutor<'a> {
                     ),
                     (
                         "orphan_node",
-                        "Rule: nodes of {type} with zero edges in any direction",
+                        "Rule: nodes of {type} with zero matching edges (default: any edge, both directions). \
+                         Optional: link_type='X' restricts to that connection type; direction='in'|'out'|'both'.",
                         "node",
                     ),
                     (
