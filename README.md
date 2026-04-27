@@ -296,11 +296,12 @@ No server, no tuning, same Python process as your code.
 
 | Feature | Description |
 |---|---|
-| **Cypher queries** | MATCH, CREATE, SET, DELETE, MERGE, aggregations, ORDER BY, LIMIT, SKIP |
+| **Cypher queries** | MATCH, CREATE, SET, DELETE, MERGE, UNION/INTERSECT/EXCEPT, aggregations (incl. `median`, `percentile_cont`, `variance`), `reduce()`, ORDER BY, LIMIT, SKIP |
 | **Semantic search** | Vector embeddings + `text_score()` for similarity ranking |
-| **Graph algorithms** | Shortest path, centrality, community detection, clustering |
-| **Structural validators** | `CALL orphan_node`, `missing_required_edge`, `cycle_2step` etc. — agent-discoverable integrity checks composable with normal Cypher |
-| **Spatial** | Coordinates, WKT geometry, distance and containment queries |
+| **Text predicates** | `text_edit_distance`, `text_normalize`, `text_jaccard`, `text_ngrams`, `text_contains_any` / `text_starts_with_any` for fuzzy match |
+| **Graph algorithms** | Shortest path (BFS or Dijkstra via `weight_property`), centrality, community detection, clustering |
+| **Structural validators** | 14 `CALL` procedures: `orphan_node`, `missing_required_edge`, `cycle_2step`, `inverse_violation`, `transitivity_violation`, `cardinality_violation`, `parallel_edges`, `null_property`, `type_domain/range_violation`, etc. — agent-discoverable integrity checks composable with normal Cypher |
+| **Spatial** | Coordinates, WKT geometry, distance + containment, geometry primitives (`geom_buffer`, `geom_convex_hull`, `geom_union/intersection/difference`, `geom_is_valid`, `geom_length`), `kg_knn` k-nearest-neighbour |
 | **Timeseries** | Time-indexed data with `ts_*()` Cypher functions |
 | **Bulk loading** | Fluent API (`add_nodes` / `add_connections`) for DataFrames |
 | **Blueprints** | Declarative CSV-to-graph loading via JSON config |

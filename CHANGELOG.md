@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.20] — 2026-04-27
+
+The "completeness round" — six phases that round out the Cypher and
+Fluent surface so no primitive a user would reasonably expect is
+missing. Every domain (legal, code, sodir, Wikidata) gets value from
+each addition; none are domain-specific.
+
 ### Added
 
 - **Cypher INTERSECT / EXCEPT (Phase 6 of the completeness round).**
