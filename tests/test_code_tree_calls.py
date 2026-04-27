@@ -126,3 +126,89 @@ class TestNoiseFilter:
         pairs = _call_pairs(g)
         caller_pairs = {callee for caller, callee in pairs if caller.endswith(".caller")}
         assert not any(p.endswith(".print") or p.endswith(".len") for p in caller_pairs)
+
+
+def _cargo_toml() -> str:
+    return textwrap.dedent(
+        """
+        [package]
+        name = "fixture"
+        version = "0.0.0"
+        edition = "2021"
+        """
+    )
+
+
+class TestRustClosureWalking:
+    """Calls inside closure bodies must be attributed to the enclosing
+    function (issue #9 sub-fix 1). Closures are expressions, not items,
+    and don't get their own graph node — so `.map(|x| target(x))` is
+    semantically a call from the outer function."""
+
+    def test_call_inside_map_closure_is_attributed_to_outer_fn(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn target(x: u32) -> u32 { x + 1 }
+
+                pub fn caller() -> Vec<u32> {
+                    vec![1, 2, 3].into_iter().map(|x| target(x)).collect()
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(caller.endswith("::caller") and callee.endswith("::target") for caller, callee in pairs), (
+            f"caller -> target via .map(|x| target(x)) not detected: {pairs}"
+        )
+
+    def test_call_inside_and_then_closure(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn helper() -> Option<u32> { Some(1) }
+                pub fn deeper(_n: u32) -> Option<u32> { None }
+
+                pub fn caller() -> Option<u32> {
+                    helper().and_then(|n| deeper(n))
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(caller.endswith("::caller") and callee.endswith("::deeper") for caller, callee in pairs), (
+            f"caller -> deeper inside closure not detected: {pairs}"
+        )
+
+    def test_nested_function_item_still_isolated(self, tmp_path):
+        # Nested fn (not closure) must keep its own scope — calls inside
+        # an inner `fn` belong to that inner fn, not the outer.
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn target() {}
+
+                pub fn outer() {
+                    fn inner() {
+                        target();
+                    }
+                    inner();
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        # Outer should NOT have a direct CALLS edge to target — that
+        # edge belongs to inner.
+        assert not any(caller.endswith("::outer") and callee.endswith("::target") for caller, callee in pairs), (
+            f"outer must not directly call target (that's inner's call): {pairs}"
+        )

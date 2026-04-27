@@ -69,7 +69,19 @@ pub const RUST_NOISE_NAMES: &[&str] = &[
     "set",
 ];
 
-const NESTED_SCOPES: &[&str] = &["function_item", "closure_expression"];
+/// Tree-sitter node kinds that introduce their own function scope and
+/// should NOT be walked when collecting calls/references for the
+/// enclosing function.
+///
+/// `function_item` is a nested fn definition — it gets its own
+/// `Function` node, so its body's calls belong to it.
+///
+/// **Closures are not in this list**: in Rust they're expressions, not
+/// items, and don't get their own graph node. A call inside
+/// `.map(|x| foo(x))` runs as part of the enclosing function's
+/// execution, so attributing those calls to the outer function is the
+/// right semantic.
+const NESTED_SCOPES: &[&str] = &["function_item"];
 
 fn py_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
