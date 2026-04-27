@@ -1,6 +1,8 @@
 //! USES_TYPE, CONTAINS, IMPORTS, FFI_EXPOSES edges.
 
-use crate::code_tree::models::{ClassInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo};
+use crate::code_tree::models::{
+    ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo,
+};
 use aho_corasick::{AhoCorasick, MatchKind};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -197,6 +199,69 @@ pub fn build_uses_type_edges(
     }
 
     by_target_type
+}
+
+pub struct ReferencesEdge {
+    pub function: String,
+    pub constant: String,
+    /// Line number in the function body where the reference appears.
+    pub line: u32,
+}
+
+/// REFERENCES edges from `Function` to `Constant` — emit one row per
+/// `(function, constant)` pair where the constant's terminal name
+/// appears in the function body's identifier stream.
+///
+/// Per-language parsers populate `FunctionInfo.references` with
+/// constant-style identifier candidates (the Rust parser uses
+/// `SCREAMING_SNAKE_CASE` as the heuristic). This pass resolves each
+/// candidate against the project's constant set and dedupes per
+/// `(function, constant)` pair so a constant referenced N times in
+/// one function still produces a single edge.
+pub fn build_references_edges(
+    functions: &[FunctionInfo],
+    constants: &[ConstantInfo],
+) -> Vec<ReferencesEdge> {
+    if constants.is_empty() {
+        return Vec::new();
+    }
+
+    // Name-keyed lookup: constant short-name → qualified_name. When two
+    // constants share the same name (cross-module), we keep both —
+    // emit edges to all matches. This mirrors how the type-name resolver
+    // handles ambiguity (it doesn't disambiguate by import scope yet).
+    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for c in constants {
+        by_name
+            .entry(c.name.as_str())
+            .or_default()
+            .push(c.qualified_name.as_str());
+    }
+
+    let mut out: Vec<ReferencesEdge> = Vec::new();
+    for f in functions {
+        if f.references.is_empty() {
+            continue;
+        }
+        // Dedup per (function, constant_qname) — a function that uses
+        // the same constant on three lines emits one edge.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (ident, line) in &f.references {
+            let Some(matches) = by_name.get(ident.as_str()) else {
+                continue;
+            };
+            for &qname in matches {
+                if seen.insert(qname) {
+                    out.push(ReferencesEdge {
+                        function: f.qualified_name.clone(),
+                        constant: qname.to_string(),
+                        line: *line,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// FFI EXPOSES edges — #[pymodule] fn → each #[pyclass]/#[pyfunction] item.

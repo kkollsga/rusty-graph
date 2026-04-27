@@ -52,6 +52,12 @@ pub struct FunctionInfo {
     pub decorators: Vec<String>,
     /// `(callee_name, line_number)` pairs.
     pub calls: Vec<(String, u32)>,
+    /// Identifier references in the function body that *look like
+    /// constants* (terminal segment matches `SCREAMING_SNAKE_CASE`).
+    /// The builder resolves these against the project's `ConstantInfo`
+    /// set to emit `REFERENCES` edges from Function → Constant.
+    /// Stored as `(identifier_text, line_number)` pairs.
+    pub references: Vec<(String, u32)>,
     /// Generic/template parameters, e.g. `"T, U: Display"`.
     pub type_parameters: Option<String>,
     pub end_line: Option<u32>,

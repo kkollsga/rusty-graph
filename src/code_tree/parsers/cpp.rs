@@ -509,6 +509,7 @@ impl CppParser {
             return_type: Self::get_return_type(node, source),
             decorators: Vec::new(),
             calls,
+            references: Vec::new(),
             type_parameters: None,
             metadata: Default::default(),
             qualified_name,

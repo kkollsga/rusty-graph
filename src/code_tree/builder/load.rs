@@ -613,6 +613,17 @@ fn uses_type_edges_df(edges: &[super::other_edges::UsesTypeEdge]) -> DataFrame {
     ])
 }
 
+fn references_edges_df(edges: &[super::other_edges::ReferencesEdge]) -> DataFrame {
+    let fns: Vec<Option<String>> = edges.iter().map(|e| Some(e.function.clone())).collect();
+    let consts: Vec<Option<String>> = edges.iter().map(|e| Some(e.constant.clone())).collect();
+    let lines: Vec<Option<i64>> = edges.iter().map(|e| Some(e.line as i64)).collect();
+    build_df(vec![
+        ("function", ColumnType::String, str_col(fns)),
+        ("constant", ColumnType::String, str_col(consts)),
+        ("line", ColumnType::Int64, int_col(lines)),
+    ])
+}
+
 fn ffi_exposes_df(edges: &[super::other_edges::FfiExposesEdge]) -> DataFrame {
     let m: Vec<Option<String>> = edges.iter().map(|e| Some(e.module_fn.clone())).collect();
     let t: Vec<Option<String>> = edges.iter().map(|e| Some(e.target_qname.clone())).collect();
@@ -1483,6 +1494,26 @@ pub fn load_into_graph(
     }
 
     mark(t_uses, "uses_type");
+    let t_refs = std::time::Instant::now();
+    // REFERENCES (Function → Constant) — name-keyed identifier resolution.
+    let refs = super::other_edges::build_references_edges(&result.functions, &result.constants);
+    if !refs.is_empty() {
+        maintain::add_connections(
+            graph,
+            references_edges_df(&refs),
+            "REFERENCES".into(),
+            "Function".into(),
+            "function".into(),
+            "Constant".into(),
+            "constant".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+
+    mark(t_refs, "references");
     let t_ffi = std::time::Instant::now();
     // FFI EXPOSES.
     let ffi = super::other_edges::build_ffi_exposes_edges(&result.functions, &result.classes);

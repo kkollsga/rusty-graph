@@ -366,6 +366,70 @@ impl RustParser {
         calls
     }
 
+    /// Walk a function body for identifiers that *look like constants*
+    /// (terminal segment matches `SCREAMING_SNAKE_CASE`). Used to seed
+    /// the `Function -[REFERENCES]-> Constant` edge resolver in the
+    /// builder; we lean on the Rust naming convention to keep this
+    /// extraction cheap rather than tracking every bare identifier.
+    ///
+    /// Returns `(identifier_text, line_number)` pairs. The text is the
+    /// terminal segment (e.g. `"FOO"` for `crate::module::FOO`) so the
+    /// builder's name-keyed lookup table handles both bare and scoped
+    /// references uniformly.
+    fn extract_constant_refs(body: Node, source: &[u8]) -> Vec<(String, u32)> {
+        fn looks_like_constant(s: &str) -> bool {
+            // SCREAMING_SNAKE_CASE: at least one uppercase letter, only
+            // uppercase / digits / underscore. Two-letter minimum so we
+            // don't pick up single-letter generic params like `T`.
+            s.len() >= 2
+                && s.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                && s.chars().any(|c| c.is_ascii_uppercase())
+        }
+
+        let mut out: Vec<(String, u32)> = Vec::new();
+        fn walk(node: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
+            // Skip the `function` position of call_expression — that's
+            // the callee path, already covered by extract_calls.
+            // Skip type positions too: type_identifier / scoped_type_identifier.
+            let line = node.start_position().row as u32 + 1;
+            match node.kind() {
+                "identifier" => {
+                    let text = node_text(node, source);
+                    if looks_like_constant(text) {
+                        out.push((text.to_string(), line));
+                    }
+                }
+                "scoped_identifier" => {
+                    // Pull the trailing segment (after the last `::`).
+                    let text = node_text(node, source);
+                    if let Some(tail) = text.rsplit("::").next() {
+                        if looks_like_constant(tail) {
+                            out.push((tail.to_string(), line));
+                        }
+                    }
+                    // Don't recurse into children — we've handled this
+                    // identifier and recursing would re-emit the bare
+                    // tail as an `identifier` node match.
+                    return;
+                }
+                _ => {}
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if !NESTED_SCOPES.contains(&child.kind()) {
+                    walk(child, source, out);
+                }
+            }
+        }
+        walk(body, source, &mut out);
+        // Dedup (name, line) pairs — same constant referenced twice on
+        // one line shows up once.
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
         let rel = filepath.strip_prefix(src_root).unwrap_or(filepath);
         let mut parts: Vec<String> = rel
@@ -621,6 +685,9 @@ impl RustParser {
         let calls = body
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let references = body
+            .map(|b| Self::extract_constant_refs(b, source))
+            .unwrap_or_default();
 
         FunctionInfo {
             visibility,
@@ -634,6 +701,7 @@ impl RustParser {
             docstring: Self::get_doc_comment(node, source),
             return_type: Self::get_return_type(node, source),
             calls,
+            references,
             type_parameters: get_type_parameters(node, source, "type_parameters"),
             decorators: Vec::new(),
             metadata,
