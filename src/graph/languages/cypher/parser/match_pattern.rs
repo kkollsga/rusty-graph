@@ -143,6 +143,11 @@ impl CypherParser {
 
             if self.check(&CypherToken::Comma) {
                 self.advance();
+            } else if self.check(&CypherToken::Match) {
+                // Subquery form: EXISTS { MATCH (a)-[:R]->(b) MATCH (c)-[:R2]->(d) ... }
+                // Don't advance — the next iteration's
+                // extract_exists_pattern_string will skip the MATCH at its
+                // start (same path as the optional first MATCH).
             } else {
                 break;
             }
@@ -190,6 +195,13 @@ impl CypherParser {
 
             // Stop at WHERE keyword (EXISTS { MATCH ... WHERE ... } subquery)
             if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::Where) {
+                break;
+            }
+
+            // Stop at MATCH keyword at top level — multi-MATCH subquery
+            // form (`EXISTS { MATCH ... MATCH ... }`). The outer
+            // parse_exists_patterns loop continues on this case.
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::Match) {
                 break;
             }
 

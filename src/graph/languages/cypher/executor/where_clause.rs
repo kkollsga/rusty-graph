@@ -493,8 +493,26 @@ impl<'a> CypherExecutor<'a> {
                     return result;
                 }
 
-                // Slow path: full pattern execution for complex EXISTS
+                // Slow path: full pattern execution for complex EXISTS.
+                //
+                // Multi-pattern subqueries (`EXISTS { MATCH ... MATCH ... [WHERE ...] }`)
+                // share variables across patterns, so we accumulate bindings
+                // progressively. Each pattern intersects with the running
+                // `combined_rows` set; a pattern that produces zero compatible
+                // matches short-circuits the whole subquery to false.
+                //
+                // The WHERE predicate is evaluated *once*, against the fully
+                // merged bindings, after all patterns have matched. Evaluating
+                // it per-pattern (the previous behaviour) breaks subqueries
+                // where the predicate references a variable bound in a later
+                // MATCH — `prod` in `MATCH ... MATCH (prod) WHERE prod.price > X`
+                // wouldn't be in scope when the first MATCH's results were
+                // checked.
+                let mut combined_rows: Vec<ResultRow> = vec![row.clone()];
                 for pattern in patterns {
+                    if combined_rows.is_empty() {
+                        return Ok(false);
+                    }
                     // Resolve EqualsVar references against current row
                     let resolved;
                     let pat = if Self::pattern_has_vars(pattern) {
@@ -512,27 +530,30 @@ impl<'a> CypherExecutor<'a> {
                     .set_deadline(self.deadline);
                     let matches = executor.execute(pat)?;
 
-                    let found = if let Some(ref where_pred) = where_clause {
-                        // EXISTS { MATCH ... WHERE ... } — evaluate WHERE against
-                        // a combined row (outer bindings + inner match bindings)
-                        matches.iter().any(|m| {
-                            if !self.bindings_compatible(row, m) {
-                                return false;
+                    let mut next_rows: Vec<ResultRow> = Vec::new();
+                    for current in &combined_rows {
+                        for m in &matches {
+                            if !self.bindings_compatible(current, m) {
+                                continue;
                             }
-                            let mut combined_row = row.clone();
-                            self.merge_match_into_row(&mut combined_row, m);
-                            self.evaluate_predicate(where_pred, &combined_row)
-                                .unwrap_or(false)
-                        })
-                    } else {
-                        matches.iter().any(|m| self.bindings_compatible(row, m))
-                    };
-
-                    if !found {
-                        return Ok(false);
+                            let mut merged = current.clone();
+                            self.merge_match_into_row(&mut merged, m);
+                            next_rows.push(merged);
+                        }
                     }
+                    combined_rows = next_rows;
                 }
-                Ok(true)
+
+                if combined_rows.is_empty() {
+                    return Ok(false);
+                }
+                if let Some(ref where_pred) = where_clause {
+                    Ok(combined_rows
+                        .iter()
+                        .any(|r| self.evaluate_predicate(where_pred, r).unwrap_or(false)))
+                } else {
+                    Ok(true)
+                }
             }
             Predicate::InExpression { expr, list_expr } => {
                 let val = self.evaluate_expression(expr, row)?;

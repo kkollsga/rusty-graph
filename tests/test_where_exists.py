@@ -539,3 +539,55 @@ class TestExistsInlinePropertyRegression:
         """)
         ids = [row["f.id"] for row in result]
         assert ids == [17764457]
+
+
+class TestExistsMultiMatchSubquery:
+    """EXISTS { MATCH ... MATCH ... [WHERE ...] } — multi-clause subquery
+    form (issue #12). Previously errored with `Unexpected token in EXISTS
+    pattern: Match`; now treated as multiple sequential patterns."""
+
+    def test_two_match_clauses(self, social_graph):
+        # People who know someone AND have purchased something.
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS {
+                MATCH (p)-[:KNOWS]->(:Person)
+                MATCH (p)-[:PURCHASED]->(:Product)
+            }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
+
+    def test_two_match_clauses_with_where(self, social_graph):
+        # People who know someone AND purchased a product priced > 20.
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS {
+                MATCH (p)-[:KNOWS]->(:Person)
+                MATCH (p)-[:PURCHASED]->(prod:Product)
+                WHERE prod.price > 20
+            }
+            RETURN p.name
+        """)
+        names = sorted(row["p.name"] for row in result)
+        # Alice purchased Widget (price 10) — fails the WHERE; only Bob
+        # (Gadget, price 25) qualifies.
+        assert names == ["Bob"]
+
+    def test_not_exists_multi_match(self, social_graph):
+        # NOT EXISTS subquery — people who haven't done both.
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE NOT EXISTS {
+                MATCH (p)-[:KNOWS]->(:Person)
+                MATCH (p)-[:PURCHASED]->(:Product)
+            }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+        names = [row["p.name"] for row in result]
+        # Charlie and Diana neither know anyone outbound nor purchased
+        # — they fail the multi-MATCH subquery, so NOT EXISTS keeps them.
+        assert names == ["Charlie", "Diana"]
