@@ -793,6 +793,18 @@ pub fn load_into_graph(
                 str_col(vec![info.build_system.clone()]),
             ),
             (
+                "crate_type",
+                ColumnType::String,
+                str_col(vec![info.metadata.get("crate_type").and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                })]),
+            ),
+            (
                 "manifest",
                 ColumnType::String,
                 str_col(vec![Some(info.manifest_path.clone())]),

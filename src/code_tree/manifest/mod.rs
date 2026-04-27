@@ -261,6 +261,26 @@ fn read_cargo(manifest_path: &Path, project_root: &Path) -> Result<ProjectInfo, 
         });
     }
 
+    // Capture `[lib] crate-type` so downstream queries can tell apart a
+    // regular `lib` crate (where `pub fn` is a real Rust API export) from a
+    // `cdylib` PyO3 crate (where only `#[pyfunction]` / `#[pymethods]`
+    // exposure matters and `pub fn` is meaningless to the outside world).
+    if let Some(crate_types) = data
+        .get("lib")
+        .and_then(|v| v.as_table())
+        .and_then(|lib| lib.get("crate-type"))
+        .and_then(|v| v.as_array())
+    {
+        let types: Vec<serde_json::Value> = crate_types
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| serde_json::Value::String(s.to_string())))
+            .collect();
+        if !types.is_empty() {
+            info.metadata
+                .insert("crate_type".to_string(), serde_json::Value::Array(types));
+        }
+    }
+
     // Workspace members — glob manually.
     if let Some(members) = data
         .get("workspace")
