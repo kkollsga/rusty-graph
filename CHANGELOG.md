@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Structural validators v2 — rule packs extension (Phase 3 of the
+  completeness round).** Seven new CALL procedures complete the
+  rule-pack family from 0.8.19 by covering *n*-ary and declarative
+  checks:
+
+  - `inverse_violation({rel_a, rel_b}) YIELD a, b` — declared-inverse
+    relations not symmetric (e.g. `parent_of` without matching
+    `child_of`).
+  - `transitivity_violation({rel}) YIELD a, b, c` — `(a)-[rel]->(b)
+    -[rel]->(c)` chains where the direct `(a)-[rel]->(c)` is absent.
+    Generalizes the OCTF subclass-fold audit pattern.
+  - `cardinality_violation({type, edge[, min, max]}) YIELD node, count`
+    — declarative cardinality. Setting `max:1` catches functional-
+    property violations; `min:1` catches missing-required-edge.
+  - `type_domain_violation({edge, expected_source}) YIELD source, target`
+  - `type_range_violation({edge, expected_target}) YIELD source, target`
+    — schema integrity checks on edge endpoints.
+  - `parallel_edges({edge}) YIELD a, b, count` — pairs connected by
+    more than one edge of the same type (almost always an ETL bug).
+  - `null_property({type, property}) YIELD node` — property side of
+    `missing_required_edge`.
+
+  All seven follow the existing rule-procedure pattern and surface
+  via `CALL list_procedures()` and `describe(cypher=True)`.
+
 - **Lexical text predicates (Phase 2 of the completeness round).** Six
   string-similarity primitives now expressible in Cypher without
   dropping to Python:

@@ -84,14 +84,23 @@ impl<'a> CypherExecutor<'a> {
             | "self_loop"
             | "missing_required_edge"
             | "missing_inbound_edge"
-            | "duplicate_title" => &["node"],
+            | "duplicate_title"
+            | "null_property" => &["node"],
             "cycle_2step" => &["node_a", "node_b"],
+            "inverse_violation" => &["a", "b"],
+            "transitivity_violation" => &["a", "b", "c"],
+            "cardinality_violation" => &["node", "count"],
+            "type_domain_violation" | "type_range_violation" => &["source", "target"],
+            "parallel_edges" => &["a", "b", "count"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
                      closeness, louvain, label_propagation, connected_components, \
                      cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
-                     missing_required_edge, missing_inbound_edge, duplicate_title",
+                     missing_required_edge, missing_inbound_edge, duplicate_title, \
+                     null_property, inverse_violation, transitivity_violation, \
+                     cardinality_violation, type_domain_violation, \
+                     type_range_violation, parallel_edges",
                     clause.procedure_name
                 ));
             }
@@ -290,6 +299,41 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
+            "null_property" => super::rule_procedures::execute_null_property(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "inverse_violation" => super::rule_procedures::execute_inverse_violation(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "transitivity_violation" => super::rule_procedures::execute_transitivity_violation(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "cardinality_violation" => super::rule_procedures::execute_cardinality_violation(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "type_domain_violation" => super::rule_procedures::execute_type_domain_violation(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "type_range_violation" => super::rule_procedures::execute_type_range_violation(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "parallel_edges" => super::rule_procedures::execute_parallel_edges(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
             "list_procedures" => {
                 let procedures = [
                     (
@@ -361,6 +405,41 @@ impl<'a> CypherExecutor<'a> {
                         "duplicate_title",
                         "Rule: nodes of {type} whose title is shared with another node of the same type",
                         "node",
+                    ),
+                    (
+                        "null_property",
+                        "Rule: nodes of {type} where {property} is missing, null, or empty",
+                        "node",
+                    ),
+                    (
+                        "inverse_violation",
+                        "Rule: (a)-[rel_a]->(b) without a matching (b)-[rel_b]->(a)",
+                        "a, b",
+                    ),
+                    (
+                        "transitivity_violation",
+                        "Rule: (a)->(b)->(c) chains under {rel} where the direct (a)->(c) edge is absent",
+                        "a, b, c",
+                    ),
+                    (
+                        "cardinality_violation",
+                        "Rule: nodes of {type} whose outgoing-{edge} count is outside [min, max]",
+                        "node, count",
+                    ),
+                    (
+                        "type_domain_violation",
+                        "Rule: edges of {edge} whose source node is not of {expected_source} type",
+                        "source, target",
+                    ),
+                    (
+                        "type_range_violation",
+                        "Rule: edges of {edge} whose target node is not of {expected_target} type",
+                        "source, target",
+                    ),
+                    (
+                        "parallel_edges",
+                        "Rule: (a, b) pairs connected by more than one edge of {edge}",
+                        "a, b, count",
                     ),
                     (
                         "list_procedures",

@@ -299,6 +299,13 @@ def test_list_procedures_includes_rule_procedures(integrity_graph):
         "missing_required_edge",
         "missing_inbound_edge",
         "duplicate_title",
+        "null_property",
+        "inverse_violation",
+        "transitivity_violation",
+        "cardinality_violation",
+        "type_domain_violation",
+        "type_range_violation",
+        "parallel_edges",
     ):
         assert p in names, f"missing procedure: {p}"
 
@@ -306,3 +313,162 @@ def test_list_procedures_includes_rule_procedures(integrity_graph):
 def test_invalid_yield_column_rejected(integrity_graph):
     with pytest.raises((ValueError, RuntimeError), match="does not yield"):
         integrity_graph.cypher("CALL orphan_node({type: 'LawSection'}) YIELD bogus RETURN bogus")
+
+
+# ---------------------------------------------------------------------
+# 0.8.20 — rule packs v2: validators
+
+
+@pytest.fixture
+def schema_graph():
+    """Two-tier graph: A→B→C parent_of chain; partial child_of inverse;
+    extra Q node connects to P with a wrong source type."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            [
+                {"id": 1, "name": "A", "email": "a@x"},
+                {"id": 2, "name": "B", "email": ""},
+                {"id": 3, "name": "C", "email": None},
+                {"id": 4, "name": "D"},
+            ]
+        ),
+        "P",
+        "id",
+        "name",
+    )
+    # parent_of: A→B, B→C
+    g.add_connections(
+        pd.DataFrame([{"f": 1, "t": 2}, {"f": 2, "t": 3}]),
+        "parent_of",
+        "P",
+        "f",
+        "P",
+        "t",
+    )
+    # child_of: only B→A (so A→B has inverse, B→C does not)
+    g.add_connections(
+        pd.DataFrame([{"f": 2, "t": 1}]),
+        "child_of",
+        "P",
+        "f",
+        "P",
+        "t",
+    )
+    return g
+
+
+class TestInverseViolation:
+    def test_finds_unidirectional(self, schema_graph):
+        rows = list(
+            schema_graph.cypher(
+                "CALL inverse_violation({rel_a: 'parent_of', rel_b: 'child_of'}) YIELD a, b "
+                "RETURN a.id AS av, b.id AS bv"
+            )
+        )
+        # B→C parent_of has no C→B child_of inverse; A→B does have inverse
+        ids = {(r["av"], r["bv"]) for r in rows}
+        assert (2, 3) in ids
+        assert (1, 2) not in ids
+
+
+class TestTransitivityViolation:
+    def test_finds_chain(self, schema_graph):
+        rows = list(
+            schema_graph.cypher(
+                "CALL transitivity_violation({rel: 'parent_of'}) YIELD a, b, c "
+                "RETURN a.id AS av, b.id AS bv, c.id AS cv"
+            )
+        )
+        # A→B→C with no A→C
+        triples = {(r["av"], r["bv"], r["cv"]) for r in rows}
+        assert (1, 2, 3) in triples
+
+
+class TestCardinalityViolation:
+    def test_max_zero_flags_all(self, schema_graph):
+        # max=0 means no edges allowed; A and B both have 1 outgoing parent_of
+        rows = list(
+            schema_graph.cypher(
+                "CALL cardinality_violation({type: 'P', edge: 'parent_of', max: 0}) YIELD node, count "
+                "RETURN node.id AS nv, count"
+            )
+        )
+        flagged = {(r["nv"], r["count"]) for r in rows}
+        assert (1, 1) in flagged
+        assert (2, 1) in flagged
+
+    def test_min_two_flags_zero_count(self, schema_graph):
+        rows = list(
+            schema_graph.cypher(
+                "CALL cardinality_violation({type: 'P', edge: 'parent_of', min: 2}) YIELD node, count "
+                "RETURN node.id AS nv, count"
+            )
+        )
+        # All 4 nodes have <2 outgoing parent_of
+        ids = {r["nv"] for r in rows}
+        assert ids == {1, 2, 3, 4}
+
+
+class TestNullProperty:
+    def test_finds_missing_email(self, schema_graph):
+        rows = list(
+            schema_graph.cypher(
+                "CALL null_property({type: 'P', property: 'email'}) YIELD node RETURN node.id AS nv ORDER BY nv"
+            )
+        )
+        ids = [r["nv"] for r in rows]
+        # B has empty string, C has null, D has no email property
+        assert 2 in ids
+        assert 3 in ids
+        assert 4 in ids
+        assert 1 not in ids
+
+
+class TestTypeDomainAndRangeViolation:
+    def test_wrong_source_type(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame([{"id": 1, "n": "p1"}]), "P", "id", "n")
+        g.add_nodes(pd.DataFrame([{"id": 100, "n": "q1"}]), "Q", "id", "n")
+        g.add_connections(pd.DataFrame([{"f": 100, "t": 1}]), "LINK", "Q", "f", "P", "t")
+        rows = list(
+            g.cypher(
+                "CALL type_domain_violation({edge: 'LINK', expected_source: 'P'}) "
+                "YIELD source, target RETURN source.id AS sv"
+            )
+        )
+        assert any(r["sv"] == 100 for r in rows)
+
+    def test_wrong_target_type(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame([{"id": 1, "n": "p1"}]), "P", "id", "n")
+        g.add_nodes(pd.DataFrame([{"id": 100, "n": "q1"}]), "Q", "id", "n")
+        g.add_connections(pd.DataFrame([{"f": 1, "t": 100}]), "LINK", "P", "f", "Q", "t")
+        rows = list(
+            g.cypher(
+                "CALL type_range_violation({edge: 'LINK', expected_target: 'P'}) "
+                "YIELD source, target RETURN target.id AS tv"
+            )
+        )
+        assert any(r["tv"] == 100 for r in rows)
+
+
+class TestParallelEdges:
+    def test_detects_duplicates(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame([{"id": 1, "n": "a"}, {"id": 2, "n": "b"}]), "P", "id", "n")
+        # CREATE bypasses dedup
+        for _ in range(3):
+            g.cypher("MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:LINK]->(b)")
+        rows = list(
+            g.cypher("CALL parallel_edges({edge: 'LINK'}) YIELD a, b, count RETURN a.id AS av, b.id AS bv, count")
+        )
+        assert len(rows) == 1
+        assert rows[0]["count"] == 3
+
+    def test_no_duplicates_returns_empty(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame([{"id": 1, "n": "a"}, {"id": 2, "n": "b"}]), "P", "id", "n")
+        g.cypher("MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:LINK]->(b)")
+        rows = list(g.cypher("CALL parallel_edges({edge: 'LINK'}) YIELD a, b, count RETURN count"))
+        assert rows == []

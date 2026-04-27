@@ -619,7 +619,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
         );
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
-    xml.push_str("    <rules hint=\"CALL proc({type, edge}) YIELD node — structural validators (orphan_node/self_loop/cycle_2step/missing_required_edge/missing_inbound_edge/duplicate_title). Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
+    xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation. Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference, describe(fluent=['topic']) for detailed docs.\"/>\n");
     if graph.graph.edge_count() > 0 {
@@ -1229,7 +1229,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     // Minimal extensions (skip capability-dependent hints)
     xml.push_str("  <extensions>\n");
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
-    xml.push_str("    <rules hint=\"CALL proc({type, edge}) YIELD node — structural validators (orphan_node/self_loop/cycle_2step/missing_required_edge/missing_inbound_edge/duplicate_title)\"/>\n");
+    xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation.\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions. describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");

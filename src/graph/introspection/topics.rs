@@ -9,7 +9,9 @@ const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, U
     CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, \
     label_propagation, connected_components, cluster, orphan_node, self_loop, \
-    cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title";
+    cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
+    null_property, inverse_violation, transitivity_violation, cardinality_violation, \
+    type_domain_violation, type_range_violation, parallel_edges";
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
 pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
@@ -55,6 +57,13 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
             "MISSING_REQUIRED_EDGE" => write_topic_missing_required_edge(xml),
             "MISSING_INBOUND_EDGE" => write_topic_missing_inbound_edge(xml),
             "DUPLICATE_TITLE" => write_topic_duplicate_title(xml),
+            "NULL_PROPERTY" => write_topic_null_property(xml),
+            "INVERSE_VIOLATION" => write_topic_inverse_violation(xml),
+            "TRANSITIVITY_VIOLATION" => write_topic_transitivity_violation(xml),
+            "CARDINALITY_VIOLATION" => write_topic_cardinality_violation(xml),
+            "TYPE_DOMAIN_VIOLATION" => write_topic_type_domain_violation(xml),
+            "TYPE_RANGE_VIOLATION" => write_topic_type_range_violation(xml),
+            "PARALLEL_EDGES" => write_topic_parallel_edges(xml),
             "SPATIAL" => write_topic_spatial(xml),
             "TEMPORAL" => write_topic_temporal(xml),
             "EXPLAIN" => write_topic_explain(xml),
@@ -537,6 +546,77 @@ pub(super) fn write_topic_duplicate_title(xml: &mut String) {
     xml.push_str("      <ex desc=\"group + count\">CALL duplicate_title({type: 'Prospect'}) YIELD node WITH node.title AS title, collect(node) AS dups WITH title, size(dups) AS n WHERE n &gt; 1 RETURN title, n ORDER BY n DESC LIMIT 20</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </duplicate_title>\n");
+}
+
+pub(super) fn write_topic_null_property(xml: &mut String) {
+    xml.push_str("  <null_property>\n");
+    xml.push_str("    <desc>Yields nodes of {type} where {property} is missing, null, or empty string.</desc>\n");
+    xml.push_str(
+        "    <syntax>CALL null_property({type: 'Person', property: 'email'}) YIELD node</syntax>\n",
+    );
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"count missing emails\">CALL null_property({type: 'Person', property: 'email'}) YIELD node RETURN count(node)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </null_property>\n");
+}
+
+pub(super) fn write_topic_inverse_violation(xml: &mut String) {
+    xml.push_str("  <inverse_violation>\n");
+    xml.push_str("    <desc>Yields (a, b) pairs where (a)-[rel_a]-&gt;(b) exists but the inverse (b)-[rel_b]-&gt;(a) does not. Use when two relations are declared inverse (parent_of/child_of, manages/works_for, cites/cited_by).</desc>\n");
+    xml.push_str("    <syntax>CALL inverse_violation({rel_a: 'parent_of', rel_b: 'child_of'}) YIELD a, b</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"unidirectional citations\">CALL inverse_violation({rel_a: 'CITES', rel_b: 'CITED_BY'}) YIELD a, b RETURN a.id, b.id LIMIT 50</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </inverse_violation>\n");
+}
+
+pub(super) fn write_topic_transitivity_violation(xml: &mut String) {
+    xml.push_str("  <transitivity_violation>\n");
+    xml.push_str("    <desc>Yields (a, b, c) triples where (a)-[rel]-&gt;(b)-[rel]-&gt;(c) exists but the direct (a)-[rel]-&gt;(c) edge does not. Use for taxonomy / call-graph / citation-chain hygiene.</desc>\n");
+    xml.push_str(
+        "    <syntax>CALL transitivity_violation({rel: 'subClassOf'}) YIELD a, b, c</syntax>\n",
+    );
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"taxonomy fold\">CALL transitivity_violation({rel: 'subClassOf'}) YIELD a, b, c RETURN a.id, c.id, count(b) AS bridges</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </transitivity_violation>\n");
+}
+
+pub(super) fn write_topic_cardinality_violation(xml: &mut String) {
+    xml.push_str("  <cardinality_violation>\n");
+    xml.push_str("    <desc>Yields nodes of {type} whose outgoing-{edge} count is outside [min, max]. Setting max=1 catches functional-property violations; min=1 catches missing-required-edge.</desc>\n");
+    xml.push_str("    <syntax>CALL cardinality_violation({type: 'Country', edge: 'HAS_CAPITAL', min: 1, max: 1}) YIELD node, count</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"countries with multiple capitals\">CALL cardinality_violation({type: 'Country', edge: 'HAS_CAPITAL', max: 1}) YIELD node, count RETURN node.title, count ORDER BY count DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </cardinality_violation>\n");
+}
+
+pub(super) fn write_topic_type_domain_violation(xml: &mut String) {
+    xml.push_str("  <type_domain_violation>\n");
+    xml.push_str("    <desc>Yields edges of {edge} whose source node is not of {expected_source} type. Schema integrity check.</desc>\n");
+    xml.push_str("    <syntax>CALL type_domain_violation({edge: 'CITES', expected_source: 'Case'}) YIELD source, target</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"non-case citations\">CALL type_domain_violation({edge: 'CITES', expected_source: 'Case'}) YIELD source, target RETURN labels(source), count(*)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </type_domain_violation>\n");
+}
+
+pub(super) fn write_topic_type_range_violation(xml: &mut String) {
+    xml.push_str("  <type_range_violation>\n");
+    xml.push_str("    <desc>Yields edges of {edge} whose target node is not of {expected_target} type. Schema integrity check (mirror of type_domain_violation).</desc>\n");
+    xml.push_str("    <syntax>CALL type_range_violation({edge: 'CITES', expected_target: 'Case'}) YIELD source, target</syntax>\n");
+    xml.push_str("  </type_range_violation>\n");
+}
+
+pub(super) fn write_topic_parallel_edges(xml: &mut String) {
+    xml.push_str("  <parallel_edges>\n");
+    xml.push_str("    <desc>Yields (a, b) pairs connected by more than one edge of {edge}. Almost always a load-time bug (duplicate CSV rows, non-deduping upsert path).</desc>\n");
+    xml.push_str("    <syntax>CALL parallel_edges({edge: 'CITES'}) YIELD a, b, count</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"top duplicates\">CALL parallel_edges({edge: 'CITES'}) YIELD a, b, count RETURN a.id, b.id, count ORDER BY count DESC LIMIT 20</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </parallel_edges>\n");
 }
 
 pub(super) fn write_topic_spatial(xml: &mut String) {

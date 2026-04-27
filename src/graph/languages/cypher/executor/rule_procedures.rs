@@ -243,6 +243,271 @@ pub(super) fn execute_duplicate_title(
     Ok(rows)
 }
 
+/// `CALL inverse_violation({rel_a: 'parent_of', rel_b: 'child_of'}) YIELD a, b`
+///
+/// Yields one row per `(a, b)` pair where `(a)-[rel_a]->(b)` exists but
+/// the inverse `(b)-[rel_b]->(a)` does not. Useful when two relations
+/// are declared as logical inverses (parent_of/child_of, manages/works_for,
+/// cites/cited_by) and you want to find unidirectional cases.
+pub(super) fn execute_inverse_violation(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let rel_a = require_string_param(params, "rel_a", "inverse_violation")?;
+    let rel_b = require_string_param(params, "rel_b", "inverse_violation")?;
+    let (a_var, b_var) = require_two_node_yields(yield_items, "inverse_violation", "a", "b")?;
+    let key_a = InternedKey::from_str(&rel_a);
+    let key_b = InternedKey::from_str(&rel_b);
+
+    let mut rows = Vec::new();
+    for a in graph.graph.node_indices() {
+        for er in graph.graph.edges_directed(a, Direction::Outgoing) {
+            if er.weight().connection_type != key_a {
+                continue;
+            }
+            let b = er.target();
+            let has_inverse = graph
+                .graph
+                .edges_directed(b, Direction::Outgoing)
+                .any(|er2| er2.target() == a && er2.weight().connection_type == key_b);
+            if !has_inverse {
+                let mut row = ResultRow::new();
+                row.node_bindings.insert(a_var.clone(), a);
+                row.node_bindings.insert(b_var.clone(), b);
+                rows.push(row);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// `CALL transitivity_violation({rel: 'subClassOf'}) YIELD a, b, c`
+///
+/// For every `(a)-[rel]->(b)-[rel]->(c)` chain, yields the triple when no
+/// direct `(a)-[rel]->(c)` edge exists. Generalizes the OCTF subclass-fold
+/// audit pattern. Pairs with `cycle_2step` for the cycle case.
+pub(super) fn execute_transitivity_violation(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let rel = require_string_param(params, "rel", "transitivity_violation")?;
+    let a_var = require_node_yield(yield_items, "transitivity_violation", "a")?;
+    let b_var = require_node_yield(yield_items, "transitivity_violation", "b")?;
+    let c_var = require_node_yield(yield_items, "transitivity_violation", "c")?;
+    let key = InternedKey::from_str(&rel);
+
+    let mut rows = Vec::new();
+    for a in graph.graph.node_indices() {
+        // Collect direct successors of a (used for the closure check).
+        let direct_a: std::collections::HashSet<NodeIndex> = graph
+            .graph
+            .edges_directed(a, Direction::Outgoing)
+            .filter(|er| er.weight().connection_type == key)
+            .map(|er| er.target())
+            .collect();
+        for &b in &direct_a {
+            for er_b in graph.graph.edges_directed(b, Direction::Outgoing) {
+                if er_b.weight().connection_type != key {
+                    continue;
+                }
+                let c = er_b.target();
+                if c == a || c == b {
+                    continue;
+                }
+                if !direct_a.contains(&c) {
+                    let mut row = ResultRow::new();
+                    row.node_bindings.insert(a_var.clone(), a);
+                    row.node_bindings.insert(b_var.clone(), b);
+                    row.node_bindings.insert(c_var.clone(), c);
+                    rows.push(row);
+                }
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// `CALL cardinality_violation({type: 'Wellbore', edge: 'IN_LICENCE', min: 1, max: 1}) YIELD node, count`
+///
+/// Yields nodes of `type` whose outgoing edge count of `edge` falls
+/// outside `[min, max]`. Either bound is optional (`min` defaults to 0,
+/// `max` defaults to no upper limit). Setting `max: 1` catches functional-
+/// property violations; setting `min: 1` catches missing-required-edge.
+pub(super) fn execute_cardinality_violation(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let node_type = require_string_param(params, "type", "cardinality_violation")?;
+    let edge_type = require_string_param(params, "edge", "cardinality_violation")?;
+    let min_count = call_param_i64(params, "min", 0).max(0) as usize;
+    let max_count = call_param_opt_i64(params, "max").map(|v| v.max(0) as usize);
+    let node_var = require_node_yield(yield_items, "cardinality_violation", "node")?;
+    let count_var = require_scalar_yield(yield_items, "cardinality_violation", "count")?;
+    let nodes = type_indices(graph, &node_type)?;
+    let edge_key = InternedKey::from_str(&edge_type);
+
+    let mut rows = Vec::new();
+    for &nidx in nodes {
+        let count = graph
+            .graph
+            .edges_directed(nidx, Direction::Outgoing)
+            .filter(|er| er.weight().connection_type == edge_key)
+            .count();
+        let too_few = count < min_count;
+        let too_many = max_count.is_some_and(|m| count > m);
+        if too_few || too_many {
+            let mut row = ResultRow::new();
+            row.node_bindings.insert(node_var.clone(), nidx);
+            row.projected
+                .insert(count_var.clone(), Value::Int64(count as i64));
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// `CALL type_domain_violation({edge: 'CITES', expected_source: 'Case'}) YIELD source, target`
+///
+/// Yields edges of `edge` whose source node is not of `expected_source`
+/// type. Useful as a post-load schema check.
+pub(super) fn execute_type_domain_violation(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let edge_type = require_string_param(params, "edge", "type_domain_violation")?;
+    let expected = require_string_param(params, "expected_source", "type_domain_violation")?;
+    let src_var = require_node_yield(yield_items, "type_domain_violation", "source")?;
+    let tgt_var = require_node_yield(yield_items, "type_domain_violation", "target")?;
+    let key = InternedKey::from_str(&edge_type);
+
+    let mut rows = Vec::new();
+    for er in graph.graph.edge_references() {
+        if er.weight().connection_type != key {
+            continue;
+        }
+        let src = er.source();
+        let actual_type = match graph.graph.node_weight(src) {
+            Some(n) => n.node_type_str(&graph.interner),
+            None => continue,
+        };
+        if actual_type != expected {
+            let mut row = ResultRow::new();
+            row.node_bindings.insert(src_var.clone(), src);
+            row.node_bindings.insert(tgt_var.clone(), er.target());
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// `CALL type_range_violation({edge: 'CITES', expected_target: 'Case'}) YIELD source, target`
+///
+/// Mirror of [`execute_type_domain_violation`]: yields edges whose
+/// target node is not of `expected_target` type.
+pub(super) fn execute_type_range_violation(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let edge_type = require_string_param(params, "edge", "type_range_violation")?;
+    let expected = require_string_param(params, "expected_target", "type_range_violation")?;
+    let src_var = require_node_yield(yield_items, "type_range_violation", "source")?;
+    let tgt_var = require_node_yield(yield_items, "type_range_violation", "target")?;
+    let key = InternedKey::from_str(&edge_type);
+
+    let mut rows = Vec::new();
+    for er in graph.graph.edge_references() {
+        if er.weight().connection_type != key {
+            continue;
+        }
+        let tgt = er.target();
+        let actual_type = match graph.graph.node_weight(tgt) {
+            Some(n) => n.node_type_str(&graph.interner),
+            None => continue,
+        };
+        if actual_type != expected {
+            let mut row = ResultRow::new();
+            row.node_bindings.insert(src_var.clone(), er.source());
+            row.node_bindings.insert(tgt_var.clone(), tgt);
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// `CALL parallel_edges({edge: 'CITES'}) YIELD a, b, count`
+///
+/// Yields one row per `(a, b)` pair connected by more than one edge of
+/// the same `edge` type. Almost always a load-time bug — duplicate rows
+/// in the source CSV, or an upsert path that didn't dedupe.
+pub(super) fn execute_parallel_edges(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let edge_type = require_string_param(params, "edge", "parallel_edges")?;
+    let (a_var, b_var) = require_two_node_yields(yield_items, "parallel_edges", "a", "b")?;
+    let count_var = require_scalar_yield(yield_items, "parallel_edges", "count")?;
+    let key = InternedKey::from_str(&edge_type);
+
+    let mut counts: HashMap<(NodeIndex, NodeIndex), u32> = HashMap::new();
+    for er in graph.graph.edge_references() {
+        if er.weight().connection_type == key {
+            *counts.entry((er.source(), er.target())).or_insert(0) += 1;
+        }
+    }
+    let mut rows = Vec::new();
+    for ((a, b), c) in counts {
+        if c > 1 {
+            let mut row = ResultRow::new();
+            row.node_bindings.insert(a_var.clone(), a);
+            row.node_bindings.insert(b_var.clone(), b);
+            row.projected
+                .insert(count_var.clone(), Value::Int64(c as i64));
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// `CALL null_property({type: 'Person', property: 'email'}) YIELD node`
+///
+/// Yields nodes of `type` where `property` is absent or null. Pairs with
+/// `missing_required_edge` for the property side of the integrity story.
+pub(super) fn execute_null_property(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let node_type = require_string_param(params, "type", "null_property")?;
+    let property = require_string_param(params, "property", "null_property")?;
+    let yield_var = require_node_yield(yield_items, "null_property", "node")?;
+    let nodes = type_indices(graph, &node_type)?;
+
+    let mut rows = Vec::new();
+    for &nidx in nodes {
+        let node = match graph.graph.node_weight(nidx) {
+            Some(n) => n,
+            None => continue,
+        };
+        let val = node.get_property_value(&property);
+        let is_null = match val {
+            None => true,
+            Some(Value::Null) => true,
+            Some(Value::String(ref s)) if s.is_empty() => true,
+            _ => false,
+        };
+        if is_null {
+            rows.push(make_node_row(&yield_var, nidx));
+        }
+    }
+    Ok(rows)
+}
+
 /// Per-edge-type presence check. The disk backend's
 /// `edges_directed_filtered` may use an inverted-index fast path that
 /// can miss specific (node, edge_type) combinations on sparsely-built
@@ -323,6 +588,34 @@ fn require_two_node_yields(
     let av = require_node_yield(yield_items, proc, a)?;
     let bv = require_node_yield(yield_items, proc, b)?;
     Ok((av, bv))
+}
+
+/// Validate that `expected` appears in `yield_items` and return the alias
+/// the caller assigned (or the original name). Used for non-node yields
+/// (e.g. `count`, `values`) that flow into `row.projected` rather than
+/// `row.node_bindings`.
+fn require_scalar_yield(
+    yield_items: &[YieldItem],
+    proc: &str,
+    expected: &str,
+) -> Result<String, String> {
+    require_node_yield(yield_items, proc, expected)
+}
+
+fn call_param_i64(params: &HashMap<String, Value>, key: &str, default: i64) -> i64 {
+    match params.get(key) {
+        Some(Value::Int64(v)) => *v,
+        Some(Value::Float64(v)) => *v as i64,
+        _ => default,
+    }
+}
+
+fn call_param_opt_i64(params: &HashMap<String, Value>, key: &str) -> Option<i64> {
+    match params.get(key) {
+        Some(Value::Int64(v)) => Some(*v),
+        Some(Value::Float64(v)) => Some(*v as i64),
+        _ => None,
+    }
 }
 
 fn type_indices<'a>(graph: &'a DirGraph, node_type: &str) -> Result<&'a Vec<NodeIndex>, String> {
