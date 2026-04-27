@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **C++ template-typed methods, destructors, qualifier-stripped return types,
+  and macro-decorated constructors.** Four targeted parser fixes that drop
+  nlohmann/json's signature-fallback rate from 24% → 12% and capture 39
+  previously-missed template methods.
+  - `template_type` and `qualified_identifier` now in `TYPE_NODES` so generic
+    return types like `iteration_proxy<int>` and `std::vector<T>` are captured.
+  - `type_qualifier`, `storage_class_specifier`, `virtual_specifier` skipped
+    in `get_return_type` — fixes `constexpr int foo()` returning "constexpr"
+    instead of "int".
+  - `destructor_name` recognized in `get_name` — `~Widget` now returns
+    `"~Widget"` instead of `"unknown"`.
+  - In-class `field_declaration` items containing `function_declarator` are
+    routed to `parse_function` (template-typed methods were being treated as
+    fields). New `find_buried_function_declarator` walker unwraps
+    `parenthesized_declarator` wrappers that tree-sitter-cpp emits around
+    macro-decorated constructors (e.g. `JSON_HEDLEY_NON_NULL(3) Foo(int x)`)
+    so the real `function_declarator` and its parameters are captured.
+
 ## [0.8.23] — 2026-04-27
 
 C++ macro-aware parsing, Go method return-type fix, and receiver attribution

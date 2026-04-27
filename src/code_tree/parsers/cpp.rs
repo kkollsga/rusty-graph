@@ -116,7 +116,11 @@ const TYPE_NODES: &[&str] = &[
     "struct_specifier",
     "enum_specifier",
     "union_specifier",
-    "type_qualifier",
+    // Generic / template return types: `iteration_proxy<int>`, `std::vector<T>`.
+    "template_type",
+    "qualified_identifier",
+    // NOTE: `type_qualifier` (const, volatile, constexpr) intentionally excluded —
+    // it's a qualifier, not a type. get_return_type skips past it to find the real type.
 ];
 
 pub enum CppFlavor {
@@ -177,6 +181,12 @@ impl CppParser {
     fn get_name<'a>(node: Node<'a>, source: &'a [u8], name_type: &str) -> Option<&'a str> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
+            // Destructor names: `~Widget` is a `destructor_name` node wrapping
+            // the type identifier. Use its full text (including the `~`) so
+            // graph queries can distinguish destructors from other members.
+            if child.kind() == "destructor_name" {
+                return Some(node_text(child, source));
+            }
             if child.kind() == name_type
                 || child.kind() == "type_identifier"
                 || child.kind() == "field_identifier"
@@ -279,6 +289,16 @@ impl CppParser {
             // `type_identifier` children, producing return_type="SPDLOG_INLINE"
             // instead of the real type.
             if looks_like_macro_decorator(text) {
+                continue;
+            }
+            // Skip C++ qualifiers — `const`, `volatile`, `constexpr`, `inline`,
+            // `static`, `noexcept` etc. They aren't types but appear before the
+            // real return type. Without skipping, `constexpr int foo()` returns
+            // "constexpr" as the type.
+            if matches!(
+                child.kind(),
+                "type_qualifier" | "storage_class_specifier" | "virtual_specifier"
+            ) {
                 continue;
             }
             // Recover from tree-sitter ERROR wrappers around primitive types.
@@ -447,6 +467,26 @@ impl CppParser {
         out
     }
 
+    /// Walk a node tree (typically a `parenthesized_declarator`) looking for
+    /// a buried `function_declarator`. Used to unwrap macro-decorated function
+    /// definitions like `JSON_HEDLEY_NON_NULL(3) Foo(int x)`, where tree-sitter-cpp
+    /// puts the real declarator inside `parenthesized_declarator > ERROR >
+    /// function_declarator`.
+    fn find_buried_function_declarator(node: Node) -> Option<Node> {
+        // Iterative DFS — avoid blowing the stack on weird ASTs.
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "function_declarator" {
+                return Some(n);
+            }
+            let mut cursor = n.walk();
+            for c in n.children(&mut cursor) {
+                stack.push(c);
+            }
+        }
+        None
+    }
+
     fn get_enum_variants(node: Node, source: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut cursor = node.walk();
@@ -481,6 +521,16 @@ impl CppParser {
             if matches!(child.kind(), "function_declarator" | "pointer_declarator") {
                 declarator = Some(child);
                 break;
+            }
+            // Macro-decorated constructors like `JSON_HEDLEY_NON_NULL(3) Foo(...)`
+            // produce a `parenthesized_declarator` containing the macro args (3)
+            // followed by an ERROR wrapping the real `function_declarator`.
+            // Walk through the wrapper to find the buried declarator.
+            if child.kind() == "parenthesized_declarator" {
+                if let Some(buried) = Self::find_buried_function_declarator(child) {
+                    declarator = Some(buried);
+                    break;
+                }
             }
         }
         // Unwrap pointer_declarator.
@@ -1009,14 +1059,36 @@ impl CppParser {
                         }
                     }
                     "field_declaration" => {
-                        self.parse_cpp_field(
-                            item,
-                            source,
-                            rel_path,
-                            class_qname,
-                            &current_vis,
-                            result,
-                        );
+                        // Methods with template return types like `proxy<T> items()`
+                        // come through as `field_declaration` containing a
+                        // `function_declarator`. Route those to parse_function;
+                        // genuine fields (no function_declarator) go to parse_cpp_field.
+                        let mut ic = item.walk();
+                        let has_func_decl = item
+                            .children(&mut ic)
+                            .any(|c| c.kind() == "function_declarator");
+                        if has_func_decl {
+                            let mut fn_info = self.parse_function(
+                                item,
+                                source,
+                                module_path,
+                                rel_path,
+                                true,
+                                Some(class_name),
+                            );
+                            fn_info.visibility = current_vis.clone();
+                            method_rel.methods.push(fn_info.clone());
+                            result.functions.push(fn_info);
+                        } else {
+                            self.parse_cpp_field(
+                                item,
+                                source,
+                                rel_path,
+                                class_qname,
+                                &current_vis,
+                                result,
+                            );
+                        }
                     }
                     "template_declaration" => {
                         let tparams = get_type_parameters(item, source, "template_parameter_list");

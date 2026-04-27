@@ -74,6 +74,92 @@ def test_multiple_macros_stripped(tmp_path):
     assert "FMT" not in rt, f"return type should not contain a macro name: {rt!r}"
 
 
+def test_constexpr_qualifier_skipped_for_return_type(tmp_path):
+    """`constexpr int foo()` — return type should be `int`, not `constexpr`."""
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            constexpr int compute() { return 42; }
+            const bool always_true() { return true; }
+            inline static double pi() { return 3.14; }
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    assert _function(g, "::compute").get("rt") == "int"
+    assert _function(g, "::always_true").get("rt") == "bool"
+    assert _function(g, "::pi").get("rt") == "double"
+
+
+def test_template_type_return_captured(tmp_path):
+    """Generic return types like `iteration_proxy<int>` should be captured."""
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            template <typename T>
+            class proxy {};
+
+            class Container {
+            public:
+                proxy<int> items() const;
+            };
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    fn = _function(g, "::items")
+    rt = fn.get("rt") or ""
+    assert "proxy" in rt, f"expected template type, got {rt!r}"
+
+
+def test_destructor_name_extracted(tmp_path):
+    """`~Widget()` — name should be `~Widget`, not `unknown`."""
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            class Widget {
+            public:
+                ~Widget() {}
+            };
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    fn = _function(g, "::~Widget")
+    assert fn.get("n") == "~Widget", fn
+
+
+def test_macro_decorated_constructor_extracts_parameters(tmp_path):
+    """`MACRO(3) Constructor(int x)` — parameters captured despite parenthesized
+    declarator wrapper that tree-sitter-cpp wraps around macro-prefixed methods."""
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            #define JSON_HEDLEY_NON_NULL(...)
+
+            class invalid_iterator {
+            public:
+                JSON_HEDLEY_NON_NULL(3)
+                invalid_iterator(int id_, const char* what_arg) {}
+            };
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    rows = g.cypher(
+        "MATCH (f:Function) WHERE f.qualified_name CONTAINS 'invalid_iterator' "
+        "RETURN f.name AS n, f.param_count AS p ORDER BY f.line_number LIMIT 3"
+    ).to_list()
+    # The constructor should have name='invalid_iterator' and param_count=2.
+    ctors = [r for r in rows if r["n"] == "invalid_iterator"]
+    assert ctors, f"no constructor named 'invalid_iterator' found: {rows}"
+    assert ctors[0]["p"] == 2, f"expected 2 params, got {ctors[0]['p']}"
+
+
 def test_lowercase_function_name_not_treated_as_macro(tmp_path):
     """Don't false-positive on lowercase function names just because they
     contain uppercase letters in CamelCase or snake_case parts."""
