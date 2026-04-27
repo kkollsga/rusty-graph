@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BINDS` edges — Python wrapper to Rust pymethod.** Closes the cross-language
+  gap where `kglite.KnowledgeGraph.add_nodes` (the Python class method) and
+  `crate::graph::pyapi::*::KnowledgeGraph::add_nodes` (the Rust `#[pymethods]`
+  impl) lived as disconnected `Function` nodes. The resolver indexes Rust
+  functions with `is_pymethod = true` by `(parent_struct_short_name,
+  method_name)` and emits `Function -[BINDS]-> Function` for each Python
+  method that finds a unique match. Cypher: `MATCH (py)-[:BINDS]->(rs)
+  -[:CALLS*]->(impl)` traces a request from the Python entry point to deep
+  Rust impl. On the KGLite codebase: ~184 BINDS edges; closes the false-positive
+  dead-code finding for `load_ntriples` and other pyapi-exposed functions.
+
+- **Promoted metadata flags as typed Function/Class properties.** Eight booleans
+  (`is_pymethod`, `is_pymodule`, `is_ffi`, `is_static`, `is_abstract`,
+  `is_property`, `is_classmethod`) plus the `ffi_kind` string are now
+  Function-node columns; `is_pyclass` is a Class/Struct column. Replaces
+  `f.metadata.get("is_pymethod") == true` JSON-parsing gymnastics with
+  `MATCH (f:Function {is_pymethod: true})` direct filters.
+
+- **`USES_TYPE` edges carry a `position` property** (`parameter` | `return` |
+  `both` | `signature`). Distinguishes consumers from producers — a function
+  that takes `Widget` as a parameter and a function that returns `Widget` no
+  longer collapse to the same edge shape. Aggregated per `(function, type)`
+  so a single transformation `fn f(w: Widget) -> Widget` emits one edge with
+  `position: "both"`. Cypher: `WHERE r.position IN ['parameter','both']` to
+  find consumers; `IN ['return','both']` for producers.
+
+- **`Module HAS_FILE File` edges** — closes the natural top-down walk from
+  Module → File → Function. Was string-prefix gymnastics on `qualified_name`;
+  now `MATCH (m:Module)-[:HAS_SUBMODULE*0..]->(:Module)-[:HAS_FILE]->(f:File)
+  -[:DEFINES]->(fn:Function)` returns "what's in this module" in one query.
+  Edge name avoids `CONTAINS` (a reserved Cypher keyword for substring matching).
+
+- **`Procedure` nodes — annotation-driven, language-agnostic.** Functions
+  whose docstring/leading comment contains `@procedure: NAME` (or
+  `@cypher_procedure: NAME`) at the start of a line synthesize a `Procedure`
+  node with an `IMPLEMENTED_BY` edge to the function. Generic mechanism for
+  surfacing project-specific registries (Cypher CALL procedures, RPC method
+  catalogs, command-bus dispatchers) as first-class graph entities. Anchored
+  to line start so prose mentions in docs/tests don't false-positive.
+
 - **Function complexity counters** — `branch_count`, `param_count`,
   `max_nesting`, `is_recursive` now populate on every `Function` node
   produced by `kglite.code_tree.build(...)`. Computed from the

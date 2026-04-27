@@ -30,6 +30,16 @@ pub struct UsesTypeEdge {
     pub type_name: String,
     /// Target node type: "Struct" | "Class" | "Enum" | "Trait" | "Protocol" | "Interface"
     pub target_node_type: &'static str,
+    /// Where in the function signature this type appears. Aggregates across
+    /// all sites in the same function — a type used as both a parameter and
+    /// a return value yields `"both"`. Values: `"parameter"` | `"return"` |
+    /// `"both"` | `"signature"`. `"signature"` is the fallback when the
+    /// parser couldn't extract structured parameters (typically the AC
+    /// scanner found the type embedded in the signature string).
+    ///
+    /// Cypher: `WHERE r.position IN ['parameter','both']` for "consumes T",
+    /// `WHERE r.position IN ['return','both']` for "produces T".
+    pub position: &'static str,
 }
 
 pub struct FfiExposesEdge {
@@ -37,6 +47,34 @@ pub struct FfiExposesEdge {
     pub target_qname: String,
     pub target_type: &'static str,
     pub py_name: String,
+}
+
+/// `Module -[CONTAINS]-> File` edges — one per file pointing to its leaf module.
+///
+/// `build_modules` synthesizes a Module node for every prefix of a file's
+/// `module_path`; the leaf module's qualified_name equals `file.module_path`
+/// exactly. Without this edge, "what's in module X" requires a string
+/// `STARTS WITH` filter; with it, the natural top-down walk works:
+///
+/// ```cypher
+/// MATCH (m:Module {qualified_name: 'crate::graph::cypher'})
+///       -[:HAS_SUBMODULE*0..]->(:Module)-[:CONTAINS]->(f:File)-[:DEFINES]->(fn:Function)
+/// RETURN fn.qualified_name
+/// ```
+pub struct ModuleContainsFileEdge {
+    pub module: String,
+    pub file_path: String,
+}
+
+pub fn build_module_contains_file_edges(files: &[FileInfo]) -> Vec<ModuleContainsFileEdge> {
+    files
+        .iter()
+        .filter(|f| !f.module_path.is_empty())
+        .map(|f| ModuleContainsFileEdge {
+            module: f.module_path.clone(),
+            file_path: f.path.clone(),
+        })
+        .collect()
 }
 
 /// Module CONTAINS Module edges from file submodule declarations.
@@ -139,65 +177,89 @@ pub fn build_uses_type_edges(
         Err(_) => return BTreeMap::new(),
     };
 
-    // Per-function scan in parallel: scan signature+return_type+parameter
-    // type annotations with AC, collect unique pattern matches. Matches are
-    // deduped per-function (same type in multiple sites counts once).
-    let per_fn: Vec<Vec<(u32, &'static str, String)>> = functions
+    // Per-function scan in parallel. Scans signature/return_type/each parameter
+    // separately, tracks the *set* of positions per pattern, then collapses to
+    // a single position per (function, type) so we emit at most one USES_TYPE
+    // edge per node pair. (The graph engine keys edges by (src, type, tgt) —
+    // multiple edges with same nodes would overwrite.)
+    //
+    // Position bitset: bit 0 = parameter, bit 1 = return, bit 2 = signature.
+    const POS_PARAM: u8 = 1 << 0;
+    const POS_RETURN: u8 = 1 << 1;
+    const POS_SIGNATURE: u8 = 1 << 2;
+
+    let per_fn: Vec<Vec<(u32, &'static str, String, &'static str)>> = functions
         .par_iter()
         .map(|fn_info| {
-            let mut out: Vec<(u32, &'static str, String)> = Vec::new();
+            // pat_id → bitset of positions seen in this function.
+            let mut seen: HashMap<u32, u8> = HashMap::new();
+
+            let scan = |text: &str, pos_bit: u8, seen: &mut HashMap<u32, u8>| {
+                if text.is_empty() {
+                    return;
+                }
+                let bytes = text.as_bytes();
+                for m in ac.find_iter(text) {
+                    let start = m.start();
+                    let end = m.end();
+                    let before_ok = start == 0
+                        || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
+                    let after_ok = end == text.len()
+                        || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
+                    if !before_ok || !after_ok {
+                        continue;
+                    }
+                    let pat_id = m.pattern().as_usize() as u32;
+                    *seen.entry(pat_id).or_insert(0) |= pos_bit;
+                }
+            };
+
+            // 1. Each structured parameter type — clean per-position attribution.
+            for p in &fn_info.parameters {
+                if let Some(t) = &p.type_annotation {
+                    scan(t, POS_PARAM, &mut seen);
+                }
+            }
+            // 2. Return type.
+            if let Some(rt) = &fn_info.return_type {
+                scan(rt, POS_RETURN, &mut seen);
+            }
+            // 3. Signature fallback — only when structured parameters are
+            // empty (parser couldn't extract them). Without this, legacy
+            // parses lose USES_TYPE coverage entirely. Tagged "signature"
+            // so callers know it's a less-precise attribution.
             let has_param_types = fn_info
                 .parameters
                 .iter()
                 .any(|p| p.type_annotation.is_some());
-            if fn_info.signature.is_empty() && fn_info.return_type.is_none() && !has_param_types {
-                return out;
+            if !has_param_types && !fn_info.signature.is_empty() {
+                scan(&fn_info.signature, POS_SIGNATURE, &mut seen);
             }
-            let mut parts: Vec<String> = Vec::with_capacity(3 + fn_info.parameters.len());
-            if !fn_info.signature.is_empty() {
-                parts.push(fn_info.signature.clone());
-            }
-            if let Some(rt) = &fn_info.return_type {
-                parts.push(rt.clone());
-            }
-            // Scan structured parameter types — gives a clean shot at parameter
-            // type names without depending on signature-string fuzz matching.
-            for p in &fn_info.parameters {
-                if let Some(t) = &p.type_annotation {
-                    parts.push(t.clone());
-                }
-            }
-            let text = if parts.len() == 1 {
-                parts[0].clone()
-            } else {
-                parts.join(" ")
-            };
-            let bytes = text.as_bytes();
-            let mut local_seen: HashSet<u32> = HashSet::new();
-            for m in ac.find_iter(&text) {
-                let start = m.start();
-                let end = m.end();
-                let before_ok = start == 0
-                    || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
-                let after_ok =
-                    end == text.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
-                if !before_ok || !after_ok {
-                    continue;
-                }
-                let pat_id = m.pattern().as_usize() as u32;
-                if !local_seen.insert(pat_id) {
-                    continue;
-                }
-                let (qname, target) = &pattern_meta[pat_id as usize];
-                out.push((pat_id, *target, qname.clone()));
-            }
-            out
+
+            // Collapse bitset to a single label.
+            seen.into_iter()
+                .map(|(pat_id, bits)| {
+                    let position = match (
+                        bits & POS_PARAM != 0,
+                        bits & POS_RETURN != 0,
+                        bits & POS_SIGNATURE != 0,
+                    ) {
+                        (true, true, _) => "both",
+                        (true, false, _) => "parameter",
+                        (false, true, _) => "return",
+                        (false, false, true) => "signature",
+                        _ => unreachable!("at least one position bit must be set"),
+                    };
+                    let (qname, target) = &pattern_meta[pat_id as usize];
+                    (pat_id, *target, qname.clone(), position)
+                })
+                .collect()
         })
         .collect();
 
     let mut by_target_type: BTreeMap<&'static str, Vec<UsesTypeEdge>> = BTreeMap::new();
     for (fn_info, matches) in functions.iter().zip(per_fn.into_iter()) {
-        for (_pat_id, target, qname) in matches {
+        for (_pat_id, target, qname, position) in matches {
             by_target_type
                 .entry(target)
                 .or_default()
@@ -205,6 +267,7 @@ pub fn build_uses_type_edges(
                     function: fn_info.qualified_name.clone(),
                     type_name: qname,
                     target_node_type: target,
+                    position,
                 });
         }
     }
@@ -334,6 +397,82 @@ pub fn build_references_fn_edges(functions: &[FunctionInfo]) -> Vec<ReferencesFn
                 });
             }
         }
+    }
+    out
+}
+
+/// `Function -[BINDS]-> Function` — Python wrapper to its underlying Rust impl.
+///
+/// PyO3 exposes a `#[pyclass]` Rust struct (e.g. `KnowledgeGraph`) and its
+/// `#[pymethods]` block to Python. The Python class shows up in a `.pyi`
+/// stub like `kglite.KnowledgeGraph.add_nodes`, while the Rust side has
+/// `crate::graph::pyapi::*::KnowledgeGraph::add_nodes` (with
+/// `metadata.is_pymethod == true`). Method names are 1:1 by PyO3 contract.
+///
+/// Closes the cross-language graph: `MATCH (py)-[:BINDS]->(rs)-[:CALLS*]->(impl)`
+/// traces a request from the Python entry point down to deep Rust impl.
+///
+/// Resolution rules:
+/// - Python side: Function whose `qualified_name` matches `<pkg>.<Class>.<method>`
+///   *and* whose `is_method == true`.
+/// - Rust side: Function whose name == `<method>`, owner == `<Class>`, and
+///   `metadata["is_pymethod"] == true`.
+/// - Skip ambiguous Rust matches (multiple pymethods with same `(Class, method)`)
+///   to avoid guessing — wouldn't compile under PyO3 anyway, but be defensive.
+pub struct PyO3BindsEdge {
+    pub py_function: String,
+    pub rust_function: String,
+}
+
+pub fn build_pyo3_binds_edges(functions: &[FunctionInfo]) -> Vec<PyO3BindsEdge> {
+    // Index Rust pymethods by (parent_struct_short_name, method_short_name).
+    let mut rust_idx: HashMap<(String, String), Vec<&str>> = HashMap::new();
+    for f in functions {
+        if !f
+            .metadata
+            .get("is_pymethod")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        // Derive parent struct short name from the qualified name.
+        // Rust pymethod qnames look like `crate::a::b::KnowledgeGraph::add_nodes`.
+        let parts: Vec<&str> = f.qualified_name.split("::").collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let parent = parts[parts.len() - 2].to_string();
+        let method = parts[parts.len() - 1].to_string();
+        rust_idx
+            .entry((parent, method))
+            .or_default()
+            .push(f.qualified_name.as_str());
+    }
+
+    let mut out = Vec::new();
+    for f in functions {
+        // Python class methods come from `.pyi` stubs and look like
+        // `kglite.KnowledgeGraph.add_nodes`. The split separator is `.`.
+        if !f.qualified_name.contains('.') || !f.is_method {
+            continue;
+        }
+        let parts: Vec<&str> = f.qualified_name.split('.').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let py_class = parts[parts.len() - 2].to_string();
+        let py_method = parts[parts.len() - 1].to_string();
+        let Some(matches) = rust_idx.get(&(py_class, py_method)) else {
+            continue;
+        };
+        if matches.len() != 1 {
+            continue; // ambiguous — skip
+        }
+        out.push(PyO3BindsEdge {
+            py_function: f.qualified_name.clone(),
+            rust_function: matches[0].to_string(),
+        });
     }
     out
 }

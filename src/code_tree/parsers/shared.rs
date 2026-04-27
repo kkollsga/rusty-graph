@@ -300,6 +300,35 @@ fn walk(
     }
 }
 
+// ── Procedure annotation extraction ───────────────────────────────────
+
+fn procedure_annotation_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Recognizes `@procedure: name`, `@procedure name`, `@cypher_procedure: name`
+        // when they appear at the start of a line (with optional comment-prefix
+        // whitespace). Anchored to line start so prose mentions like
+        // "the @procedure: marker tells you..." don't false-positive.
+        // Name is `[a-zA-Z_][a-zA-Z0-9_]*` (standard identifier).
+        Regex::new(r"(?m)^\s*@(?:cypher_)?procedure[:\s]+([a-zA-Z_][a-zA-Z0-9_]*)")
+            .expect("procedure annotation regex compiles")
+    })
+}
+
+/// Extract a `@procedure: NAME` annotation from a docstring/leading comment
+/// block, if present. Returns the procedure name or `None`.
+///
+/// Used to surface project-specific procedure registries (e.g. Cypher CALL
+/// procedures, RPC method handlers, CLI subcommand dispatchers) as graph
+/// `Procedure` nodes connected to their implementing Function.
+pub fn extract_procedure_annotation(docstring: Option<&str>) -> Option<String> {
+    let text = docstring?;
+    procedure_annotation_regex()
+        .captures(text)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
 // ── Generated / minified file detection ───────────────────────────────
 
 /// Codegen banner markers that — when found in a *comment line within the file's

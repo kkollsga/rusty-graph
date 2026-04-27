@@ -97,6 +97,23 @@ fn py_err<S: Into<String>>(msg: S) -> pyo3::PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(msg.into())
 }
 
+/// Read a boolean flag from `FunctionInfo.metadata` with a `false` default.
+/// Used to promote per-language metadata flags into typed DataFrame columns.
+fn meta_bool(f: &FunctionInfo, key: &str) -> bool {
+    f.metadata
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Same, but for ClassInfo.
+fn class_meta_bool(c: &ClassInfo, key: &str) -> bool {
+    c.metadata
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 // ── Entity → DataFrame builders ─────────────────────────────────────
 
 fn files_df(files: &[FileInfo]) -> DataFrame {
@@ -237,16 +254,78 @@ fn functions_df(fns: &[FunctionInfo]) -> DataFrame {
         (
             "is_test",
             ColumnType::Boolean,
+            bool_col(fns.iter().map(|f| Some(meta_bool(f, "is_test"))).collect()),
+        ),
+        (
+            "is_pymethod",
+            ColumnType::Boolean,
             bool_col(
                 fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_pymethod")))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_pymodule",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_pymodule")))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_ffi",
+            ColumnType::Boolean,
+            bool_col(fns.iter().map(|f| Some(meta_bool(f, "is_ffi"))).collect()),
+        ),
+        (
+            "ffi_kind",
+            ColumnType::String,
+            str_col(
+                fns.iter()
                     .map(|f| {
-                        Some(
-                            f.metadata
-                                .get("is_test")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false),
-                        )
+                        f.metadata
+                            .get("ffi_kind")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
                     })
+                    .collect(),
+            ),
+        ),
+        (
+            "is_static",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_static")))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_abstract",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_abstract")))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_property",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_property")))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_classmethod",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_classmethod")))
                     .collect(),
             ),
         ),
@@ -402,6 +481,16 @@ fn classes_df(
                             serde_json::to_string(&entries).ok()
                         }
                     })
+                    .collect(),
+            ),
+        ),
+        (
+            "is_pyclass",
+            ColumnType::Boolean,
+            bool_col(
+                classes
+                    .iter()
+                    .map(|c| Some(class_meta_bool(c, "is_pyclass")))
                     .collect(),
             ),
         ),
@@ -656,9 +745,12 @@ fn has_method_edges_df(edges: &[super::type_edges::HasMethodEdge]) -> DataFrame 
 fn uses_type_edges_df(edges: &[super::other_edges::UsesTypeEdge]) -> DataFrame {
     let fns: Vec<Option<String>> = edges.iter().map(|e| Some(e.function.clone())).collect();
     let types: Vec<Option<String>> = edges.iter().map(|e| Some(e.type_name.clone())).collect();
+    let positions: Vec<Option<String>> =
+        edges.iter().map(|e| Some(e.position.to_string())).collect();
     build_df(vec![
         ("function", ColumnType::String, str_col(fns)),
         ("type_name", ColumnType::String, str_col(types)),
+        ("position", ColumnType::String, str_col(positions)),
     ])
 }
 
@@ -681,6 +773,27 @@ fn references_fn_edges_df(edges: &[super::other_edges::ReferencesFnEdge]) -> Dat
         ("caller", ColumnType::String, str_col(callers)),
         ("callee", ColumnType::String, str_col(callees)),
         ("line", ColumnType::Int64, int_col(lines)),
+    ])
+}
+
+fn module_contains_file_df(edges: &[super::other_edges::ModuleContainsFileEdge]) -> DataFrame {
+    let m: Vec<Option<String>> = edges.iter().map(|e| Some(e.module.clone())).collect();
+    let p: Vec<Option<String>> = edges.iter().map(|e| Some(e.file_path.clone())).collect();
+    build_df(vec![
+        ("module", ColumnType::String, str_col(m)),
+        ("file_path", ColumnType::String, str_col(p)),
+    ])
+}
+
+fn pyo3_binds_df(edges: &[super::other_edges::PyO3BindsEdge]) -> DataFrame {
+    let py: Vec<Option<String>> = edges.iter().map(|e| Some(e.py_function.clone())).collect();
+    let rs: Vec<Option<String>> = edges
+        .iter()
+        .map(|e| Some(e.rust_function.clone()))
+        .collect();
+    build_df(vec![
+        ("py_function", ColumnType::String, str_col(py)),
+        ("rust_function", ColumnType::String, str_col(rs)),
     ])
 }
 
@@ -1168,6 +1281,26 @@ pub fn load_into_graph(
         .map_err(py_err)?;
     }
 
+    // Module HAS_FILE File — closes the natural top-down walk from a Module
+    // to the source files (and their Functions/Classes). (Edge name avoids
+    // `CONTAINS`, which is a reserved Cypher keyword for substring matching.)
+    let mod_contains_file = super::other_edges::build_module_contains_file_edges(&result.files);
+    if !mod_contains_file.is_empty() {
+        maintain::add_connections(
+            graph,
+            module_contains_file_df(&mod_contains_file),
+            "HAS_FILE".into(),
+            "Module".into(),
+            "module".into(),
+            "File".into(),
+            "file_path".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+
     // File DEFINES *
     let defines = defines_edges(result);
     for ((src_type, tgt_type), df) in defines_edges_df(&defines) {
@@ -1636,6 +1769,93 @@ pub fn load_into_graph(
     }
 
     mark(t_ffi, "ffi_exposes");
+    let t_binds = std::time::Instant::now();
+    // Function -[BINDS]-> Function — Python wrapper → underlying Rust pymethod.
+    let binds = super::other_edges::build_pyo3_binds_edges(&result.functions);
+    if !binds.is_empty() {
+        maintain::add_connections(
+            graph,
+            pyo3_binds_df(&binds),
+            "BINDS".into(),
+            "Function".into(),
+            "py_function".into(),
+            "Function".into(),
+            "rust_function".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+    mark(t_binds, "pyo3_binds");
+    let t_proc = std::time::Instant::now();
+    // Procedure nodes — synthesized from `@procedure: NAME` doc-comment
+    // annotations on Function nodes. Each annotated function emits one
+    // Procedure node and a `Procedure -[IMPLEMENTED_BY]-> Function` edge.
+    let proc_pairs: Vec<(String, String)> = result
+        .functions
+        .iter()
+        .filter_map(|f| {
+            f.procedure_name
+                .as_ref()
+                .map(|n| (n.clone(), f.qualified_name.clone()))
+        })
+        .collect();
+    if !proc_pairs.is_empty() {
+        // Dedup procedure names — multiple functions implementing the same
+        // procedure name keep separate edges to that single Procedure node.
+        let mut proc_names: Vec<String> = proc_pairs.iter().map(|(n, _)| n.clone()).collect();
+        proc_names.sort();
+        proc_names.dedup();
+        let proc_df = build_df(vec![
+            (
+                "name",
+                ColumnType::String,
+                str_col(proc_names.iter().map(|n| Some(n.clone())).collect()),
+            ),
+            (
+                "qualified_name",
+                ColumnType::String,
+                str_col(proc_names.iter().map(|n| Some(n.clone())).collect()),
+            ),
+        ]);
+        maintain::add_nodes(
+            graph,
+            proc_df,
+            "Procedure".into(),
+            "qualified_name".into(),
+            Some("name".into()),
+            None,
+        )
+        .map_err(py_err)?;
+
+        let edge_df = build_df(vec![
+            (
+                "procedure",
+                ColumnType::String,
+                str_col(proc_pairs.iter().map(|(n, _)| Some(n.clone())).collect()),
+            ),
+            (
+                "function",
+                ColumnType::String,
+                str_col(proc_pairs.iter().map(|(_, q)| Some(q.clone())).collect()),
+            ),
+        ]);
+        maintain::add_connections(
+            graph,
+            edge_df,
+            "IMPLEMENTED_BY".into(),
+            "Procedure".into(),
+            "procedure".into(),
+            "Function".into(),
+            "function".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+    mark(t_proc, "procedures");
     Ok(kg)
 }
 

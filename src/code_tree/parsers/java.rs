@@ -5,8 +5,9 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
-    is_generated_or_minified, node_text, BRANCH_KINDS_JAVA, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, extract_procedure_annotation,
+    get_type_parameters, is_generated_or_minified, node_text, BRANCH_KINDS_JAVA,
+    DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
@@ -416,6 +417,8 @@ impl JavaParser {
             None => (None, None),
         };
         let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
+        let docstring = Self::get_doc_comment(node, source);
+        let procedure_name = extract_procedure_annotation(docstring.as_deref());
         FunctionInfo {
             visibility: Self::get_visibility(node, source).to_string(),
             is_async: false,
@@ -424,7 +427,7 @@ impl JavaParser {
             file_path: rel_path.to_string(),
             line_number: node.start_position().row as u32 + 1,
             end_line: Some(node.end_position().row as u32 + 1),
-            docstring: Self::get_doc_comment(node, source),
+            docstring,
             return_type: Self::get_return_type(node, source),
             decorators: Self::get_annotations(node, source),
             calls,
@@ -436,6 +439,7 @@ impl JavaParser {
             param_count,
             max_nesting,
             is_recursive,
+            procedure_name,
             metadata,
             qualified_name,
             name,

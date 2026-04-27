@@ -92,6 +92,12 @@ pub struct FunctionInfo {
     /// the function's own short name. Heuristic — refined later by the resolved
     /// CALLS edges.
     pub is_recursive: Option<bool>,
+    /// Set when the function's docstring or leading comment contains a magic
+    /// `@procedure: NAME` annotation. The builder synthesizes a `Procedure` node
+    /// for the name and emits a `Procedure -[IMPLEMENTED_BY]-> Function` edge,
+    /// letting graph-of-procedures use cases (Cypher CALL registry, RPC method
+    /// catalogs, command-bus dispatchers) sit on top of the code graph.
+    pub procedure_name: Option<String>,
     /// Flexible language-specific flags (is_pymethod, is_test, ffi_kind, py_name, ...).
     pub metadata: MetadataMap,
 }
