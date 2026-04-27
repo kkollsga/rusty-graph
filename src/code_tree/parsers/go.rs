@@ -4,12 +4,13 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_GO, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
-    AttributeInfo, ClassInfo, ConstantInfo, FileInfo, FunctionInfo, InterfaceInfo, ParseResult,
-    TypeRelationship,
+    AttributeInfo, ClassInfo, ConstantInfo, FileInfo, FunctionInfo, InterfaceInfo, ParameterInfo,
+    ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub const GO_NOISE_NAMES: &[&str] = &[
@@ -292,6 +293,16 @@ impl GoParser {
         let calls = body
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(node, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match body {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_GO, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
         FunctionInfo {
             visibility: Self::get_visibility(&name).to_string(),
             is_async: false,
@@ -307,10 +318,88 @@ impl GoParser {
             function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameter_list"),
             decorators: Vec::new(),
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata: Default::default(),
             qualified_name,
             name,
         }
+    }
+
+    /// Extract structured parameters from a Go function/method declaration.
+    /// Walks `parameter_list` (looking for `parameter_declaration`s).
+    /// `variadic_parameter_declaration` becomes `ParameterKind::Variadic`.
+    fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        // For method_declaration there's a leading `parameter_list` for the
+        // receiver — we want the second `parameter_list` (the actual params).
+        // For function_declaration there's only one.
+        let mut param_lists: Vec<Node> = node
+            .children(&mut cursor)
+            .filter(|c| c.kind() == "parameter_list")
+            .collect();
+        let params_node = if node.kind() == "method_declaration" && param_lists.len() >= 2 {
+            param_lists.remove(1)
+        } else if !param_lists.is_empty() {
+            param_lists.remove(0)
+        } else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            let (kind, is_variadic) = match child.kind() {
+                "parameter_declaration" => ("parameter_declaration", false),
+                "variadic_parameter_declaration" => ("variadic_parameter_declaration", true),
+                _ => continue,
+            };
+            let _ = kind;
+            // Each declaration may bind multiple names: `a, b int`.
+            let mut names: Vec<String> = Vec::new();
+            let mut type_ann: Option<String> = None;
+            let mut tcursor = child.walk();
+            for sub in child.children(&mut tcursor) {
+                match sub.kind() {
+                    "identifier" => names.push(node_text(sub, source).to_string()),
+                    k if k.contains("type") || k == "qualified_type" || k == "pointer_type" => {
+                        type_ann = Some(node_text(sub, source).to_string());
+                    }
+                    _ => {}
+                }
+            }
+            // Anonymous parameters: `func(int, string)` — type-only, no name.
+            if names.is_empty() {
+                if let Some(t) = type_ann.clone() {
+                    out.push(ParameterInfo {
+                        name: "_".into(),
+                        type_annotation: Some(t),
+                        default: None,
+                        kind: if is_variadic {
+                            ParameterKind::Variadic
+                        } else {
+                            ParameterKind::Positional
+                        },
+                    });
+                }
+                continue;
+            }
+            for n in names {
+                out.push(ParameterInfo {
+                    name: n,
+                    type_annotation: type_ann.clone(),
+                    default: None,
+                    kind: if is_variadic {
+                        ParameterKind::Variadic
+                    } else {
+                        ParameterKind::Positional
+                    },
+                });
+            }
+        }
+        out
     }
 }
 
@@ -335,17 +424,12 @@ impl LanguageParser for GoParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
+
         let rel_path = filepath
             .strip_prefix(src_root)
             .unwrap_or(filepath)
             .to_string_lossy()
             .replace('\\', "/");
-        let package = Self::get_package_name(root, &source);
-        let module_path = Self::file_to_module_path(filepath, src_root, &package);
         let loc = count_lines(&source);
         let filename = filepath
             .file_name()
@@ -353,6 +437,37 @@ impl LanguageParser for GoParser {
             .unwrap_or("")
             .to_string();
         let is_test = filename.ends_with("_test.go");
+
+        if let Some(reason) = is_generated_or_minified(&source) {
+            // package name requires parsing; fall back to filename stem.
+            let module_path = filepath
+                .file_stem()
+                .and_then(|o| o.to_str())
+                .unwrap_or("")
+                .to_string();
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: "go".to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
+        let package = Self::get_package_name(root, &source);
+        let module_path = Self::file_to_module_path(filepath, src_root, &package);
 
         let mut file_info = FileInfo {
             path: rel_path.clone(),
@@ -365,6 +480,7 @@ impl LanguageParser for GoParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
 
         let mut result = ParseResult::new();
@@ -494,22 +610,14 @@ impl LanguageParser for GoParser {
                                             let fn_info = FunctionInfo {
                                                 visibility: Self::get_visibility(&fn_name)
                                                     .to_string(),
-                                                is_async: false,
                                                 is_method: true,
                                                 signature: node_text(ms, &source).to_string(),
                                                 file_path: rel_path.clone(),
                                                 line_number: ms.start_position().row as u32 + 1,
                                                 end_line: Some(ms.end_position().row as u32 + 1),
-                                                docstring: None,
-                                                return_type: None,
-                                                calls: Vec::new(),
-                                                references: Vec::new(),
-                                                function_refs: Vec::new(),
-                                                type_parameters: None,
-                                                decorators: Vec::new(),
-                                                metadata: Default::default(),
                                                 qualified_name: format!("{}.{}", qname, fn_name),
                                                 name: fn_name,
+                                                ..Default::default()
                                             };
                                             iface_rel.methods.push(fn_info.clone());
                                             result.functions.push(fn_info);

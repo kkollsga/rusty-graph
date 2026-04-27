@@ -139,25 +139,36 @@ pub fn build_uses_type_edges(
         Err(_) => return BTreeMap::new(),
     };
 
-    // Per-function scan in parallel: scan signature+return_type with AC,
-    // collect unique pattern matches. Matches are deduped per-function
-    // (same type in both signature and return_type counts once).
+    // Per-function scan in parallel: scan signature+return_type+parameter
+    // type annotations with AC, collect unique pattern matches. Matches are
+    // deduped per-function (same type in multiple sites counts once).
     let per_fn: Vec<Vec<(u32, &'static str, String)>> = functions
         .par_iter()
         .map(|fn_info| {
             let mut out: Vec<(u32, &'static str, String)> = Vec::new();
-            if fn_info.signature.is_empty() && fn_info.return_type.is_none() {
+            let has_param_types = fn_info
+                .parameters
+                .iter()
+                .any(|p| p.type_annotation.is_some());
+            if fn_info.signature.is_empty() && fn_info.return_type.is_none() && !has_param_types {
                 return out;
             }
-            let mut parts: Vec<&str> = Vec::with_capacity(2);
+            let mut parts: Vec<String> = Vec::with_capacity(3 + fn_info.parameters.len());
             if !fn_info.signature.is_empty() {
-                parts.push(&fn_info.signature);
+                parts.push(fn_info.signature.clone());
             }
             if let Some(rt) = &fn_info.return_type {
-                parts.push(rt);
+                parts.push(rt.clone());
+            }
+            // Scan structured parameter types — gives a clean shot at parameter
+            // type names without depending on signature-string fuzz matching.
+            for p in &fn_info.parameters {
+                if let Some(t) = &p.type_annotation {
+                    parts.push(t.clone());
+                }
             }
             let text = if parts.len() == 1 {
-                parts[0].to_string()
+                parts[0].clone()
             } else {
                 parts.join(" ")
             };

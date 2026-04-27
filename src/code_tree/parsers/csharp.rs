@@ -5,12 +5,13 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_CSHARP, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
     AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo,
-    ParseResult, TypeRelationship,
+    ParameterInfo, ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub const CSHARP_NOISE_NAMES: &[&str] = &[
@@ -425,6 +426,16 @@ impl CSharpParser {
         let calls = body
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(node, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match body {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_CSHARP, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
         FunctionInfo {
             visibility: Self::get_visibility(node, source, "private"),
             is_async: Self::has_modifier(node, source, "async"),
@@ -440,10 +451,75 @@ impl CSharpParser {
             references: Vec::new(),
             function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameter_list"),
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata,
             qualified_name,
             name,
         }
+    }
+
+    /// Extract structured parameters from a C# method/constructor.
+    /// Walks `parameter_list` for `parameter` nodes. tree-sitter-c-sharp uses
+    /// `params` modifier for variadic; we treat any parameter with a leading
+    /// `params` modifier as `ParameterKind::Variadic`.
+    fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        let Some(params_node) = node
+            .children(&mut cursor)
+            .find(|c| c.kind() == "parameter_list")
+        else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            if child.kind() != "parameter" {
+                continue;
+            }
+            let mut name: Option<String> = None;
+            let mut type_ann: Option<String> = None;
+            let mut default: Option<String> = None;
+            let mut is_params = false;
+            let mut tcursor = child.walk();
+            for sub in child.children(&mut tcursor) {
+                let k = sub.kind();
+                if k == "identifier" && name.is_none() {
+                    name = Some(node_text(sub, source).to_string());
+                } else if k == "parameter_modifier" {
+                    if node_text(sub, source).contains("params") {
+                        is_params = true;
+                    }
+                } else if k == "equals_value_clause" {
+                    let txt = node_text(sub, source);
+                    let cleaned = txt.trim_start_matches('=').trim().to_string();
+                    if !cleaned.is_empty() {
+                        default = Some(cleaned);
+                    }
+                } else if k.contains("type")
+                    || k == "predefined_type"
+                    || k == "qualified_name"
+                    || k == "generic_name"
+                {
+                    type_ann = Some(node_text(sub, source).to_string());
+                }
+            }
+            let Some(n) = name else { continue };
+            out.push(ParameterInfo {
+                name: n,
+                type_annotation: type_ann,
+                default,
+                kind: if is_params {
+                    ParameterKind::Variadic
+                } else {
+                    ParameterKind::Positional
+                },
+            });
+        }
+        out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -843,17 +919,12 @@ impl LanguageParser for CSharpParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
+
         let rel_path = filepath
             .strip_prefix(src_root)
             .unwrap_or(filepath)
             .to_string_lossy()
             .replace('\\', "/");
-        let namespace = Self::get_namespace(root, &source);
-        let module_path = Self::file_to_module_path(filepath, src_root, &namespace);
         let loc = count_lines(&source);
         let filename = filepath
             .file_name()
@@ -871,6 +942,32 @@ impl LanguageParser for CSharpParser {
             || rel_path.contains("/.Tests/")
             || rel_path.starts_with("Tests/")
             || rel_path.starts_with("tests/");
+
+        if let Some(reason) = is_generated_or_minified(&source) {
+            let module_path = stem.clone();
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: "csharp".to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
+        let namespace = Self::get_namespace(root, &source);
+        let module_path = Self::file_to_module_path(filepath, src_root, &namespace);
         let mut file_info = FileInfo {
             path: rel_path.clone(),
             filename,
@@ -882,6 +979,7 @@ impl LanguageParser for CSharpParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
         let mut result = ParseResult::new();
         let mut cursor = root.walk();

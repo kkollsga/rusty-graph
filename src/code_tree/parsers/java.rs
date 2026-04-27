@@ -5,12 +5,13 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_JAVA, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
     AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo,
-    ParseResult, TypeRelationship,
+    ParameterInfo, ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub const JAVA_NOISE_NAMES: &[&str] = &[
@@ -405,6 +406,16 @@ impl JavaParser {
         let calls = body
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(node, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match body {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_JAVA, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
         FunctionInfo {
             visibility: Self::get_visibility(node, source).to_string(),
             is_async: false,
@@ -420,10 +431,67 @@ impl JavaParser {
             references: Vec::new(),
             function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameters"),
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata,
             qualified_name,
             name,
         }
+    }
+
+    /// Extract structured parameters from a Java method/constructor.
+    /// Walks `formal_parameters` for `formal_parameter` and `spread_parameter`.
+    fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        let Some(params_node) = node
+            .children(&mut cursor)
+            .find(|c| c.kind() == "formal_parameters")
+        else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            let (is_variadic, kind) = match child.kind() {
+                "formal_parameter" => (false, "formal_parameter"),
+                "spread_parameter" => (true, "spread_parameter"),
+                _ => continue,
+            };
+            let _ = kind;
+            let mut name: Option<String> = None;
+            let mut type_ann: Option<String> = None;
+            let mut tcursor = child.walk();
+            for sub in child.children(&mut tcursor) {
+                match sub.kind() {
+                    "identifier" if name.is_none() => {
+                        name = Some(node_text(sub, source).to_string())
+                    }
+                    k if k.contains("type")
+                        || k == "generic_type"
+                        || k == "array_type"
+                        || k == "scoped_type_identifier" =>
+                    {
+                        type_ann = Some(node_text(sub, source).to_string());
+                    }
+                    _ => {}
+                }
+            }
+            let Some(n) = name else { continue };
+            out.push(ParameterInfo {
+                name: n,
+                type_annotation: type_ann,
+                default: None,
+                kind: if is_variadic {
+                    ParameterKind::Variadic
+                } else {
+                    ParameterKind::Positional
+                },
+            });
+        }
+        out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -731,17 +799,12 @@ impl LanguageParser for JavaParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
+
         let rel_path = filepath
             .strip_prefix(src_root)
             .unwrap_or(filepath)
             .to_string_lossy()
             .replace('\\', "/");
-        let package = Self::get_package(root, &source);
-        let module_path = Self::file_to_module_path(filepath, src_root, &package);
         let loc = count_lines(&source);
         let filename = filepath
             .file_name()
@@ -757,6 +820,32 @@ impl LanguageParser for JavaParser {
             || stem.ends_with("Tests")
             || rel_path.contains("/src/test/")
             || rel_path.starts_with("src/test/");
+
+        if let Some(reason) = is_generated_or_minified(&source) {
+            let module_path = stem.clone();
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: "java".to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
+        let package = Self::get_package(root, &source);
+        let module_path = Self::file_to_module_path(filepath, src_root, &package);
         let mut file_info = FileInfo {
             path: rel_path.clone(),
             filename,
@@ -768,6 +857,7 @@ impl LanguageParser for JavaParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
         let mut result = ParseResult::new();
         let mut cursor = root.walk();

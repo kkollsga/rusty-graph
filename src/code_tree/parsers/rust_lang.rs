@@ -7,12 +7,13 @@ use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_RUST, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
     AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo,
-    ParseResult, TypeRelationship,
+    ParameterInfo, ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub const RUST_NOISE_NAMES: &[&str] = &[
@@ -768,6 +769,16 @@ impl RustParser {
         let function_refs = body
             .map(|b| Self::extract_function_pointer_refs(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(node, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match body {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_RUST, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
 
         FunctionInfo {
             visibility,
@@ -785,9 +796,79 @@ impl RustParser {
             function_refs,
             type_parameters: get_type_parameters(node, source, "type_parameters"),
             decorators: Vec::new(),
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata,
             name,
         }
+    }
+
+    /// Extract structured parameters from a Rust `fn` definition.
+    /// Excludes `self`/`&self`/`&mut self`. tree-sitter-rust parameter kinds:
+    /// `parameter` (regular, with type), `self_parameter` (skipped), and
+    /// (rare) `variadic_parameter` for FFI fns.
+    fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        let Some(params_node) = node
+            .children(&mut cursor)
+            .find(|c| c.kind() == "parameters")
+        else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            match child.kind() {
+                "self_parameter" => continue,
+                "parameter" => {
+                    let mut name: Option<String> = None;
+                    let mut type_ann: Option<String> = None;
+                    let mut tcursor = child.walk();
+                    for sub in child.children(&mut tcursor) {
+                        match sub.kind() {
+                            "identifier" if name.is_none() => {
+                                name = Some(node_text(sub, source).to_string())
+                            }
+                            // tree-sitter-rust wraps the type in a `type_*` node;
+                            // any non-identifier named child after the `:` is the type.
+                            k if k.contains("type")
+                                || k == "reference_type"
+                                || k == "primitive_type"
+                                || k == "scoped_type_identifier"
+                                || k == "generic_type"
+                                || k == "tuple_type"
+                                || k == "array_type"
+                                || k == "function_type"
+                                || k == "dynamic_type" =>
+                            {
+                                type_ann = Some(node_text(sub, source).to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    let Some(n) = name else { continue };
+                    out.push(ParameterInfo {
+                        name: n,
+                        type_annotation: type_ann,
+                        default: None,
+                        kind: ParameterKind::Positional,
+                    });
+                }
+                "variadic_parameter" => {
+                    out.push(ParameterInfo {
+                        name: "...".into(),
+                        type_annotation: None,
+                        default: None,
+                        kind: ParameterKind::Variadic,
+                    });
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn parse_items(
@@ -1142,10 +1223,6 @@ impl LanguageParser for RustParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
 
         let rel_path = filepath
             .strip_prefix(src_root)
@@ -1175,6 +1252,29 @@ impl LanguageParser for RustParser {
             || rel_path.contains("/benches/")
             || rel_path.starts_with("benches/");
 
+        if let Some(reason) = is_generated_or_minified(&source) {
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: "rust".to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
+
         let mut file_info = FileInfo {
             path: rel_path.clone(),
             filename,
@@ -1186,6 +1286,7 @@ impl LanguageParser for RustParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
 
         let mut result = ParseResult::new();

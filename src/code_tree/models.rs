@@ -35,6 +35,11 @@ pub struct FileInfo {
     /// TODO/FIXME/HACK/SAFETY comments. `None` if none were found.
     pub annotations: Option<Vec<Annotation>>,
     pub is_test: bool,
+    /// Set when ingestion deliberately skipped the file. Values:
+    /// `"generated"` (auto-generated stubs/codegen), `"minified"` (single-line bundles
+    /// or extreme line widths). Skipped files emit no Function/Class/Constant nodes —
+    /// only this FileInfo so users can audit what was filtered.
+    pub skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,8 +74,49 @@ pub struct FunctionInfo {
     /// Generic/template parameters, e.g. `"T, U: Display"`.
     pub type_parameters: Option<String>,
     pub end_line: Option<u32>,
+    /// Structured parameter list — one entry per declared parameter (excluding
+    /// `self`/`cls`/`&self`/`&mut self`). Populated by per-language parsers; the
+    /// `signature` string remains the user-facing source of truth, this field is
+    /// for graph builders that want structured access (e.g. USES_TYPE on params).
+    pub parameters: Vec<ParameterInfo>,
+    /// Cyclomatic-style branch count over the function body. Counts each
+    /// `if`/`elif`/`while`/`for`/`case`/`catch`/ternary/`&&`/`||`-style node the
+    /// language grammar exposes. `None` if the parser didn't compute it (e.g. the
+    /// function had no body — abstract/protocol methods, `.pyi` stubs).
+    pub branch_count: Option<u32>,
+    /// Parameter count (excluding `self`/`cls`/`&self`/`&mut self`).
+    pub param_count: Option<u32>,
+    /// Max nesting depth of branch nodes encountered while walking the body.
+    pub max_nesting: Option<u32>,
+    /// `Some(true)` if the function body contains a bare-name call resolving to
+    /// the function's own short name. Heuristic — refined later by the resolved
+    /// CALLS edges.
+    pub is_recursive: Option<bool>,
     /// Flexible language-specific flags (is_pymethod, is_test, ffi_kind, py_name, ...).
     pub metadata: MetadataMap,
+}
+
+/// One declared parameter on a function/method.
+///
+/// Excludes implicit receivers (`self`/`cls`/`&self`/`&mut self`). The parser
+/// emits `ParameterKind::Variadic` for `*args`/spread/`...rest`,
+/// `ParameterKind::KwVariadic` for Python `**kwargs`, and `ParameterKind::Positional`
+/// for everything else. `default` carries the raw default-expression text when present.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ParameterInfo {
+    pub name: String,
+    pub type_annotation: Option<String>,
+    pub default: Option<String>,
+    pub kind: ParameterKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterKind {
+    #[default]
+    Positional,
+    Variadic,
+    KwVariadic,
 }
 
 /// Represents structs (Rust/C++), classes (Python/TS/Java/C#).

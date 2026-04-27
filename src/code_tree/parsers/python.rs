@@ -7,12 +7,13 @@ use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_PYTHON, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
     AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo,
-    ParseResult, TypeRelationship,
+    ParameterInfo, ParameterKind, ParseResult, TypeRelationship,
 };
 
 const ENUM_BASES: &[&str] = &["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "auto"];
@@ -262,6 +263,106 @@ impl PythonParser {
             }
         }
         false
+    }
+
+    /// Extract structured parameters from a Python function definition.
+    /// Excludes implicit `self`/`cls`. Distinguishes `*args` (Variadic) and
+    /// `**kwargs` (KwVariadic). `default` carries the raw default expression text.
+    fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        let Some(params_node) = node
+            .children(&mut cursor)
+            .find(|c| c.kind() == "parameters")
+        else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            let kind = child.kind();
+            let (name, type_ann, default, param_kind) = match kind {
+                "identifier" => {
+                    let n = node_text(child, source).to_string();
+                    if matches!(n.as_str(), "self" | "cls") {
+                        continue;
+                    }
+                    (n, None, None, ParameterKind::Positional)
+                }
+                "typed_parameter" => {
+                    let mut name: Option<String> = None;
+                    let mut type_ann: Option<String> = None;
+                    let mut tcursor = child.walk();
+                    for sub in child.children(&mut tcursor) {
+                        match sub.kind() {
+                            "identifier" if name.is_none() => {
+                                name = Some(node_text(sub, source).to_string())
+                            }
+                            "type" => type_ann = Some(node_text(sub, source).to_string()),
+                            _ => {}
+                        }
+                    }
+                    let Some(n) = name else { continue };
+                    if matches!(n.as_str(), "self" | "cls") {
+                        continue;
+                    }
+                    (n, type_ann, None, ParameterKind::Positional)
+                }
+                "default_parameter" | "typed_default_parameter" => {
+                    let mut name: Option<String> = None;
+                    let mut type_ann: Option<String> = None;
+                    let mut default: Option<String> = None;
+                    let mut saw_eq = false;
+                    let mut dcursor = child.walk();
+                    for sub in child.children(&mut dcursor) {
+                        if !sub.is_named() && node_text(sub, source) == "=" {
+                            saw_eq = true;
+                            continue;
+                        }
+                        match sub.kind() {
+                            "identifier" if name.is_none() && !saw_eq => {
+                                name = Some(node_text(sub, source).to_string())
+                            }
+                            "type" if !saw_eq => {
+                                type_ann = Some(node_text(sub, source).to_string())
+                            }
+                            _ if saw_eq && sub.is_named() && default.is_none() => {
+                                default = Some(node_text(sub, source).to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    let Some(n) = name else { continue };
+                    if matches!(n.as_str(), "self" | "cls") {
+                        continue;
+                    }
+                    (n, type_ann, default, ParameterKind::Positional)
+                }
+                "list_splat_pattern" => {
+                    // *args
+                    let n = node_text(child, source).trim_start_matches('*').to_string();
+                    if n.is_empty() {
+                        continue;
+                    }
+                    (n, None, None, ParameterKind::Variadic)
+                }
+                "dictionary_splat_pattern" => {
+                    // **kwargs
+                    let n = node_text(child, source).trim_start_matches('*').to_string();
+                    if n.is_empty() {
+                        continue;
+                    }
+                    (n, None, None, ParameterKind::KwVariadic)
+                }
+                _ => continue,
+            };
+            out.push(ParameterInfo {
+                name,
+                type_annotation: type_ann,
+                default,
+                kind: param_kind,
+            });
+        }
+        out
     }
 
     fn extract_calls(body: Node, source: &[u8]) -> Vec<(String, u32)> {
@@ -586,6 +687,16 @@ impl PythonParser {
         let calls = block
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(node, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match block {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_PYTHON, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
 
         FunctionInfo {
             visibility: Self::get_visibility(&name).to_string(),
@@ -604,6 +715,11 @@ impl PythonParser {
             function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameter"),
             decorators: Vec::new(),
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata: Default::default(),
         }
     }
@@ -774,10 +890,6 @@ impl LanguageParser for PythonParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
 
         let rel_path = filepath
             .strip_prefix(src_root)
@@ -803,6 +915,29 @@ impl LanguageParser for PythonParser {
             || rel_path.contains("/tests/")
             || rel_path.starts_with("tests/");
 
+        if let Some(reason) = is_generated_or_minified(&source) {
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: "python".to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
+
         let mut file_info = FileInfo {
             path: rel_path.clone(),
             filename,
@@ -814,6 +949,7 @@ impl LanguageParser for PythonParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
 
         let mut result = ParseResult::new();

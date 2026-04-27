@@ -114,6 +114,7 @@ fn files_df(files: &[FileInfo]) -> DataFrame {
                 .and_then(|a| serde_json::to_string(a).ok())
         })
         .collect();
+    let skip_reason = files.iter().map(|f| f.skip_reason.clone()).collect();
     build_df(vec![
         ("path", ColumnType::String, str_col(path)),
         ("filename", ColumnType::String, str_col(filename)),
@@ -122,6 +123,7 @@ fn files_df(files: &[FileInfo]) -> DataFrame {
         ("language", ColumnType::String, str_col(language)),
         ("is_test", ColumnType::Boolean, bool_col(is_test)),
         ("annotations", ColumnType::String, str_col(annotations)),
+        ("skip_reason", ColumnType::String, str_col(skip_reason)),
     ])
 }
 
@@ -244,6 +246,53 @@ fn functions_df(fns: &[FunctionInfo]) -> DataFrame {
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false),
                         )
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "branch_count",
+            ColumnType::Int64,
+            int_col(
+                fns.iter()
+                    .map(|f| f.branch_count.map(|v| v as i64))
+                    .collect(),
+            ),
+        ),
+        (
+            "param_count",
+            ColumnType::Int64,
+            int_col(
+                fns.iter()
+                    .map(|f| f.param_count.map(|v| v as i64))
+                    .collect(),
+            ),
+        ),
+        (
+            "max_nesting",
+            ColumnType::Int64,
+            int_col(
+                fns.iter()
+                    .map(|f| f.max_nesting.map(|v| v as i64))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_recursive",
+            ColumnType::Boolean,
+            bool_col(fns.iter().map(|f| f.is_recursive).collect()),
+        ),
+        (
+            "parameters",
+            ColumnType::String,
+            str_col(
+                fns.iter()
+                    .map(|f| {
+                        if f.parameters.is_empty() {
+                            None
+                        } else {
+                            serde_json::to_string(&f.parameters).ok()
+                        }
                     })
                     .collect(),
             ),

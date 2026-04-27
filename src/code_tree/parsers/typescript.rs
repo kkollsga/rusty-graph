@@ -5,12 +5,13 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_TS, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
     AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, InterfaceInfo,
-    ParseResult, TypeRelationship,
+    ParameterInfo, ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub const JSTS_NOISE_NAMES: &[&str] = &[
@@ -513,6 +514,16 @@ impl JstsParser {
         let calls = block
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(node, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match block {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_TS, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
 
         FunctionInfo {
             visibility: Self::get_visibility(node, source).to_string(),
@@ -529,10 +540,88 @@ impl JstsParser {
             references: Vec::new(),
             function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameters"),
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata,
             qualified_name,
             name,
         }
+    }
+
+    /// Extract structured parameters from a TS/JS function-like node.
+    /// Walks the `formal_parameters` child. Distinguishes rest params (`...args`).
+    fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        let Some(params_node) = node
+            .children(&mut cursor)
+            .find(|c| c.kind() == "formal_parameters")
+        else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            let kind = child.kind();
+            let (name, type_ann, default, pkind) = match kind {
+                "required_parameter" | "optional_parameter" => {
+                    let mut name: Option<String> = None;
+                    let mut type_ann: Option<String> = None;
+                    let mut default: Option<String> = None;
+                    let mut tcursor = child.walk();
+                    for sub in child.children(&mut tcursor) {
+                        match sub.kind() {
+                            "identifier" if name.is_none() => {
+                                name = Some(node_text(sub, source).to_string())
+                            }
+                            "type_annotation" => {
+                                let t = node_text(sub, source);
+                                let cleaned = t.trim_start_matches(':').trim().to_string();
+                                if !cleaned.is_empty() {
+                                    type_ann = Some(cleaned);
+                                }
+                            }
+                            // default value: anything past `=` (we approximate)
+                            _ => {}
+                        }
+                    }
+                    // crude default extraction: search for `=` then next named child
+                    let text = node_text(child, source);
+                    if let Some(idx) = text.find('=') {
+                        let default_text = text[idx + 1..].trim();
+                        if !default_text.is_empty() {
+                            default = Some(default_text.to_string());
+                        }
+                    }
+                    let Some(n) = name else { continue };
+                    (n, type_ann, default, ParameterKind::Positional)
+                }
+                "rest_pattern" => {
+                    let raw = node_text(child, source);
+                    let n = raw.trim_start_matches("...").trim().to_string();
+                    if n.is_empty() {
+                        continue;
+                    }
+                    (n, None, None, ParameterKind::Variadic)
+                }
+                "identifier" => (
+                    node_text(child, source).to_string(),
+                    None,
+                    None,
+                    ParameterKind::Positional,
+                ),
+                _ => continue,
+            };
+            out.push(ParameterInfo {
+                name,
+                type_annotation: type_ann,
+                default,
+                kind: pkind,
+            });
+        }
+        out
     }
 
     fn parse_class(
@@ -921,10 +1010,6 @@ impl LanguageParser for JstsParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
 
         let rel_path = filepath
             .strip_prefix(src_root)
@@ -955,6 +1040,29 @@ impl LanguageParser for JstsParser {
             || rel_path.contains("/__tests__/")
             || rel_path.starts_with("__tests__/");
 
+        if let Some(reason) = is_generated_or_minified(&source) {
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: self.lang_name.to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
+
         let mut file_info = FileInfo {
             path: rel_path.clone(),
             filename,
@@ -966,6 +1074,7 @@ impl LanguageParser for JstsParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
 
         let mut result = ParseResult::new();

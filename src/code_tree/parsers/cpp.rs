@@ -5,12 +5,13 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    count_lines, extract_comment_annotations, get_type_parameters, node_text, DEFAULT_COMMENT_TYPES,
+    compute_complexity, count_lines, extract_comment_annotations, get_type_parameters,
+    is_generated_or_minified, node_text, BRANCH_KINDS_CPP, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
-    AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, ParseResult,
-    TypeRelationship,
+    AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, ParameterInfo,
+    ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub const C_NOISE_NAMES: &[&str] = &[
@@ -496,6 +497,16 @@ impl CppParser {
         let calls = body
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let parameters = Self::extract_parameters(declarator, source);
+        let param_count = Some(parameters.len() as u32);
+        let (branch_count, max_nesting) = match body {
+            Some(b) => {
+                let (c, n) = compute_complexity(b, BRANCH_KINDS_CPP, NESTED_SCOPES);
+                (Some(c), Some(n))
+            }
+            None => (None, None),
+        };
+        let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
 
         FunctionInfo {
             visibility: visibility.into(),
@@ -512,10 +523,84 @@ impl CppParser {
             references: Vec::new(),
             function_refs: Vec::new(),
             type_parameters: None,
+            parameters,
+            branch_count,
+            param_count,
+            max_nesting,
+            is_recursive,
             metadata: Default::default(),
             qualified_name,
             name,
         }
+    }
+
+    /// Extract structured parameters from a C/C++ function definition.
+    ///
+    /// `declarator` is the resolved `function_declarator` (or None for malformed
+    /// input). The parameters live in a `parameter_list` child of the declarator.
+    /// tree-sitter-cpp wraps each parameter in a `parameter_declaration`.
+    fn extract_parameters(declarator: Option<Node>, source: &[u8]) -> Vec<ParameterInfo> {
+        let mut out = Vec::new();
+        let Some(declarator) = declarator else {
+            return out;
+        };
+        let mut cursor = declarator.walk();
+        let Some(params_node) = declarator
+            .children(&mut cursor)
+            .find(|c| c.kind() == "parameter_list")
+        else {
+            return out;
+        };
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            match child.kind() {
+                "parameter_declaration" | "optional_parameter_declaration" => {
+                    let mut name: Option<String> = None;
+                    let mut type_ann: Option<String> = None;
+                    let mut tcursor = child.walk();
+                    for sub in child.children(&mut tcursor) {
+                        let k = sub.kind();
+                        if k == "identifier" && name.is_none() {
+                            name = Some(node_text(sub, source).to_string());
+                        } else if k == "pointer_declarator" || k == "reference_declarator" {
+                            // Drill into declarator to find the bound name.
+                            let mut dc = sub.walk();
+                            for ds in sub.children(&mut dc) {
+                                if ds.kind() == "identifier" {
+                                    name = Some(node_text(ds, source).to_string());
+                                    break;
+                                }
+                            }
+                        } else if k.contains("type")
+                            || k == "primitive_type"
+                            || k == "qualified_identifier"
+                        {
+                            type_ann = Some(node_text(sub, source).to_string());
+                        }
+                    }
+                    let n = name.unwrap_or_default();
+                    if n.is_empty() && type_ann.is_none() {
+                        continue;
+                    }
+                    out.push(ParameterInfo {
+                        name: if n.is_empty() { "_".into() } else { n },
+                        type_annotation: type_ann,
+                        default: None,
+                        kind: ParameterKind::Positional,
+                    });
+                }
+                "variadic_parameter" => {
+                    out.push(ParameterInfo {
+                        name: "...".into(),
+                        type_annotation: None,
+                        default: None,
+                        kind: ParameterKind::Variadic,
+                    });
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn parse_struct(
@@ -1257,10 +1342,7 @@ impl LanguageParser for CppParser {
         let Ok(source) = std::fs::read(filepath) else {
             return ParseResult::new();
         };
-        let Some(tree) = self.parse_tree(&source) else {
-            return ParseResult::new();
-        };
-        let root = tree.root_node();
+
         let rel_path = filepath
             .strip_prefix(src_root)
             .unwrap_or(filepath)
@@ -1287,6 +1369,29 @@ impl LanguageParser for CppParser {
             || rel_path.starts_with("tests/");
 
         let language = if self.is_cpp() { "cpp" } else { "c" };
+
+        if let Some(reason) = is_generated_or_minified(&source) {
+            let mut r = ParseResult::new();
+            r.files.push(FileInfo {
+                path: rel_path,
+                filename,
+                loc,
+                module_path,
+                language: language.to_string(),
+                submodule_declarations: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                annotations: None,
+                is_test,
+                skip_reason: Some(reason.to_string()),
+            });
+            return r;
+        }
+
+        let Some(tree) = self.parse_tree(&source) else {
+            return ParseResult::new();
+        };
+        let root = tree.root_node();
         let mut file_info = FileInfo {
             path: rel_path.clone(),
             filename,
@@ -1298,6 +1403,7 @@ impl LanguageParser for CppParser {
             exports: Vec::new(),
             annotations: None,
             is_test,
+            skip_reason: None,
         };
         let mut result = ParseResult::new();
         let mut cursor = root.walk();

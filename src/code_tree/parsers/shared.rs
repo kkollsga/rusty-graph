@@ -2,6 +2,7 @@
 
 use crate::code_tree::models::Annotation;
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 use tree_sitter::Node;
 
@@ -154,4 +155,266 @@ pub fn extract_comment_annotations(
     } else {
         Some(out)
     }
+}
+
+// ── Complexity counters (cyclomatic-style) ────────────────────────────
+
+/// Branch-node kinds for each language's tree-sitter grammar.
+///
+/// These names are checked against `node.kind()` while walking a function body
+/// to compute `branch_count` and `max_nesting`. Each entry adds 1 to the branch
+/// count *and* contributes to nesting depth — so deeply nested `if`s and `for`s
+/// surface a meaningful `max_nesting` value, while flat boolean chains
+/// (`a && b && c`) only inflate `branch_count`.
+///
+/// Lists deliberately include short-circuit / ternary forms so the count
+/// approximates McCabe cyclomatic complexity rather than just structural nesting.
+pub const BRANCH_KINDS_PYTHON: &[&str] = &[
+    "if_statement",
+    "elif_clause",
+    "while_statement",
+    "for_statement",
+    "except_clause",
+    "case_clause",
+    "conditional_expression", // ternary  a if c else b
+    "boolean_operator",       // and / or
+];
+
+pub const BRANCH_KINDS_RUST: &[&str] = &[
+    "if_expression",
+    "while_expression",
+    "while_let_expression",
+    "for_expression",
+    "loop_expression",
+    "match_arm",
+    "try_expression", // the `?` operator
+];
+
+pub const BRANCH_KINDS_GO: &[&str] = &[
+    "if_statement",
+    "for_statement",
+    "expression_case",
+    "type_case",
+    "communication_case",
+];
+
+pub const BRANCH_KINDS_JAVA: &[&str] = &[
+    "if_statement",
+    "while_statement",
+    "for_statement",
+    "enhanced_for_statement",
+    "do_statement",
+    "switch_label",
+    "catch_clause",
+    "ternary_expression",
+];
+
+pub const BRANCH_KINDS_TS: &[&str] = &[
+    "if_statement",
+    "while_statement",
+    "for_statement",
+    "for_in_statement",
+    "for_of_statement",
+    "do_statement",
+    "switch_case",
+    "catch_clause",
+    "ternary_expression",
+];
+
+pub const BRANCH_KINDS_CPP: &[&str] = &[
+    "if_statement",
+    "while_statement",
+    "for_statement",
+    "for_range_loop",
+    "do_statement",
+    "case_statement",
+    "catch_clause",
+    "conditional_expression",
+];
+
+pub const BRANCH_KINDS_CSHARP: &[&str] = &[
+    "if_statement",
+    "while_statement",
+    "for_statement",
+    "for_each_statement",
+    "do_statement",
+    "switch_section",
+    "catch_clause",
+    "conditional_expression",
+];
+
+/// Walk `body` and return (branch_count, max_nesting).
+///
+/// `branch_count` increments for every node whose kind is in `branch_kinds`.
+/// `max_nesting` is the deepest stack of nested `branch_kinds` nodes seen.
+/// `nested_scope_kinds` (e.g. `function_definition`, `closure_expression`)
+/// are NOT descended into — they belong to the caller's nested function/closure
+/// and would inflate the outer function's metrics. Pass an empty slice if the
+/// caller already filters those before invoking this helper.
+pub fn compute_complexity(
+    body: Node,
+    branch_kinds: &[&str],
+    nested_scope_kinds: &[&str],
+) -> (u32, u32) {
+    let branch_set: HashSet<&str> = branch_kinds.iter().copied().collect();
+    let nested_set: HashSet<&str> = nested_scope_kinds.iter().copied().collect();
+    let mut count: u32 = 0;
+    let mut max_depth: u32 = 0;
+    walk(
+        body,
+        &branch_set,
+        &nested_set,
+        0,
+        &mut count,
+        &mut max_depth,
+    );
+    (count, max_depth)
+}
+
+fn walk(
+    node: Node,
+    branches: &HashSet<&str>,
+    nested: &HashSet<&str>,
+    depth: u32,
+    count: &mut u32,
+    max_depth: &mut u32,
+) {
+    let kind = node.kind();
+    let is_branch = branches.contains(kind);
+    let next_depth = if is_branch {
+        *count += 1;
+        let d = depth + 1;
+        if d > *max_depth {
+            *max_depth = d;
+        }
+        d
+    } else {
+        depth
+    };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if nested.contains(child.kind()) {
+            continue;
+        }
+        walk(child, branches, nested, next_depth, count, max_depth);
+    }
+}
+
+// ── Generated / minified file detection ───────────────────────────────
+
+/// Codegen banner markers that — when found in a *comment line within the file's
+/// first ~10 non-empty lines* — strongly indicate an auto-generated file.
+///
+/// Restricted to early comments (not anywhere in the first 2 KiB) so that doc
+/// strings or test fixtures that happen to mention the words "auto-generated"
+/// or "DO NOT EDIT" deeper in the file don't false-positive.
+fn generated_marker_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(concat!(
+            r"(?i)(",
+            // protoc, ts-proto, protoc-gen-go banners
+            r"\bcode\s+generated\b",
+            // Most codegen tools include this exact phrase, often uppercase
+            r"|\bdo\s+not\s+edit\b",
+            // bindgen, jOOQ, sqlc
+            r"|\bautomatically\s+generated\b",
+            // C# T4, Visual Studio designer files
+            r"|<\s*auto-generated\s*>",
+            // JSDoc / Flow / Cargo lockfile / Buck
+            r"|@generated\b",
+            // OpenAPI generator banner
+            r"|\bgenerated\s+by\s+openapi",
+            // generic "Generated by <tool>" — restrict to first 5 lines below
+            r"|^\s*(?://|#|/\*|\*|--|<!--)\s*Generated\s+by\b",
+            r")",
+        ))
+        .expect("generated marker regex compiles")
+    })
+}
+
+/// Returns true if the line looks like a comment (starts with a comment
+/// delimiter for one of the supported languages).
+fn is_comment_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("//")
+        || t.starts_with('#')
+        || t.starts_with("/*")
+        || t.starts_with('*')
+        || t.starts_with("--")
+        || t.starts_with("<!--")
+        || t.starts_with(';')
+}
+
+/// Detect generated or minified source files by content sniff.
+///
+/// Returns `Some("generated")` if any of the file's first ~10 non-empty lines
+/// is a comment containing a codegen banner marker (e.g. `// Code generated by
+/// protoc; DO NOT EDIT.`, `# @generated`, `<auto-generated>`). Restricting the
+/// scan to early *comment* lines avoids false-positives on doc strings or test
+/// fixtures that quote the same phrases deeper in a hand-written file.
+///
+/// Returns `Some("minified")` if the file is one extremely long line, or its
+/// average non-empty-line width across the first 50 lines exceeds 500 chars
+/// (catches webpack/rollup-bundled JS).
+///
+/// Returns `None` for normal hand-written source.
+///
+/// Designed to run BEFORE the tree-sitter parse — these files would otherwise
+/// inflate the graph with phantom CALLS edges or single-blob "function" nodes
+/// that mask real code structure.
+pub fn is_generated_or_minified(source: &[u8]) -> Option<&'static str> {
+    if source.is_empty() {
+        return None;
+    }
+
+    // Banner check: scan up to the first 10 non-empty lines, only test the regex
+    // against lines that look like comments. Codegen banners always live at
+    // the very top of the file inside a comment block.
+    let head_len = source.len().min(4096);
+    let head_str = std::str::from_utf8(&source[..head_len]).unwrap_or("");
+    let re = generated_marker_regex();
+    let mut non_empty_seen = 0;
+    for line in head_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        non_empty_seen += 1;
+        if non_empty_seen > 10 {
+            break;
+        }
+        if is_comment_line(line) && re.is_match(line) {
+            return Some("generated");
+        }
+    }
+
+    // Minified: one huge line, OR average line width above threshold across
+    // the first 50 non-empty lines.
+    if source.len() >= 1024 {
+        let newline_count = source.iter().filter(|&&b| b == b'\n').count();
+        if newline_count == 0 {
+            return Some("minified");
+        }
+    }
+    let mut lines_seen: u32 = 0;
+    let mut total_width: u64 = 0;
+    for raw_line in source.split(|&b| b == b'\n') {
+        if raw_line.is_empty() {
+            continue;
+        }
+        total_width += raw_line.len() as u64;
+        lines_seen += 1;
+        if lines_seen >= 50 {
+            break;
+        }
+    }
+    if lines_seen >= 5 {
+        let avg = total_width / lines_seen as u64;
+        if avg > 500 {
+            return Some("minified");
+        }
+    }
+
+    None
 }
