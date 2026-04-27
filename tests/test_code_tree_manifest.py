@@ -62,3 +62,30 @@ class TestCrateType:
         rows = g.cypher("MATCH (p:Project) RETURN p.crate_type AS crate_type").to_list()
         assert len(rows) == 1
         assert rows[0]["crate_type"] in (None, "")
+
+
+class TestToolingOnlyPyproject:
+    """Regression: a tooling-only pyproject.toml (scripts/lint config, no
+    installable Python package, no maturin) used to trap `build()` into
+    parsing only `tests/`. The whole-repo fallback now fires when the
+    manifest declares zero source roots."""
+
+    def test_pyproject_with_no_source_roots_falls_back_to_whole_repo(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "pyproject.toml": """
+                [tool.poetry]
+                name = "tooling-scripts"
+                packages = [{ include = "*.py", from = "." }]
+
+                [build-system]
+                build-backend = "poetry.core.masonry.api"
+                """,
+                "src/main.c": "int main(void) { return 0; }\n",
+                "tests/test_thing.py": "def test_x():\n    pass\n",
+            },
+        )
+        g = build(str(tmp_path))
+        files = [r["path"] for r in g.cypher("MATCH (f:File) RETURN f.path AS path").to_list()]
+        assert any(p.endswith("src/main.c") for p in files), f"expected src/main.c in graph, got: {files}"

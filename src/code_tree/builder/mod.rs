@@ -52,38 +52,52 @@ pub fn run_with_options(
     let mut parsed_any = false;
 
     if let Some(info) = &mut project_info {
-        let mut roots: Vec<_> = info.source_roots.clone();
-        if include_tests {
-            roots.extend(info.test_roots.iter().cloned());
-        }
-        if verbose {
-            eprintln!(
-                "Manifest: {} ({})",
-                info.manifest_path,
-                info.build_system.as_deref().unwrap_or("")
-            );
-            let labels: Vec<String> = roots
-                .iter()
-                .map(|r| {
-                    r.path
-                        .strip_prefix(&project_root)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| r.path.display().to_string())
-                })
-                .collect();
-            eprintln!("Source roots: {}", labels.join(", "));
-        }
-        let t_parse = std::time::Instant::now();
-        for root in &roots {
-            if !root.path.is_dir() {
-                continue;
+        if info.source_roots.is_empty() {
+            // Manifest exists but declared no primary source roots (e.g. a
+            // tooling-only pyproject.toml in a C/C++ repo). Don't parse just
+            // tests — fall through to the whole-repo scan below so the
+            // primary codebase isn't silently skipped.
+            if verbose {
+                eprintln!(
+                    "Manifest: {} ({}) — no source roots declared, scanning whole repo",
+                    info.manifest_path,
+                    info.build_system.as_deref().unwrap_or("")
+                );
             }
-            let result = parse_directory(&root.path, verbose);
-            combined.merge(result);
-            parsed_any = true;
-        }
-        if verbose && parsed_any {
-            eprintln!("[timing] parse: {:.3}s", t_parse.elapsed().as_secs_f64());
+        } else {
+            let mut roots: Vec<_> = info.source_roots.clone();
+            if include_tests {
+                roots.extend(info.test_roots.iter().cloned());
+            }
+            if verbose {
+                eprintln!(
+                    "Manifest: {} ({})",
+                    info.manifest_path,
+                    info.build_system.as_deref().unwrap_or("")
+                );
+                let labels: Vec<String> = roots
+                    .iter()
+                    .map(|r| {
+                        r.path
+                            .strip_prefix(&project_root)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| r.path.display().to_string())
+                    })
+                    .collect();
+                eprintln!("Source roots: {}", labels.join(", "));
+            }
+            let t_parse = std::time::Instant::now();
+            for root in &roots {
+                if !root.path.is_dir() {
+                    continue;
+                }
+                let result = parse_directory(&root.path, verbose);
+                combined.merge(result);
+                parsed_any = true;
+            }
+            if verbose && parsed_any {
+                eprintln!("[timing] parse: {:.3}s", t_parse.elapsed().as_secs_f64());
+            }
         }
     }
 

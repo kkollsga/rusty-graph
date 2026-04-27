@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.25] — 2026-04-27
+
+### Fixed
+
+- **`code_tree.build` silently parsed only `tests/` for repos with a tooling-only
+  `pyproject.toml`.** Manifests that declared no primary source roots (e.g.
+  llama.cpp's `pyproject.toml` for poetry-managed scripts, with no
+  `<name>/__init__.py` package and no maturin) yielded `source_roots = []`
+  and `test_roots = ["tests"]`. The builder then parsed only `tests/`, set
+  `parsed_any = true`, and skipped the whole-repo fallback — silently
+  producing an undersized graph (e.g. 58 files instead of thousands).
+  When a manifest declares zero source roots, the builder now logs the
+  situation in verbose mode and falls through to the whole-repo scan
+  instead of trusting the test-only roots.
+
 ## [0.8.24] — 2026-04-27
 
 C++ parser robustness round driven by analysing nlohmann/json (24% → 12%
