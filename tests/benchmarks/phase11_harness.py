@@ -1,7 +1,7 @@
 """Phase 11 N-trial benchmark harness.
 
-Standalone runner — not collected by pytest. Imports builders + query
-shapes from ``test_nx_comparison.py`` and runs each timed cell N times,
+Standalone runner — not collected by pytest. Self-contained: builders
+and query shapes are inlined below, and each timed cell runs N times,
 collecting mean/stddev/p50/p95/p99 per (test, scale, mode) into JSON.
 
 Designed so the same harness runs on any KGLite checkout (0.8.0 main
@@ -136,9 +136,8 @@ def _kglite_version() -> str:
 
 
 def _make_shape(scale: int, edge_factor: int = 3, seed: int = 42):
-    """Deterministic graph shape shared with (but not imported from) the
-    test_nx_comparison helpers — inlined so the harness works on any
-    checkout regardless of that file's version."""
+    """Deterministic graph shape — inlined so the harness works on any
+    checkout regardless of which other benchmark files are present."""
     import random as _r
 
     rng = _r.Random(seed)
