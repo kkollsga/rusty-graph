@@ -527,6 +527,7 @@ impl JstsParser {
             decorators: Self::get_decorators(node, source),
             calls,
             references: Vec::new(),
+            function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameters"),
             metadata,
             qualified_name,

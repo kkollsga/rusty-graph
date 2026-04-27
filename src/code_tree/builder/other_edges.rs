@@ -208,6 +208,12 @@ pub struct ReferencesEdge {
     pub line: u32,
 }
 
+pub struct ReferencesFnEdge {
+    pub caller: String,
+    pub callee: String,
+    pub line: u32,
+}
+
 /// REFERENCES edges from `Function` to `Constant` — emit one row per
 /// `(function, constant)` pair where the constant's terminal name
 /// appears in the function body's identifier stream.
@@ -258,6 +264,63 @@ pub fn build_references_edges(
                         line: *line,
                     });
                 }
+            }
+        }
+    }
+    out
+}
+
+/// `Function -[REFERENCES_FN]-> Function` — bare/scoped identifiers
+/// passed as arguments to higher-order calls (`iter.and_then(some_fn)`).
+/// The referenced function isn't invoked at the reference site, so this
+/// is intentionally a different edge type from `CALLS`. Dead-code
+/// analysis can union the two: a function with `CALLS ∪ REFERENCES_FN`
+/// = 0 inbound is genuinely uncalled.
+///
+/// Resolution mirrors `build_call_edges`'s name-keyed lookup: only
+/// emit an edge when the identifier matches exactly one function in
+/// the project (skip ambiguous matches to avoid noise from
+/// argument-name collisions with unrelated functions).
+pub fn build_references_fn_edges(functions: &[FunctionInfo]) -> Vec<ReferencesFnEdge> {
+    if functions.is_empty() {
+        return Vec::new();
+    }
+    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for f in functions {
+        by_name
+            .entry(f.name.as_str())
+            .or_default()
+            .push(f.qualified_name.as_str());
+    }
+
+    let mut out: Vec<ReferencesFnEdge> = Vec::new();
+    for f in functions {
+        if f.function_refs.is_empty() {
+            continue;
+        }
+        let caller = f.qualified_name.as_str();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (ident, line) in &f.function_refs {
+            let Some(matches) = by_name.get(ident.as_str()) else {
+                continue;
+            };
+            // Only emit on unambiguous matches — if the bare name maps
+            // to multiple functions, skip rather than guess. Function
+            // pointers passed as arguments don't carry receiver-type
+            // info that the call-edge resolver could use to narrow.
+            if matches.len() != 1 {
+                continue;
+            }
+            let target = matches[0];
+            if target == caller {
+                continue;
+            }
+            if seen.insert(target) {
+                out.push(ReferencesFnEdge {
+                    caller: caller.to_string(),
+                    callee: target.to_string(),
+                    line: *line,
+                });
             }
         }
     }

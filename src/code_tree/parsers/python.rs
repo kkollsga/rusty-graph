@@ -601,6 +601,7 @@ impl PythonParser {
             return_type: Self::get_return_type(node, source),
             calls,
             references: Vec::new(),
+            function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameter"),
             decorators: Vec::new(),
             metadata: Default::default(),

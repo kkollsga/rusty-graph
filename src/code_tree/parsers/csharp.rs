@@ -438,6 +438,7 @@ impl CSharpParser {
             decorators: Self::get_attributes(node, source),
             calls,
             references: Vec::new(),
+            function_refs: Vec::new(),
             type_parameters: get_type_parameters(node, source, "type_parameter_list"),
             metadata,
             qualified_name,

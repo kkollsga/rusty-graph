@@ -510,6 +510,7 @@ impl CppParser {
             decorators: Vec::new(),
             calls,
             references: Vec::new(),
+            function_refs: Vec::new(),
             type_parameters: None,
             metadata: Default::default(),
             qualified_name,

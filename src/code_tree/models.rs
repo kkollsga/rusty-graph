@@ -58,6 +58,14 @@ pub struct FunctionInfo {
     /// set to emit `REFERENCES` edges from Function → Constant.
     /// Stored as `(identifier_text, line_number)` pairs.
     pub references: Vec<(String, u32)>,
+    /// Function-pointer references: bare or scoped identifiers passed
+    /// as arguments to a higher-order function (e.g.
+    /// `iter.and_then(some_fn)`). Distinct from `calls` because the
+    /// referenced function isn't necessarily invoked at the reference
+    /// site — the value is passed by reference. The builder resolves
+    /// these against the project's function set to emit
+    /// `REFERENCES_FN` edges. Stored as `(identifier_text, line)` pairs.
+    pub function_refs: Vec<(String, u32)>,
     /// Generic/template parameters, e.g. `"T, U: Display"`.
     pub type_parameters: Option<String>,
     pub end_line: Option<u32>,

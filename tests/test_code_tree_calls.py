@@ -254,6 +254,67 @@ class TestRustClosureWalking:
             caller.endswith("::extras::Foo::caller") and callee.endswith("::Foo::run") for caller, callee in pairs
         ), f"caller in extras.rs should resolve self.run() to Foo::run: {pairs}"
 
+    def test_function_pointer_argument_emits_references_fn(self, tmp_path):
+        """`iter.and_then(some_fn)` — `some_fn` is a function-value
+        argument, not a call site. We emit a separate REFERENCES_FN
+        edge so the function isn't reported as dead by inbound-CALLS
+        analysis (issue #9 sub-fix 3)."""
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn helper(n: u32) -> Option<u32> { Some(n + 1) }
+
+                pub fn caller() -> Option<u32> {
+                    Some(0u32).and_then(helper)
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        rows = g.cypher(
+            "MATCH (a:Function)-[:REFERENCES_FN]->(b:Function) "
+            "WHERE a.name = 'caller' AND b.name = 'helper' "
+            "RETURN count(*) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 1, "REFERENCES_FN edge for fn-as-value argument missing"
+
+        # Also verify NO direct CALLS edge — caller doesn't actually
+        # invoke helper at the reference site.
+        rows = g.cypher(
+            "MATCH (a:Function)-[:CALLS]->(b:Function) "
+            "WHERE a.name = 'caller' AND b.name = 'helper' "
+            "RETURN count(*) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 0, "CALLS edge must NOT fire for fn-as-value argument"
+
+    def test_scoped_function_pointer_resolves(self, tmp_path):
+        """Scoped paths like `module::helper` resolve via the terminal
+        segment, same as bare identifiers."""
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub mod helpers {
+                    pub fn deep(_n: u32) -> Option<u32> { None }
+                }
+
+                pub fn caller() -> Option<u32> {
+                    Some(0u32).and_then(crate::helpers::deep)
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        rows = g.cypher(
+            "MATCH (a:Function)-[:REFERENCES_FN]->(b:Function) "
+            "WHERE a.name = 'caller' AND b.name = 'deep' "
+            "RETURN count(*) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 1
+
     def test_nested_function_item_still_isolated(self, tmp_path):
         # Nested fn (not closure) must keep its own scope — calls inside
         # an inner `fn` belong to that inner fn, not the outer.

@@ -442,6 +442,71 @@ impl RustParser {
         out
     }
 
+    /// Walk a function body for function-pointer references — bare or
+    /// scoped identifiers passed as arguments to a higher-order function
+    /// (`iter.and_then(some_fn)`, `Option::map(my_helper)`, etc.).
+    ///
+    /// The reference *isn't a call site* — the function is passed by
+    /// value, not invoked at this point — so we record it separately
+    /// from `extract_calls` and surface it as a `REFERENCES_FN` edge in
+    /// the builder. Without this, dead-code analysis on
+    /// `fn_passed_as_value` always shows zero CALLS.
+    ///
+    /// Filters at the parse-time:
+    /// - Only `identifier` and `scoped_identifier` argument nodes count.
+    /// - The identifier must look like a function (lowercase first
+    ///   character on the terminal segment) to avoid promoting a
+    ///   constant or type name to a function reference. Uppercase-start
+    ///   args are filtered out.
+    fn extract_function_pointer_refs(body: Node, source: &[u8]) -> Vec<(String, u32)> {
+        fn looks_like_fn_ident(s: &str) -> bool {
+            // Function names in Rust are conventionally snake_case
+            // (lowercase start). Skip identifiers starting with an
+            // uppercase letter (likely Type or CONST) and single
+            // characters (likely generic params).
+            s.len() >= 2 && s.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        }
+
+        let mut out: Vec<(String, u32)> = Vec::new();
+        fn walk(node: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
+            if node.kind() == "call_expression" {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    let mut cursor = args.walk();
+                    for arg in args.children(&mut cursor) {
+                        let line = arg.start_position().row as u32 + 1;
+                        match arg.kind() {
+                            "identifier" => {
+                                let text = node_text(arg, source);
+                                if looks_like_fn_ident(text) {
+                                    out.push((text.to_string(), line));
+                                }
+                            }
+                            "scoped_identifier" => {
+                                let text = node_text(arg, source);
+                                if let Some(tail) = text.rsplit("::").next() {
+                                    if looks_like_fn_ident(tail) {
+                                        out.push((tail.to_string(), line));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if !NESTED_SCOPES.contains(&child.kind()) {
+                    walk(child, source, out);
+                }
+            }
+        }
+        walk(body, source, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
         let rel = filepath.strip_prefix(src_root).unwrap_or(filepath);
         let mut parts: Vec<String> = rel
@@ -700,6 +765,9 @@ impl RustParser {
         let references = body
             .map(|b| Self::extract_constant_refs(b, source))
             .unwrap_or_default();
+        let function_refs = body
+            .map(|b| Self::extract_function_pointer_refs(b, source))
+            .unwrap_or_default();
 
         FunctionInfo {
             visibility,
@@ -714,6 +782,7 @@ impl RustParser {
             return_type: Self::get_return_type(node, source),
             calls,
             references,
+            function_refs,
             type_parameters: get_type_parameters(node, source, "type_parameters"),
             decorators: Vec::new(),
             metadata,

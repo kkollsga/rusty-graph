@@ -624,6 +624,17 @@ fn references_edges_df(edges: &[super::other_edges::ReferencesEdge]) -> DataFram
     ])
 }
 
+fn references_fn_edges_df(edges: &[super::other_edges::ReferencesFnEdge]) -> DataFrame {
+    let callers: Vec<Option<String>> = edges.iter().map(|e| Some(e.caller.clone())).collect();
+    let callees: Vec<Option<String>> = edges.iter().map(|e| Some(e.callee.clone())).collect();
+    let lines: Vec<Option<i64>> = edges.iter().map(|e| Some(e.line as i64)).collect();
+    build_df(vec![
+        ("caller", ColumnType::String, str_col(callers)),
+        ("callee", ColumnType::String, str_col(callees)),
+        ("line", ColumnType::Int64, int_col(lines)),
+    ])
+}
+
 fn ffi_exposes_df(edges: &[super::other_edges::FfiExposesEdge]) -> DataFrame {
     let m: Vec<Option<String>> = edges.iter().map(|e| Some(e.module_fn.clone())).collect();
     let t: Vec<Option<String>> = edges.iter().map(|e| Some(e.target_qname.clone())).collect();
@@ -1514,6 +1525,27 @@ pub fn load_into_graph(
     }
 
     mark(t_refs, "references");
+    let t_refs_fn = std::time::Instant::now();
+    // REFERENCES_FN (Function → Function) — bare-identifier function
+    // pointers passed to higher-order calls.
+    let refs_fn = super::other_edges::build_references_fn_edges(&result.functions);
+    if !refs_fn.is_empty() {
+        maintain::add_connections(
+            graph,
+            references_fn_edges_df(&refs_fn),
+            "REFERENCES_FN".into(),
+            "Function".into(),
+            "caller".into(),
+            "Function".into(),
+            "callee".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+
+    mark(t_refs_fn, "references_fn");
     let t_ffi = std::time::Instant::now();
     // FFI EXPOSES.
     let ffi = super::other_edges::build_ffi_exposes_edges(&result.functions, &result.classes);
