@@ -56,50 +56,6 @@ pub fn get_type_parameters(node: Node, source: &[u8], node_type: &str) -> Option
     None
 }
 
-/// Names that count as `self`/`cls` parameters and must be stripped from signatures.
-const SELF_PARAMS: &[&str] = &["self", "&self", "&mut self", "cls"];
-
-/// Extract the parameter list from a function signature string.
-///
-/// Finds the first balanced `(...)` group, drops `self`/`cls` equivalents,
-/// and returns the cleaned comma-separated list or `None` if empty.
-pub fn extract_parameters_from_signature(signature: &str) -> Option<String> {
-    let start = signature.find('(')?;
-    let mut depth = 0_i32;
-    let mut end = start;
-    for (i, ch) in signature[start..].char_indices() {
-        let idx = start + i;
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = idx;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if end <= start {
-        return None;
-    }
-    let params_text = signature[start + 1..end].trim();
-    if params_text.is_empty() {
-        return None;
-    }
-    let kept: Vec<&str> = params_text
-        .split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty() && !SELF_PARAMS.contains(p))
-        .collect();
-    if kept.is_empty() {
-        None
-    } else {
-        Some(kept.join(", "))
-    }
-}
-
 fn annotation_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
