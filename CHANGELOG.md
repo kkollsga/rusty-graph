@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.22] — 2026-04-27
+
+A code-graph quality round driven by analysing KGLite's own self-graph and
+closing every concrete gap that surfaced. Five new node/edge primitives,
+seven new properties on existing nodes, and one small dead-code cleanup.
+
 ### Added
 
 - **`BINDS` edges — Python wrapper to Rust pymethod.** Closes the cross-language
