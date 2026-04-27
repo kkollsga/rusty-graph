@@ -100,12 +100,13 @@ pub fn build_call_edges(
             let caller_qn = fn_info.qualified_name.as_str();
             let caller_lang = infer_lang_group(caller_qn);
             let caller_prefix = qname_to_prefix.get(caller_qn).copied();
+            let caller_owner = qname_to_owner.get(caller_qn).copied();
             let caller_file = fn_info.file_path.as_str();
 
             let mut out: Vec<(&str, &str, u32)> = Vec::new();
 
             for (called_name, line) in &fn_info.calls {
-                let (receiver_hint, method_name) = match called_name.rfind('.') {
+                let (explicit_hint, method_name) = match called_name.rfind('.') {
                     Some(idx) => (Some(&called_name[..idx]), &called_name[idx + 1..]),
                     None => (None, called_name.as_str()),
                 };
@@ -128,7 +129,23 @@ pub fn build_call_edges(
                 let mut targets: &[&str] = candidates.as_slice();
                 let mut filtered: Vec<&str>;
 
-                if let Some(hint) = receiver_hint {
+                // Tier 0: receiver-type filter. Two sources of hints —
+                // `(explicit_hint, owner_short_match)`:
+                //
+                //   - Explicit hint from `obj.method()` — the receiver
+                //     identifier's text. Already extracted at parse time
+                //     (e.g. `cfg.read` becomes `("cfg", "read")`).
+                //   - Implicit hint from `self.method()` / bare-name
+                //     calls inside a method body — use the caller's own
+                //     owner short name as the receiver type. Resolves
+                //     `Foo::caller -> Foo::method` correctly when the
+                //     same method name exists on multiple structs.
+                let implicit_hint = if explicit_hint.is_none() {
+                    caller_owner
+                } else {
+                    None
+                };
+                if let Some(hint) = explicit_hint.or(implicit_hint) {
                     filtered = targets
                         .iter()
                         .copied()

@@ -186,6 +186,74 @@ class TestRustClosureWalking:
             f"caller -> deeper inside closure not detected: {pairs}"
         )
 
+    def test_self_method_disambiguates_by_caller_struct(self, tmp_path):
+        """When the same method name exists on multiple structs, a bare
+        `self.method()` call inside a method of `Foo` must resolve to
+        `Foo::method` — not `Bar::method` (issue #9 sub-fix 2)."""
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub struct Foo;
+                pub struct Bar;
+
+                impl Foo {
+                    pub fn caller(&self) {
+                        self.run();
+                    }
+                    pub fn run(&self) {}
+                }
+
+                impl Bar {
+                    pub fn run(&self) {}
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        # Foo::caller should resolve self.run() to Foo::run, not Bar::run.
+        caller_edges = {callee for caller, callee in pairs if caller.endswith("::Foo::caller")}
+        assert any(c.endswith("::Foo::run") for c in caller_edges), f"Foo::caller -> Foo::run should resolve: {pairs}"
+        assert not any(c.endswith("::Bar::run") for c in caller_edges), (
+            f"Foo::caller must NOT resolve to Bar::run: {pairs}"
+        )
+
+    def test_self_method_disambiguates_across_files(self, tmp_path):
+        """Both impls live in different files but on the same struct
+        (`impl Foo` in lib.rs and `impl Foo` in extras.rs). A self.method
+        call must still bind correctly via the implicit receiver hint."""
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub mod extras;
+
+                pub struct Foo;
+
+                impl Foo {
+                    pub fn run(&self) {}
+                }
+                """,
+                "src/extras.rs": """
+                use crate::Foo;
+
+                impl Foo {
+                    pub fn caller(&self) {
+                        self.run();
+                    }
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(
+            caller.endswith("::extras::Foo::caller") and callee.endswith("::Foo::run") for caller, callee in pairs
+        ), f"caller in extras.rs should resolve self.run() to Foo::run: {pairs}"
+
     def test_nested_function_item_still_isolated(self, tmp_path):
         # Nested fn (not closure) must keep its own scope — calls inside
         # an inner `fn` belong to that inner fn, not the outer.
