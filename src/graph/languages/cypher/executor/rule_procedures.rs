@@ -40,6 +40,8 @@ use crate::graph::storage::GraphRead;
 ///
 /// The combination is the natural "find functions never called" query:
 /// `CALL orphan_node({type: 'Function', link_type: 'CALLS', direction: 'in'})`.
+///
+/// @procedure: orphan_node
 pub(super) fn execute_orphan_node(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -85,6 +87,8 @@ pub(super) fn execute_orphan_node(
 /// Yields one row per node of `type` that has an outgoing `edge` whose
 /// target is itself. Always a data error in tree-shaped hierarchies;
 /// occasionally legitimate for self-referential domain edges.
+///
+/// @procedure: self_loop
 pub(super) fn execute_self_loop(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -115,6 +119,8 @@ pub(super) fn execute_self_loop(
 /// `a` and `b` are both of `type`, and `a < b` (deduplicates the pair).
 /// Variables are named `node_a` / `node_b` to avoid clashing with the
 /// Cypher reserved word `END` (CASE expressions).
+///
+/// @procedure: cycle_2step
 pub(super) fn execute_cycle_2step(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -162,6 +168,8 @@ pub(super) fn execute_cycle_2step(
 /// `edge`. Refuses to execute when the graph's actual schema for `edge`
 /// makes `type` the target rather than the source — flips that case to a
 /// `DirectionMismatch` error suggesting `missing_inbound_edge`.
+///
+/// @procedure: missing_required_edge
 pub(super) fn execute_missing_required_edge(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -194,6 +202,8 @@ pub(super) fn execute_missing_required_edge(
 ///
 /// Mirror of [`execute_missing_required_edge`]: yields nodes of `type`
 /// with no **incoming** edge of `edge`.
+///
+/// @procedure: missing_inbound_edge
 pub(super) fn execute_missing_inbound_edge(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -234,6 +244,8 @@ pub(super) fn execute_missing_inbound_edge(
 /// RETURN t, size(dups) AS count
 /// ORDER BY count DESC LIMIT 20
 /// ```
+///
+/// @procedure: duplicate_title
 pub(super) fn execute_duplicate_title(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -268,6 +280,8 @@ pub(super) fn execute_duplicate_title(
 /// the inverse `(b)-[rel_b]->(a)` does not. Useful when two relations
 /// are declared as logical inverses (parent_of/child_of, manages/works_for,
 /// cites/cited_by) and you want to find unidirectional cases.
+///
+/// @procedure: inverse_violation
 pub(super) fn execute_inverse_violation(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -306,6 +320,8 @@ pub(super) fn execute_inverse_violation(
 /// For every `(a)-[rel]->(b)-[rel]->(c)` chain, yields the triple when no
 /// direct `(a)-[rel]->(c)` edge exists. Generalizes the OCTF subclass-fold
 /// audit pattern. Pairs with `cycle_2step` for the cycle case.
+///
+/// @procedure: transitivity_violation
 pub(super) fn execute_transitivity_violation(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -354,6 +370,8 @@ pub(super) fn execute_transitivity_violation(
 /// outside `[min, max]`. Either bound is optional (`min` defaults to 0,
 /// `max` defaults to no upper limit). Setting `max: 1` catches functional-
 /// property violations; setting `min: 1` catches missing-required-edge.
+///
+/// @procedure: cardinality_violation
 pub(super) fn execute_cardinality_violation(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -392,6 +410,8 @@ pub(super) fn execute_cardinality_violation(
 ///
 /// Yields edges of `edge` whose source node is not of `expected_source`
 /// type. Useful as a post-load schema check.
+///
+/// @procedure: type_domain_violation
 pub(super) fn execute_type_domain_violation(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -427,6 +447,8 @@ pub(super) fn execute_type_domain_violation(
 ///
 /// Mirror of [`execute_type_domain_violation`]: yields edges whose
 /// target node is not of `expected_target` type.
+///
+/// @procedure: type_range_violation
 pub(super) fn execute_type_range_violation(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -463,6 +485,8 @@ pub(super) fn execute_type_range_violation(
 /// Yields one row per `(a, b)` pair connected by more than one edge of
 /// the same `edge` type. Almost always a load-time bug — duplicate rows
 /// in the source CSV, or an upsert path that didn't dedupe.
+///
+/// @procedure: parallel_edges
 pub(super) fn execute_parallel_edges(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -497,6 +521,8 @@ pub(super) fn execute_parallel_edges(
 ///
 /// Yields nodes of `type` where `property` is absent or null. Pairs with
 /// `missing_required_edge` for the property side of the integrity story.
+///
+/// @procedure: null_property
 pub(super) fn execute_null_property(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -537,6 +563,8 @@ pub(super) fn execute_null_property(
 /// Nodes without spatial config (no `location`/`geometry` mapping) are
 /// skipped silently. For point-only configs, distance is point-to-point;
 /// for polygon-or-line geometries, distance is to the nearest edge.
+///
+/// @procedure: kg_knn
 pub(super) fn execute_kg_knn(
     graph: &DirGraph,
     params: &HashMap<String, Value>,

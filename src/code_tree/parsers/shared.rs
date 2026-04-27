@@ -315,18 +315,22 @@ fn procedure_annotation_regex() -> &'static Regex {
     })
 }
 
-/// Extract a `@procedure: NAME` annotation from a docstring/leading comment
-/// block, if present. Returns the procedure name or `None`.
+/// Extract all `@procedure: NAME` annotations from a docstring/leading comment
+/// block. A single function can register under multiple procedure names via
+/// repeated annotations — useful for aliases (e.g. both `betweenness` and
+/// `betweenness_centrality` dispatching to the same impl).
 ///
 /// Used to surface project-specific procedure registries (e.g. Cypher CALL
 /// procedures, RPC method handlers, CLI subcommand dispatchers) as graph
 /// `Procedure` nodes connected to their implementing Function.
-pub fn extract_procedure_annotation(docstring: Option<&str>) -> Option<String> {
-    let text = docstring?;
+pub fn extract_procedure_annotations(docstring: Option<&str>) -> Vec<String> {
+    let Some(text) = docstring else {
+        return Vec::new();
+    };
     procedure_annotation_regex()
-        .captures(text)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .captures_iter(text)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect()
 }
 
 // ── Generated / minified file detection ───────────────────────────────

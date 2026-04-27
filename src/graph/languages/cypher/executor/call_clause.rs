@@ -507,6 +507,8 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Execute CALL cluster() — cluster nodes from the preceding MATCH result set.
+    ///
+    /// @procedure: cluster
     pub(super) fn execute_call_cluster(
         &self,
         params: &HashMap<String, Value>,

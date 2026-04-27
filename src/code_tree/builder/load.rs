@@ -1795,10 +1795,10 @@ pub fn load_into_graph(
     let proc_pairs: Vec<(String, String)> = result
         .functions
         .iter()
-        .filter_map(|f| {
-            f.procedure_name
-                .as_ref()
-                .map(|n| (n.clone(), f.qualified_name.clone()))
+        .flat_map(|f| {
+            f.procedure_names
+                .iter()
+                .map(move |n| (n.clone(), f.qualified_name.clone()))
         })
         .collect();
     if !proc_pairs.is_empty() {

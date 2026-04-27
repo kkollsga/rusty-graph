@@ -44,10 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Procedure` nodes — annotation-driven, language-agnostic.** Functions
   whose docstring/leading comment contains `@procedure: NAME` (or
   `@cypher_procedure: NAME`) at the start of a line synthesize a `Procedure`
-  node with an `IMPLEMENTED_BY` edge to the function. Generic mechanism for
-  surfacing project-specific registries (Cypher CALL procedures, RPC method
-  catalogs, command-bus dispatchers) as first-class graph entities. Anchored
-  to line start so prose mentions in docs/tests don't false-positive.
+  node with an `IMPLEMENTED_BY` edge to the function. A single function can
+  carry multiple annotations to register under aliases (e.g. both
+  `betweenness` and `betweenness_centrality` dispatching to the same impl).
+  Generic mechanism for surfacing project-specific registries (Cypher CALL
+  procedures, RPC method catalogs, command-bus dispatchers) as first-class
+  graph entities. Anchored to line start so prose mentions in docs/tests
+  don't false-positive.
+
+- **Annotated all 22 KGLite Cypher CALL procedures** in
+  `src/graph/algorithms/graph_algorithms.rs`,
+  `src/graph/languages/cypher/executor/rule_procedures.rs`, and
+  `executor/call_clause.rs::execute_call_cluster`. Activates the `Procedure`
+  node mechanism on the KGLite self-graph: `MATCH (p:Procedure {name: 'pagerank'})
+  -[:IMPLEMENTED_BY]->(f:Function) RETURN f.qualified_name` resolves a Cypher
+  procedure name to its Rust impl in one query. 27 Procedure nodes (including
+  aliases) → 22 implementing functions.
 
 - **Function complexity counters** — `branch_count`, `param_count`,
   `max_nesting`, `is_recursive` now populate on every `Function` node

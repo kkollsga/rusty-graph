@@ -5,7 +5,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    compute_complexity, count_lines, extract_comment_annotations, extract_procedure_annotation,
+    compute_complexity, count_lines, extract_comment_annotations, extract_procedure_annotations,
     get_type_parameters, is_generated_or_minified, node_text, BRANCH_KINDS_CPP,
     DEFAULT_COMMENT_TYPES,
 };
@@ -509,7 +509,7 @@ impl CppParser {
         };
         let is_recursive = Some(calls.iter().any(|(n, _)| n == &name));
         let docstring = Self::get_doc_comment(node, source);
-        let procedure_name = extract_procedure_annotation(docstring.as_deref());
+        let procedure_names = extract_procedure_annotations(docstring.as_deref());
 
         FunctionInfo {
             visibility: visibility.into(),
@@ -531,7 +531,7 @@ impl CppParser {
             param_count,
             max_nesting,
             is_recursive,
-            procedure_name,
+            procedure_names,
             metadata: Default::default(),
             qualified_name,
             name,

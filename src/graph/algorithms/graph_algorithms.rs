@@ -593,6 +593,9 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 /// Find weakly connected components (treating graph as undirected).
 /// This is often more useful for knowledge graphs.
 /// Uses Union-Find (disjoint set) for optimal performance — O(E * α(V)) ≈ O(E).
+///
+/// @procedure: connected_components
+/// @procedure: weakly_connected_components
 pub fn weakly_connected_components(
     graph: &DirGraph,
     deadline: Option<Instant>,
@@ -764,6 +767,9 @@ pub struct CentralityResult {
 /// * `graph` - The graph to analyze
 /// * `normalized` - If true, normalize scores by 2/((n-1)*(n-2)) for directed graphs
 /// * `sample_size` - Optional number of source nodes to sample (for large graphs)
+///
+/// @procedure: betweenness
+/// @procedure: betweenness_centrality
 pub fn betweenness_centrality(
     graph: &DirGraph,
     normalized: bool,
@@ -1058,6 +1064,8 @@ pub fn betweenness_centrality(
 /// * `damping_factor` - Probability of following a link (typically 0.85)
 /// * `max_iterations` - Maximum number of iterations (default: 100)
 /// * `tolerance` - Convergence threshold (default: 1e-6)
+///
+/// @procedure: pagerank
 pub fn pagerank(
     graph: &DirGraph,
     damping_factor: f64,
@@ -1216,6 +1224,9 @@ pub fn pagerank(
 ///
 /// Simply counts the number of connections each node has.
 /// Optionally normalized by (n-1) to get values between 0 and 1.
+///
+/// @procedure: degree
+/// @procedure: degree_centrality
 pub fn degree_centrality(
     graph: &DirGraph,
     normalized: bool,
@@ -1293,6 +1304,9 @@ pub fn degree_centrality(
 ///
 /// * `sample_size` - Optional number of source nodes to sample (for large graphs).
 ///   Uses stride-based selection for even coverage.
+///
+/// @procedure: closeness
+/// @procedure: closeness_centrality
 pub fn closeness_centrality(
     graph: &DirGraph,
     normalized: bool,
@@ -1571,6 +1585,9 @@ pub struct CommunityResult {
 /// neighboring community that yields the largest modularity gain, until
 /// no improvement is found.
 /// Optimized with pre-built adjacency list and Vec-based community weight tracking.
+///
+/// @procedure: louvain
+/// @procedure: louvain_communities
 pub fn louvain_communities(
     graph: &DirGraph,
     weight_property: Option<&str>,
@@ -1793,6 +1810,8 @@ pub fn louvain_communities(
 /// Each node adopts the most frequent label among its neighbors.
 /// Converges when no node changes its label.
 /// Optimized with pre-built adjacency list and Vec-based label counting.
+///
+/// @procedure: label_propagation
 pub fn label_propagation(
     graph: &DirGraph,
     max_iterations: usize,

@@ -118,3 +118,32 @@ def test_alternate_annotation_form(tmp_path):
     g = build(str(tmp_path))
     rows = g.cypher("MATCH (p:Procedure {name: 'louvain'})-[:IMPLEMENTED_BY]->(f) RETURN f.name AS n").to_list()
     assert rows and rows[0]["n"] == "f"
+
+
+def test_multiple_aliases_per_function(tmp_path):
+    """A function with multiple @procedure: NAME annotations registers under each alias."""
+    _write(
+        tmp_path,
+        {
+            "Cargo.toml": """
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            """,
+            "src/lib.rs": """
+            /// Compute betweenness centrality.
+            ///
+            /// @procedure: betweenness
+            /// @procedure: betweenness_centrality
+            pub fn betweenness_impl() {}
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    rows = g.cypher(
+        "MATCH (p:Procedure)-[:IMPLEMENTED_BY]->(f:Function) "
+        "WHERE f.qualified_name ENDS WITH '::betweenness_impl' "
+        "RETURN p.name AS proc ORDER BY p.name"
+    ).to_list()
+    names = [r["proc"] for r in rows]
+    assert names == ["betweenness", "betweenness_centrality"], names
