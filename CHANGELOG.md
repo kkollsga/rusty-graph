@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.26] — 2026-04-28
+
+### Fixed
+
+- **`code_tree` Rust parser missed calls inside macro invocations.** Calls
+  inside `format!`, `vec!`, `json!`, `Err(format!(…))`, custom derive
+  macros, etc. were silently dropped because tree-sitter-rust represents
+  them as `identifier` + `token_tree` siblings rather than `call_expression`
+  nodes. The walker now dives into `macro_invocation` token-trees and
+  reconstructs synthetic call sites. Resolves the dominant source of
+  false-positive orphan-function reports on Rust codebases.
+- **`code_tree` Rust parser dropped turbofish call expressions.** Calls of
+  the form `path::with::<T>(...)` are wrapped in a `generic_function`
+  AST node that the previous match arm didn't handle, so e.g.
+  `reconcile_seg0_csr::<DiskNodeSlot>(arg)` produced no CALLS edge. The
+  type arguments are now stripped and the inner identifier/scoped path is
+  recursively recorded.
+- **`code_tree` Rust parser misresolved `Self::method(...)` calls.** The
+  `"Self"` segment was emitted as an explicit receiver hint, which matched
+  no function's owner type and broke disambiguation for non-unique method
+  names. The parser now strips the `Self::` prefix so the resolver's
+  implicit caller-owner hint kicks in, yielding the same behaviour as
+  bare `self.method()` calls inside an impl block.
+- **`code_tree` IMPLEMENTS edge schema excluded `Enum -> Trait`.** A Rust
+  enum implementing a trait (e.g. `impl Clone for GraphBackend`) yielded
+  no `IMPLEMENTS` edge because the IMPLEMENTS routing only mapped Class /
+  Struct sources. `Enum` is now a recognised source label.
+
 ### Removed
 
 - **macOS x86_64 wheels.** `x86_64-apple-darwin` is no longer built or

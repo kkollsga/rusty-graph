@@ -302,72 +302,157 @@ impl RustParser {
         }
     }
 
+    /// Resolve a single call-target node into a `(name, line)` pair and push
+    /// it onto `out`. Handles every callee shape we surface from real
+    /// `call_expression` nodes *and* synthetic ones reconstructed from inside
+    /// macro token-trees (see `walk_macro_token_tree`).
+    ///
+    /// `Self::method` — drop the `Self::` prefix so the caller's owner-type
+    /// kicks in as the implicit receiver hint in the resolver. Without this,
+    /// the explicit hint `"Self"` matches no function's owner and the call
+    /// only resolves when the bare method name is globally unique.
+    ///
+    /// `generic_function` (turbofish, `path::with::<T>(...)`) — strip the
+    /// type-arguments and recurse on the inner identifier/scoped path.
+    fn record_call(func: Node, line: u32, source: &[u8], out: &mut Vec<(String, u32)>) {
+        match func.kind() {
+            "identifier" => {
+                out.push((node_text(func, source).to_string(), line));
+            }
+            "field_expression" => {
+                // field_expression has value and field children.
+                let field = func.child_by_field_name("field").or_else(|| {
+                    let mut cursor = func.walk();
+                    let mut found: Option<Node> = None;
+                    for c in func.children(&mut cursor) {
+                        if c.kind() == "field_identifier" {
+                            found = Some(c);
+                            break;
+                        }
+                    }
+                    found
+                });
+                let value = func.child_by_field_name("value");
+                if let Some(field) = field {
+                    let field_name = node_text(field, source);
+                    if let Some(value) = value {
+                        let val_text = node_text(value, source);
+                        // Receiver hint: last segment after "." or "::".
+                        let hint = val_text
+                            .rsplit('.')
+                            .next()
+                            .and_then(|p| p.rsplit("::").next())
+                            .unwrap_or(val_text);
+                        if hint == "self" || hint == "&self" || hint == "Self" {
+                            out.push((field_name.to_string(), line));
+                        } else {
+                            out.push((format!("{}.{}", hint, field_name), line));
+                        }
+                    } else {
+                        out.push((field_name.to_string(), line));
+                    }
+                }
+            }
+            "scoped_identifier" => {
+                let text = node_text(func, source);
+                let parts: Vec<&str> = text.split("::").collect();
+                if parts.len() >= 2 {
+                    if parts[0] == "Self" {
+                        // Self::method → emit bare tail. The caller-owner
+                        // implicit hint in the resolver picks the right
+                        // owner; an explicit "Self" hint would match no
+                        // function and break the multi-candidate path.
+                        out.push((parts[parts.len() - 1].to_string(), line));
+                    } else {
+                        out.push((
+                            format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]),
+                            line,
+                        ));
+                    }
+                } else if let Some(last) = parts.last() {
+                    out.push(((*last).to_string(), line));
+                }
+            }
+            "generic_function" => {
+                // Turbofish: `path::with::<T>(...)`. Children are the inner
+                // path node, `::`, and `type_arguments`. Recurse on the path.
+                let mut cursor = func.walk();
+                for child in func.children(&mut cursor) {
+                    if matches!(
+                        child.kind(),
+                        "identifier" | "scoped_identifier" | "field_expression"
+                    ) {
+                        Self::record_call(child, line, source, out);
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Walk a `token_tree` (the body of a `macro_invocation`) for synthetic
+    /// call sites. Inside a macro, calls are not parsed as `call_expression`
+    /// — they appear as `identifier`/`scoped_identifier`/`generic_function`
+    /// followed by a `token_tree` whose first byte is `(`. Reconstruct that
+    /// pattern so calls inside `format!`, `vec!`, `Err(format!(…))`, custom
+    /// derive macros, etc. show up in the call graph.
+    fn walk_macro_token_tree(node: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        let mut i = 0;
+        while i < children.len() {
+            let child = children[i];
+            let next = children.get(i + 1).copied();
+            let is_call = matches!(
+                child.kind(),
+                "identifier" | "scoped_identifier" | "generic_function"
+            ) && next
+                .is_some_and(|n| n.kind() == "token_tree" && node_text(n, source).starts_with('('));
+            if is_call {
+                let line = child.start_position().row as u32 + 1;
+                Self::record_call(child, line, source, out);
+                if let Some(n) = next {
+                    Self::walk_macro_token_tree(n, source, out);
+                }
+                i += 2;
+                continue;
+            }
+            // Recurse into nested token_trees so calls inside braces, brackets,
+            // or argument groups are still picked up.
+            if child.kind() == "token_tree" {
+                Self::walk_macro_token_tree(child, source, out);
+            }
+            i += 1;
+        }
+    }
+
     fn extract_calls(body: Node, source: &[u8]) -> Vec<(String, u32)> {
         let mut calls: Vec<(String, u32)> = Vec::new();
         fn walk(node: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
-            if node.kind() == "call_expression" {
-                let line = node.start_position().row as u32 + 1;
-                let func = node
-                    .child_by_field_name("function")
-                    .or_else(|| node.child(0));
-                if let Some(func) = func {
-                    match func.kind() {
-                        "identifier" => {
-                            out.push((node_text(func, source).to_string(), line));
-                        }
-                        "field_expression" => {
-                            // field_expression has value and field children.
-                            let field = func.child_by_field_name("field").or_else(|| {
-                                let mut cursor = func.walk();
-                                let mut found: Option<Node> = None;
-                                for c in func.children(&mut cursor) {
-                                    if c.kind() == "field_identifier" {
-                                        found = Some(c);
-                                        break;
-                                    }
-                                }
-                                found
-                            });
-                            let value = func.child_by_field_name("value");
-                            if let Some(field) = field {
-                                let field_name = node_text(field, source);
-                                if let Some(value) = value {
-                                    let val_text = node_text(value, source);
-                                    // Receiver hint: last segment after "." or "::".
-                                    let hint = val_text
-                                        .rsplit('.')
-                                        .next()
-                                        .and_then(|p| p.rsplit("::").next())
-                                        .unwrap_or(val_text);
-                                    if hint == "self" || hint == "&self" || hint == "Self" {
-                                        out.push((field_name.to_string(), line));
-                                    } else {
-                                        out.push((format!("{}.{}", hint, field_name), line));
-                                    }
-                                } else {
-                                    out.push((field_name.to_string(), line));
-                                }
-                            }
-                        }
-                        "scoped_identifier" => {
-                            let text = node_text(func, source);
-                            let parts: Vec<&str> = text.split("::").collect();
-                            if parts.len() >= 2 {
-                                out.push((
-                                    format!(
-                                        "{}.{}",
-                                        parts[parts.len() - 2],
-                                        parts[parts.len() - 1]
-                                    ),
-                                    line,
-                                ));
-                            } else if let Some(last) = parts.last() {
-                                out.push(((*last).to_string(), line));
-                            }
-                        }
-                        _ => {}
+            match node.kind() {
+                "call_expression" => {
+                    let line = node.start_position().row as u32 + 1;
+                    let func = node
+                        .child_by_field_name("function")
+                        .or_else(|| node.child(0));
+                    if let Some(func) = func {
+                        RustParser::record_call(func, line, source, out);
                     }
                 }
+                "macro_invocation" => {
+                    // Dive into the token_tree body; bypass the standard
+                    // child-walk so we don't double-count the macro name as
+                    // a bare call.
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        if child.kind() == "token_tree" {
+                            RustParser::walk_macro_token_tree(child, source, out);
+                        }
+                    }
+                    return;
+                }
+                _ => {}
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {

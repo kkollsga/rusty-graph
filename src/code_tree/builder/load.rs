@@ -1482,6 +1482,10 @@ pub fn load_into_graph(
             qname_to_type.insert(c.qualified_name.clone(), nt);
             qname_to_type.insert(c.name.clone(), nt);
         }
+        for e in &result.enums {
+            qname_to_type.insert(e.qualified_name.clone(), "Enum");
+            qname_to_type.insert(e.name.clone(), "Enum");
+        }
         for i in &result.interfaces {
             let nt = match i.kind.as_str() {
                 "trait" => "Trait",

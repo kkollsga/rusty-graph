@@ -341,3 +341,224 @@ class TestRustClosureWalking:
         assert not any(caller.endswith("::outer") and callee.endswith("::target") for caller, callee in pairs), (
             f"outer must not directly call target (that's inner's call): {pairs}"
         )
+
+
+class TestRustMacroCallExtraction:
+    """Calls inside macro invocations (`format!`, `vec!`, `json!`, etc.)
+    are not parsed as `call_expression` nodes — tree-sitter-rust represents
+    them as `identifier` + `token_tree` siblings inside the macro's body.
+    The parser walks `macro_invocation` token-trees explicitly so these
+    synthetic call sites still produce CALLS edges."""
+
+    def test_call_inside_format_macro(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn helper(x: u32) -> u32 { x + 1 }
+
+                pub fn caller(x: u32) -> String {
+                    format!("value = {}", helper(x))
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(caller.endswith("::caller") and callee.endswith("::helper") for caller, callee in pairs), (
+            f"caller -> helper inside format!() not detected: {pairs}"
+        )
+
+    def test_call_inside_vec_macro(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn helper(x: u32) -> u32 { x }
+
+                pub fn caller() -> Vec<u32> {
+                    vec![helper(1), helper(2), helper(3)]
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(caller.endswith("::caller") and callee.endswith("::helper") for caller, callee in pairs), (
+            f"caller -> helper inside vec![] not detected: {pairs}"
+        )
+
+    def test_nested_call_inside_outer_call_and_macro(self, tmp_path):
+        # `Err(format!("{}", helper(x)))` — the outer Err(...) is a real
+        # call_expression, format!(...) inside it is a macro_invocation,
+        # and helper(x) lives inside the macro's token_tree.
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn helper(x: u32) -> u32 { x }
+
+                pub fn caller(x: u32) -> Result<(), String> {
+                    Err(format!("oops: {}", helper(x)))
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(caller.endswith("::caller") and callee.endswith("::helper") for caller, callee in pairs)
+
+
+class TestRustSelfDispatch:
+    """`Self::method(...)` inside an impl block must resolve to the
+    enclosing impl's own type. The parser strips the `Self::` prefix so
+    the resolver's implicit caller-owner hint kicks in."""
+
+    def test_self_static_dispatch_resolves_to_owner(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub struct Foo;
+                pub struct Bar;
+
+                impl Foo {
+                    pub fn caller() {
+                        Self::method();
+                    }
+                    pub fn method() {}
+                }
+
+                impl Bar {
+                    pub fn method() {}
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        caller_edges = {callee for caller, callee in pairs if caller.endswith("::Foo::caller")}
+        assert any(c.endswith("::Foo::method") for c in caller_edges), (
+            f"Self::method() must resolve to Foo::method: {pairs}"
+        )
+        assert not any(c.endswith("::Bar::method") for c in caller_edges), (
+            f"Self::method() must NOT resolve to Bar::method: {pairs}"
+        )
+
+    def test_self_dispatch_inside_macro(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub struct Parser;
+
+                impl Parser {
+                    pub fn token_to_display(t: u32) -> String { format!("{}", t) }
+
+                    pub fn caller(t: u32) -> Result<(), String> {
+                        Err(format!("got {}", Self::token_to_display(t)))
+                    }
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(
+            caller.endswith("::Parser::caller") and callee.endswith("::Parser::token_to_display")
+            for caller, callee in pairs
+        )
+
+
+class TestRustTurbofishCalls:
+    """Turbofish / `generic_function` call expressions
+    (`path::with::<T>(...)`) get a `generic_function` node wrapping the
+    inner identifier or scoped_identifier — not bare `identifier` /
+    `scoped_identifier`. The parser strips the type-arguments and recurses
+    so these calls still produce CALLS edges."""
+
+    def test_bare_turbofish_call(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub fn helper<T>(_x: T) -> u32 { 0 }
+
+                pub fn caller() -> u32 {
+                    helper::<u64>(5u64)
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(caller.endswith("::caller") and callee.endswith("::helper") for caller, callee in pairs), (
+            f"helper::<u64>() turbofish not detected: {pairs}"
+        )
+
+    def test_self_turbofish_resolves(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub struct Store;
+
+                impl Store {
+                    pub fn load_typed_vec<T>(&self) -> Vec<T> { Vec::new() }
+
+                    pub fn caller(&self) -> Vec<u64> {
+                        Self::load_typed_vec::<u64>(self)
+                    }
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        pairs = _call_pairs(g)
+        assert any(
+            caller.endswith("::Store::caller") and callee.endswith("::Store::load_typed_vec")
+            for caller, callee in pairs
+        )
+
+
+class TestRustEnumImplements:
+    """Rust enums commonly implement traits — the IMPLEMENTS edge must
+    fire from `Enum -> Trait`, not just `Struct/Class -> Trait`."""
+
+    def test_enum_implements_external_trait(self, tmp_path):
+        _write(
+            tmp_path,
+            {
+                "Cargo.toml": _cargo_toml(),
+                "src/lib.rs": """
+                pub trait Greeter {
+                    fn greet(&self) -> &str;
+                }
+
+                pub enum Mood {
+                    Happy,
+                    Sad,
+                }
+
+                impl Greeter for Mood {
+                    fn greet(&self) -> &str {
+                        match self {
+                            Mood::Happy => "hi",
+                            Mood::Sad => "oh",
+                        }
+                    }
+                }
+                """,
+            },
+        )
+        g = build(str(tmp_path))
+        rows = g.cypher("MATCH (e:Enum {title: 'Mood'})-[:IMPLEMENTS]->(t:Trait) RETURN t.title AS trait").to_list()
+        traits = {r["trait"] for r in rows}
+        assert "Greeter" in traits, f"Mood enum should IMPLEMENTS Greeter: {traits}"
