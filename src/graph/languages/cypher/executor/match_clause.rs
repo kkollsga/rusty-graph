@@ -456,6 +456,14 @@ impl<'a> CypherExecutor<'a> {
         // We need exactly one end bound for the fast-path to help.
         // Undirected `[r]-` patterns count both incoming and outgoing — the
         // fast path issues two `count_edges_filtered` calls and sums.
+        //
+        // Contract: the caller guarantees that the bound NodeIndex satisfies
+        // any property filter on the bound side of the pattern (the upstream
+        // PatternExecutor that produced the binding already applied those
+        // filters). We therefore ignore the bound node's `properties` here
+        // and only consult `other_props` for the unbound peer. Earlier code
+        // bailed out (`return Ok(None)`) when the bound side had properties,
+        // which silently produced 0 in the `.unwrap_or(0)` fused callers.
         type CountFastPath<'p> = (
             NodeIndex,
             &'p Option<String>,
@@ -465,9 +473,6 @@ impl<'a> CypherExecutor<'a> {
         let (bound_idx, other_type, other_props, traverse_dirs): CountFastPath =
             match (a_bound, b_bound) {
                 (None, Some(b_idx)) => {
-                    if node_b.properties.is_some() {
-                        return Ok(None); // bound node with props: fall back
-                    }
                     let dirs: &[Direction] = match edge.direction {
                         EdgeDirection::Outgoing => &[Direction::Incoming], // (a)->b: b has incoming
                         EdgeDirection::Incoming => &[Direction::Outgoing], // (a)<-b: b has outgoing
@@ -476,9 +481,6 @@ impl<'a> CypherExecutor<'a> {
                     (b_idx, &node_a.node_type, &node_a.properties, dirs)
                 }
                 (Some(a_idx), None) => {
-                    if node_a.properties.is_some() {
-                        return Ok(None); // bound node with props: fall back
-                    }
                     let dirs: &[Direction] = match edge.direction {
                         EdgeDirection::Outgoing => &[Direction::Outgoing],
                         EdgeDirection::Incoming => &[Direction::Incoming],
@@ -556,6 +558,139 @@ impl<'a> CypherExecutor<'a> {
         }
 
         Ok(Some(count))
+    }
+
+    /// Distinct-peer variant of `try_count_simple_pattern`: returns the number
+    /// of distinct peer NodeIndices reachable along the edge from the bound
+    /// node, instead of the raw edge count. Used for `count(DISTINCT v)`
+    /// where `v` is the unbound node variable. Multi-edges between the same
+    /// pair collapse to one. Undirected `[r]-` patterns dedup peers across
+    /// both directions (a node reachable both ways counts once).
+    pub(super) fn try_count_distinct_peers(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        bindings: &Bindings<NodeIndex>,
+    ) -> Result<Option<i64>, String> {
+        if pattern.elements.len() != 3 {
+            return Ok(None);
+        }
+
+        let node_a = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return Ok(None),
+        };
+        let edge = match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep,
+            _ => return Ok(None),
+        };
+        let node_b = match &pattern.elements[2] {
+            PatternElement::Node(np) => np,
+            _ => return Ok(None),
+        };
+
+        if edge.var_length.is_some() || edge.properties.is_some() {
+            return Ok(None);
+        }
+
+        let a_bound = node_a
+            .variable
+            .as_ref()
+            .and_then(|v| bindings.get(v).copied());
+        let b_bound = node_b
+            .variable
+            .as_ref()
+            .and_then(|v| bindings.get(v).copied());
+
+        // Same shape as `try_count_simple_pattern`'s `CountFastPath` alias —
+        // and the same caller-guarantees contract: the bound NodeIndex
+        // already satisfies any bound-side property filter, so we ignore
+        // `node_a.properties` / `node_b.properties` for the bound side and
+        // only consult `other_props` for the unbound peer.
+        type CountFastPath<'p> = (
+            NodeIndex,
+            &'p Option<String>,
+            &'p Option<HashMap<String, PropertyMatcher>>,
+            &'p [Direction],
+        );
+        let (bound_idx, other_type, other_props, traverse_dirs): CountFastPath =
+            match (a_bound, b_bound) {
+                (None, Some(b_idx)) => {
+                    let dirs: &[Direction] = match edge.direction {
+                        EdgeDirection::Outgoing => &[Direction::Incoming],
+                        EdgeDirection::Incoming => &[Direction::Outgoing],
+                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+                    };
+                    (b_idx, &node_a.node_type, &node_a.properties, dirs)
+                }
+                (Some(a_idx), None) => {
+                    let dirs: &[Direction] = match edge.direction {
+                        EdgeDirection::Outgoing => &[Direction::Outgoing],
+                        EdgeDirection::Incoming => &[Direction::Incoming],
+                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+                    };
+                    (a_idx, &node_b.node_type, &node_b.properties, dirs)
+                }
+                _ => return Ok(None),
+            };
+
+        let conn_type = edge.connection_type.as_deref();
+        let interned_conn = conn_type.map(InternedKey::from_str);
+        let interned_other_type = other_type.as_ref().map(|t| InternedKey::from_str(t));
+
+        // Always iterate edges and collect peers into a HashSet — there's no
+        // pre-built "distinct peers" index. The edge-count fast path
+        // (`count_edges_filtered`) doesn't help here because we need
+        // peer-uniqueness, not edge count. Polling the deadline every 1 M
+        // iterations matches the surrounding helpers.
+        let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
+        let mut peers: HashSet<NodeIndex> = HashSet::new();
+        let mut iter: usize = 0;
+
+        for &dir in traverse_dirs {
+            for edge_ref in self
+                .graph
+                .graph
+                .edges_directed_filtered(bound_idx, dir, interned_conn)
+            {
+                iter += 1;
+                if iter.is_multiple_of(1 << 20) {
+                    self.check_deadline()?;
+                }
+                // `edges_directed_filtered` is a hint — the in-memory backend
+                // returns every edge in the given direction regardless of
+                // `interned_conn`, so we must post-filter by connection type.
+                if let Some(required_conn) = interned_conn {
+                    if edge_ref.weight().connection_type != required_conn {
+                        continue;
+                    }
+                }
+                let other_idx = if dir == Direction::Outgoing {
+                    edge_ref.target()
+                } else {
+                    edge_ref.source()
+                };
+                if peers.contains(&other_idx) {
+                    continue;
+                }
+                if let Some(required_type) = interned_other_type {
+                    if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
+                        if nt != required_type {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                if let Some(ref props) = other_props {
+                    if !pe.node_matches_properties_pub(other_idx, props) {
+                        continue;
+                    }
+                }
+                peers.insert(other_idx);
+            }
+        }
+
+        Ok(Some(peers.len() as i64))
     }
 
     /// Count matches for a 5-element pattern (a)-[e1]->(b)<-[e2]-(c)
@@ -892,6 +1027,7 @@ impl<'a> CypherExecutor<'a> {
         return_clause: &ReturnClause,
         top_k: &Option<(usize, bool, usize)>,
         candidate_emit: &Option<(usize, bool, usize)>,
+        distinct_count: bool,
         _existing: ResultSet,
     ) -> Result<ResultSet, String> {
         // The MATCH must have exactly 1 pattern with 3 or 5 elements (validated by planner)
@@ -960,23 +1096,32 @@ impl<'a> CypherExecutor<'a> {
             })
         };
 
-        // Helper: count edges for a node. Returns Result so the deadline
-        // surfaced by try_count_simple_pattern can propagate through the
-        // surrounding heap/loop and terminate the query cleanly.
+        // Helper: count edges (or distinct peers, when `distinct_count` is set)
+        // for a node. Returns Result so the deadline surfaced by the inner
+        // counters can propagate through the surrounding heap/loop and
+        // terminate the query cleanly.
         let count_for_node = |node_idx: petgraph::graph::NodeIndex| -> Result<i64, String> {
             if pattern.elements.len() == 5 {
+                // 5-element patterns aren't supported with DISTINCT yet; the
+                // planner restricts `distinct_count` to 3-element patterns,
+                // so this branch is non-distinct only.
                 if group_elem_idx == 0 {
                     Ok(self.count_two_hop_pattern(pattern, node_idx))
                 } else {
-                    // group is at position 4 — traverse backward from last node
                     Ok(self.count_two_hop_pattern_reverse(pattern, node_idx))
                 }
             } else {
                 let mut bindings_for_count = Bindings::with_capacity(1);
                 bindings_for_count.insert(group_var.to_string(), node_idx);
-                Ok(self
-                    .try_count_simple_pattern(pattern, &bindings_for_count)?
-                    .unwrap_or(0))
+                if distinct_count {
+                    Ok(self
+                        .try_count_distinct_peers(pattern, &bindings_for_count)?
+                        .unwrap_or(0))
+                } else {
+                    Ok(self
+                        .try_count_simple_pattern(pattern, &bindings_for_count)?
+                        .unwrap_or(0))
+                }
             }
         };
 
@@ -1016,6 +1161,10 @@ impl<'a> CypherExecutor<'a> {
             // sequential I/O instead of O(all_nodes × per_node_lookup).
             // This is critical for untyped group nodes (e.g., RETURN b.title, count(a))
             // where the node-centric path would iterate 124M nodes.
+            //
+            // Skipped when `distinct_count` is set: this path counts edges,
+            // not distinct peers, and would overcount for any pattern with
+            // multi-edges between the same pair.
             let edge_conn_type = match &pattern.elements[1] {
                 PatternElement::Edge(ep) => ep.connection_type.as_ref(),
                 _ => None,
@@ -1024,7 +1173,8 @@ impl<'a> CypherExecutor<'a> {
                 PatternElement::Node(np) => &np.properties,
                 _ => &None,
             };
-            if let (3, Some(ct_str), None) = (
+            if let (false, 3, Some(ct_str), None) = (
+                distinct_count,
                 pattern.elements.len(),
                 edge_conn_type,
                 group_node_props.as_ref(),
@@ -1218,7 +1368,10 @@ impl<'a> CypherExecutor<'a> {
                 PatternElement::Node(np) => &np.properties,
                 _ => &None,
             };
-            let edge_centric_rows = if let (3, Some(ct_str), None, 2) = (
+            // Same `distinct_count` gate as the top-K branch — the histogram
+            // counts edges, not distinct peers.
+            let edge_centric_rows = if let (false, 3, Some(ct_str), None, 2) = (
+                distinct_count,
                 pattern.elements.len(),
                 edge_conn_type,
                 group_node_props_nontopk.as_ref(),
@@ -1844,6 +1997,7 @@ impl<'a> CypherExecutor<'a> {
         with_clause: &WithClause,
         secondary_match: Option<&MatchClause>,
         top_k: Option<&AggregateTopK>,
+        distinct_count: bool,
         _existing: ResultSet,
     ) -> Result<ResultSet, String> {
         let pattern = &match_clause.patterns[0];
@@ -1930,8 +2084,9 @@ impl<'a> CypherExecutor<'a> {
         // Histogram fast path only applies to the single-MATCH shape — the
         // two-MATCH variant has a separate pattern driving the count, so the
         // histogram (keyed on M1's edge type) doesn't answer the right
-        // question. Skip it when secondary_match is set.
-        if secondary_match.is_none() {
+        // question. Skip it when secondary_match is set, and skip it for
+        // distinct counts (the histogram counts edges, not distinct peers).
+        if secondary_match.is_none() && !distinct_count {
             if let Some(rows) = self.try_fast_with_aggregate_via_histogram(
                 pattern,
                 with_clause,
@@ -2016,28 +2171,27 @@ impl<'a> CypherExecutor<'a> {
         // dominate.
         const PARALLEL_COUNT_THRESHOLD: usize = 4_096;
         let group_var_owned = group_var.to_string();
+        let count_one = |idx: NodeIndex| -> Result<(NodeIndex, i64), String> {
+            let mut bindings = Bindings::with_capacity(1);
+            bindings.insert(group_var_owned.clone(), idx);
+            let c = if distinct_count {
+                self.try_count_distinct_peers(count_pattern, &bindings)?
+                    .unwrap_or(0)
+            } else {
+                self.try_count_simple_pattern(count_pattern, &bindings)?
+                    .unwrap_or(0)
+            };
+            Ok((idx, c))
+        };
         let counts: Vec<(NodeIndex, i64)> = if group_keys.len() >= PARALLEL_COUNT_THRESHOLD {
-            let parallel: Result<Vec<(NodeIndex, i64)>, String> = group_keys
+            group_keys
                 .par_iter()
-                .map(|&idx| -> Result<(NodeIndex, i64), String> {
-                    let mut bindings = Bindings::with_capacity(1);
-                    bindings.insert(group_var_owned.clone(), idx);
-                    let c = self
-                        .try_count_simple_pattern(count_pattern, &bindings)?
-                        .unwrap_or(0);
-                    Ok((idx, c))
-                })
-                .collect();
-            parallel?
+                .map(|&idx| count_one(idx))
+                .collect::<Result<_, _>>()?
         } else {
             let mut sequential = Vec::with_capacity(group_keys.len());
             for &idx in &group_keys {
-                let mut bindings = Bindings::with_capacity(1);
-                bindings.insert(group_var_owned.clone(), idx);
-                let c = self
-                    .try_count_simple_pattern(count_pattern, &bindings)?
-                    .unwrap_or(0);
-                sequential.push((idx, c));
+                sequential.push(count_one(idx)?);
             }
             sequential
         };

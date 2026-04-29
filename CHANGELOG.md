@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.27] — 2026-04-29
+
+### Changed
+
+- **Default Cypher query timeout is now 180_000 ms (3 min) for every storage
+  mode** (memory, mapped, disk). Previously memory had no default deadline,
+  mapped was 60s and disk was 10s. The old per-mode defaults left memory
+  queries unbounded and disk's 10s ceiling tripped legitimate cold queries
+  on large graphs. Override per-call with `timeout_ms=N` (or `0` to disable),
+  or globally via `set_default_timeout(ms)`.
+
+### Fixed
+
+- **Cypher property-anchored single-MATCH fusion returned empty results.**
+  `MATCH (m {id: X})<-[:R]-(p) RETURN m.title, count(p)` (and the directed
+  / DISTINCT / undirected variants) returned zero rows on any graph with
+  matching data. `try_count_simple_pattern` bailed with `Ok(None)` when
+  the bound node carried property filters; the fused executor's
+  `count_for_node` closures `.unwrap_or(0)` that None into a zero count,
+  which the row-skip guard then dropped. The bail-out has been removed —
+  the bound `NodeIndex` already satisfies its property filter by virtue of
+  being selected upstream, so re-checking is unnecessary. Also fixed an
+  in-memory-backend miss in `try_count_distinct_peers` (the new helper
+  added in the count(DISTINCT) work this release): `edges_directed_filtered`
+  is a hint on the in-memory backend and returns every edge regardless of
+  connection type, so the function now post-filters by `connection_type`.
+- **Cypher fusion machinery now accepts `count(DISTINCT v)` on a node
+  variable.** Previously rejected at fusion time, forcing all distinct-count
+  queries — the canonical "top-N by relationship count" Cypher shape —
+  through the materializing executor (full intermediate cross-product, then
+  group-by, then sort). The planner now propagates a `distinct_count` flag
+  into `FusedMatchReturnAggregate` and `FusedMatchWithAggregate`; the
+  executor uses a per-group `HashSet<NodeIndex>` of peers instead of an
+  edge counter, naturally collapsing multi-edges. Edge-centric fast paths
+  (which count edges, not distinct peers) are bypassed in distinct mode.
+  Fusion is gated on the group node being type- or property-constrained,
+  since the fused per-node enumeration only beats the materializing path
+  when the group set is small (the materializing path's single sequential
+  edge scan wins on unconstrained 124M-node groups). Documented limitation:
+  3+ MATCH queries still don't fuse and continue to use the materializing
+  path.
+- **Cypher planner's selectivity estimator now considers variables bound by
+  earlier clauses.** Previously `MATCH (p:Person) MATCH (p)-[:KNOWS]->(c:Type)`
+  treated `(p)` as statically unconstrained — worst-possible selectivity — and
+  reversed the second pattern to start scanning all `:Type` nodes (millions on
+  large graphs) instead of expanding from the pre-bound `p`. The estimator
+  now walks clauses in order, accumulates node variables introduced by each
+  MATCH/OPTIONAL MATCH, and treats already-bound variables as selectivity 1
+  (effectively-anchored). On a 124M-node Wikidata graph, a 3-MATCH query
+  with two `{id: …}` anchors now completes in ~1s (was 20s+ timeout).
+- **Cypher LIMIT pushdown was unsafe for multi-MATCH queries with WHERE on a
+  late-bound variable.** `MATCH a MATCH b MATCH c WHERE c.id = X RETURN ... LIMIT N`
+  was rewritten to push `limit_hint = N` into the last MATCH clause. The
+  per-row pattern executor's `max_matches = remaining` then interacted
+  incorrectly with the outer row loop, causing fewer matching rows than
+  expected to surface (e.g. `LIMIT 10` returning 8, `LIMIT 5` returning 3 — or
+  zero rows on Wikidata-scale graphs where the WHERE bucket happened to be at
+  the tail of the row stream). The planner now only pushes LIMIT into MATCH
+  for queries with a single MATCH/OPTIONAL MATCH clause; multi-MATCH queries
+  retain LIMIT as a separate clause and apply it after the full pattern
+  matching completes. Reproduced and confirmed against the user's
+  124M-node Wikidata disk graph (Issue 1 of the 2026-04-29 bug report).
+- **Cypher planner now reverses undirected and variable-length patterns by
+  selectivity.** `MATCH (other)-[r]-(p {title: 'X'})` previously left
+  `other` (no constraints) as the start node, causing a full-graph scan
+  with edge expansion from every node. The over-conservative bail-out on
+  `EdgeDirection::Both` and `var_length` has been removed — `Both` reverses
+  to `Both` (no semantic change) and var-length reversal is symmetric for
+  patterns without a path assignment (path-bound patterns are already
+  protected by a separate guard). On a 124M-node Wikidata graph this turns
+  a multi-minute scan into a sub-second anchored lookup.
+
 ## [0.8.26] — 2026-04-28
 
 ### Fixed

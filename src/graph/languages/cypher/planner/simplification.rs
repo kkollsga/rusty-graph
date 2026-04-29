@@ -182,21 +182,34 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
             continue;
         };
 
-        // All checks passed: push limit hint into MATCH.
-        // The executor fuses WHERE into MATCH (inline evaluation during expansion),
-        // so the hint can be exact in both cases. LIMIT clause is removed since
-        // the executor stops after finding exactly `limit` matching rows.
-        if has_where {
-            if let Clause::Match(ref mut m) = query.clauses[i] {
-                m.limit_hint = Some(limit);
-            }
-            query.clauses.remove(limit_offset); // Safe: executor enforces exact limit
-        } else {
-            if let Clause::Match(ref mut m) = query.clauses[i] {
-                m.limit_hint = Some(limit);
-            }
-            query.clauses.remove(limit_offset); // Remove LIMIT — hint is exact
+        // Only push the LIMIT hint into MATCH when this is the FIRST and ONLY
+        // MATCH clause in the query. Multi-MATCH queries route through
+        // `execute_match`'s subsequent-MATCH path, where the per-row pattern
+        // executor's `max_matches=remaining` interacts incorrectly with the
+        // outer row loop and produces fewer rows than the LIMIT requests
+        // (regression seen on 3-MATCH + WHERE on last-MATCH variable + LIMIT N
+        // queries — see `test_limit_pushdown_multi_match_safety`).
+        // For multi-MATCH, leave LIMIT as a separate clause.
+        let is_first_match = i == 0;
+        let only_match = !query
+            .clauses
+            .iter()
+            .skip(i + 1)
+            .any(|c| matches!(c, Clause::Match(_) | Clause::OptionalMatch(_)));
+        if !is_first_match || !only_match {
+            i += 1;
+            continue;
         }
+
+        // Safe to push: single MATCH clause. The executor inlines pushable
+        // WHERE predicates into the pattern (`push_where_into_match` runs
+        // earlier in the optimizer), so the hint is exact in both with-WHERE
+        // and without-WHERE cases for single-MATCH queries.
+        if let Clause::Match(ref mut m) = query.clauses[i] {
+            m.limit_hint = Some(limit);
+        }
+        query.clauses.remove(limit_offset);
+        let _ = has_where; // currently unused; preserved for future logging
     }
 }
 

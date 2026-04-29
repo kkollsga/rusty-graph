@@ -2228,8 +2228,8 @@ class KnowledgeGraph:
     def set_default_timeout(self, timeout_ms: Optional[int] = None) -> None:
         """Set a default query timeout (milliseconds) for all cypher() calls.
 
-        - ``None`` (default): fall through to the backend-aware default
-          (Disk 10_000 ms, Mapped 60_000 ms, Memory none).
+        - ``None`` (default): fall through to the built-in default
+          of 180_000 ms (3 min) for every storage mode.
         - ``0``: disable the deadline for every query unless per-call
           ``timeout_ms`` overrides.
         - Positive integer: use as the default.
@@ -3010,10 +3010,9 @@ class KnowledgeGraph:
             to_df: If ``True``, return a pandas DataFrame.
             params: Optional parameter dict for ``$param`` substitution.
             timeout_ms: Deadline in milliseconds. If omitted, uses
-                ``set_default_timeout()`` when set, otherwise a
-                backend-aware default (Disk 10_000, Mapped 60_000,
-                Memory none). Pass ``0`` to disable the deadline for
-                this call.
+                ``set_default_timeout()`` when set, otherwise the
+                built-in default of 180_000 ms (3 min). Pass ``0`` to
+                disable the deadline for this call.
             max_rows: Cap on intermediate rows; defaults to
                 ``set_default_max_rows()``.
 

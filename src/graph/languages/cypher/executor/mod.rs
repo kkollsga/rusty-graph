@@ -469,11 +469,13 @@ impl<'a> CypherExecutor<'a> {
                 return_clause,
                 top_k,
                 candidate_emit,
+                distinct_count,
             } => self.execute_fused_match_return_aggregate(
                 match_clause,
                 return_clause,
                 top_k,
                 candidate_emit,
+                *distinct_count,
                 result_set,
             ),
             Clause::FusedMatchWithAggregate {
@@ -481,11 +483,13 @@ impl<'a> CypherExecutor<'a> {
                 with_clause,
                 secondary_match,
                 top_k,
+                distinct_count,
             } => self.execute_fused_match_with_aggregate(
                 match_clause,
                 with_clause,
                 secondary_match.as_ref(),
                 top_k.as_ref(),
+                *distinct_count,
                 result_set,
             ),
             Clause::FusedCountAll { alias } => {

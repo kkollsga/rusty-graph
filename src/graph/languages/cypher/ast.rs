@@ -84,6 +84,10 @@ pub enum Clause {
         /// Tuple: `(count_item_index, descending, k)`. Mutually exclusive
         /// with `top_k`.
         candidate_emit: Option<(usize, bool, usize)>,
+        /// `count(DISTINCT v)` for a node variable: the executor must dedup
+        /// peer NodeIndices per group. The edge-centric fast path is
+        /// disabled in this mode (it counts edges, not distinct peers).
+        distinct_count: bool,
     },
     /// Optimizer-generated: fuse MATCH traversal + WITH count() into a single
     /// pass. Same as FusedMatchReturnAggregate but for WITH clauses (pipeline
@@ -107,6 +111,10 @@ pub enum Clause {
         with_clause: WithClause,
         secondary_match: Option<MatchClause>,
         top_k: Option<AggregateTopK>,
+        /// `count(DISTINCT v)` for a node variable. When true the executor's
+        /// per-group counter is a `HashSet<NodeIndex>` and the edge-centric
+        /// fast path is bypassed.
+        distinct_count: bool,
     },
     /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
     /// pass using a min-heap for O(n log k) instead of O(n log n).

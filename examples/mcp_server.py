@@ -155,10 +155,9 @@ def cypher_query(query: str, timeout_ms: int | None = None) -> str:
     limit). Call graph_overview() first if you need the schema.
 
     timeout_ms: Deadline in milliseconds. None (default) uses the
-    backend-aware default (Disk 10_000, Mapped 60_000, Memory none).
-    Pass 0 to disable the deadline entirely for this call — use
-    sparingly, typically only after describe()/EXPLAIN confirmed the
-    plan is anchored on an index."""
+    built-in default of 180_000 ms (3 min). Pass 0 to disable the
+    deadline entirely for this call — use sparingly, typically only
+    after describe()/EXPLAIN confirmed the plan is anchored on an index."""
     try:
         result = graph.cypher(query, timeout_ms=timeout_ms)
         if isinstance(result, str):  # FORMAT CSV returns a string

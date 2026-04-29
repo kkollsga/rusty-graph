@@ -113,8 +113,8 @@ class TestQueryDiagnostics:
         assert d is not None
         assert d["elapsed_ms"] >= 0
         assert d["timed_out"] is False
-        # Disk default timeout = 10_000 ms; user did not override.
-        assert d["timeout_ms"] == 10_000
+        # Built-in default timeout = 180_000 ms (3 min); user did not override.
+        assert d["timeout_ms"] == 180_000
 
     def test_diagnostics_respects_explicit_timeout(self, disk_dir):
         g = _build_disk_graph(disk_dir)

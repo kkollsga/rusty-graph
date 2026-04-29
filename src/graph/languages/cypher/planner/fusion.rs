@@ -615,6 +615,83 @@ pub(super) fn is_fusable_return_clause(
     has_count
 }
 
+// Gate for DISTINCT-count fusion. The fused executor enumerates group node
+// candidates and runs `try_count_distinct_peers` per node. That's only
+// faster than the materializing path when the group set is small —
+// otherwise the per-node random I/O dominates. The heuristic for "small"
+// is: the group node has a type filter or a non-empty property filter.
+// Unconstrained group nodes fall back to the materializing path, whose
+// single sequential edge scan wins on Wikidata-scale graphs.
+//
+// Accepts both the `MATCH … RETURN …` and `MATCH … WITH …` shapes by
+// inspecting which non-aggregate items the next clause projects.
+fn distinct_fusable_3elem_with_constrained_group(
+    match_clause: &Clause,
+    next_clause: &Clause,
+) -> bool {
+    use super::super::ast::is_aggregate_expression;
+
+    let m = match match_clause {
+        Clause::Match(m) => m,
+        _ => return false,
+    };
+    if m.patterns.len() != 1 || m.patterns[0].elements.len() != 3 {
+        return false;
+    }
+    let first = match &m.patterns[0].elements[0] {
+        PatternElement::Node(np) => np,
+        _ => return false,
+    };
+    let last = match &m.patterns[0].elements[2] {
+        PatternElement::Node(np) => np,
+        _ => return false,
+    };
+
+    // Find the group variable from the next clause's non-aggregate items.
+    let group_var: Option<&str> = match next_clause {
+        Clause::Return(r) => r.items.iter().find_map(|item| {
+            if is_aggregate_expression(&item.expression) {
+                None
+            } else {
+                match &item.expression {
+                    Expression::Variable(v) => Some(v.as_str()),
+                    Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
+                    _ => None,
+                }
+            }
+        }),
+        Clause::With(w) => w.items.iter().find_map(|item| {
+            if is_aggregate_expression(&item.expression) {
+                None
+            } else {
+                match &item.expression {
+                    Expression::Variable(v) => Some(v.as_str()),
+                    Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
+                    _ => None,
+                }
+            }
+        }),
+        _ => None,
+    };
+    let Some(gv) = group_var else { return false };
+
+    let group_node = if first.variable.as_deref() == Some(gv) {
+        first
+    } else if last.variable.as_deref() == Some(gv) {
+        last
+    } else {
+        return false;
+    };
+
+    // "Constrained" = type filter OR a non-empty property filter.
+    let has_type = group_node.node_type.is_some();
+    let has_props = group_node
+        .properties
+        .as_ref()
+        .is_some_and(|p| !p.is_empty());
+    has_type || has_props
+}
+
 /// Fuse MATCH (node-edge-node) + RETURN (group-by + count) into a single
 /// pass that counts edges directly per node instead of materializing all rows.
 ///
@@ -623,8 +700,9 @@ pub(super) fn is_fusable_return_clause(
 /// 2. `clauses[i+1]` is `Return` with at least one `count()` aggregate
 /// 3. All non-aggregate RETURN items are PropertyAccess on the first node variable
 /// 4. All `count()` args reference the second node variable (or `*`)
-/// 5. No DISTINCT on count, no property filters on edge or second node
-///    (required by `try_count_simple_pattern`)
+/// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable AND
+///    the group node is type/property constrained (see
+///    `distinct_fusable_3elem_with_constrained_group`).
 pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
     use super::super::ast::is_aggregate_expression;
 
@@ -734,14 +812,20 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
         // HAVING is allowed and carried through on the ReturnClause — the fused
         // executor applies it post-aggregation against the small group-by map
         // instead of against the materialised edge-row set.
-        let fusable = if let Clause::Return(r) = &query.clauses[i + 1] {
+        // (fusable, distinct_count) — distinct_count is true when the count
+        // aggregate uses DISTINCT on the OTHER node variable. Allowed because
+        // the executor's node-centric path can dedup peers via a per-group
+        // HashSet<NodeIndex>; the edge-centric fast path is bypassed in that
+        // mode (it counts edges, not distinct peers).
+        let (fusable, distinct_count) = if let Clause::Return(r) = &query.clauses[i + 1] {
             if r.distinct {
-                false
+                (false, false)
             } else {
                 let mut has_count = false;
                 let mut all_valid = true;
                 let mut group_var: Option<&str> = None;
                 let mut count_var_ok = true;
+                let mut saw_distinct = false;
 
                 // First pass: identify which variable group-by items reference
                 for item in &r.items {
@@ -797,19 +881,27 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                                     args,
                                     distinct,
                                 } if name == "count" => {
-                                    if *distinct {
-                                        count_var_ok = false;
-                                        break;
-                                    }
-                                    // count(*) is fine
+                                    // count(*) is fine — but DISTINCT count(*)
+                                    // would be a row-distinctness count, which
+                                    // the fused path can't produce without
+                                    // building the cross-product. Reject.
                                     if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                        if *distinct {
+                                            count_var_ok = false;
+                                            break;
+                                        }
                                         has_count = true;
                                         continue;
                                     }
-                                    // count(var) — var must be the OTHER node
+                                    // count(var) — var must be the OTHER node.
+                                    // DISTINCT is allowed here: dedup peer
+                                    // NodeIndices per group.
                                     if let Some(Expression::Variable(var)) = args.first() {
                                         if other_var.as_deref() == Some(var.as_str()) {
                                             has_count = true;
+                                            if *distinct {
+                                                saw_distinct = true;
+                                            }
                                             continue;
                                         }
                                     }
@@ -825,13 +917,30 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                     }
                 }
 
-                has_count && all_valid && count_var_ok
+                (has_count && all_valid && count_var_ok, saw_distinct)
             }
         } else {
-            false
+            (false, false)
         };
 
         if !fusable {
+            i += 1;
+            continue;
+        }
+
+        // DISTINCT-count gating: only fuse when (a) the pattern is 3-element
+        // node-edge-node, and (b) the GROUP node is type-constrained or has
+        // properties. The fused path enumerates group node candidates and
+        // calls `try_count_distinct_peers` per node — for an untyped group
+        // that's a full-graph node scan (124 M iterations on Wikidata).
+        // Without this guard the fused path is catastrophically slower than
+        // the materializing fallback for unconstrained groups.
+        if distinct_count
+            && !distinct_fusable_3elem_with_constrained_group(
+                &query.clauses[i],
+                &query.clauses[i + 1],
+            )
+        {
             i += 1;
             continue;
         }
@@ -855,6 +964,7 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                 return_clause,
                 top_k: None,
                 candidate_emit: None,
+                distinct_count,
             },
         );
 
@@ -1330,6 +1440,10 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             with_clause,
             secondary_match: Some(secondary),
             top_k: None,
+            // The 2-MATCH variant counts edges (m2_edge_var); DISTINCT
+            // semantics on edges collapse to the same as non-distinct since
+            // edge bindings are unique per row. Always false here.
+            distinct_count: false,
         },
     );
     true
@@ -1413,15 +1527,18 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Check WITH: must have count() aggregate + group-by on one node variable
-        let fusable = if let Clause::With(w) = &query.clauses[i + 1] {
+        // Check WITH: must have count() aggregate + group-by on one node
+        // variable. (fusable, distinct_count) — distinct_count tracks whether
+        // count(DISTINCT v) was seen on the OTHER node variable.
+        let (fusable, distinct_count) = if let Clause::With(w) = &query.clauses[i + 1] {
             if w.distinct {
-                false
+                (false, false)
             } else {
                 let mut has_count = false;
                 let mut all_valid = true;
                 let mut group_var: Option<&str> = None;
                 let mut count_var_ok = true;
+                let mut saw_distinct = false;
 
                 for item in &w.items {
                     if !is_aggregate_expression(&item.expression) {
@@ -1474,17 +1591,20 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                                     args,
                                     distinct,
                                 } if name == "count" => {
-                                    if *distinct {
-                                        count_var_ok = false;
-                                        break;
-                                    }
                                     if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                        if *distinct {
+                                            count_var_ok = false;
+                                            break;
+                                        }
                                         has_count = true;
                                         continue;
                                     }
                                     if let Some(Expression::Variable(var)) = args.first() {
                                         if other_var.as_deref() == Some(var.as_str()) {
                                             has_count = true;
+                                            if *distinct {
+                                                saw_distinct = true;
+                                            }
                                             continue;
                                         }
                                     }
@@ -1500,13 +1620,26 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                     }
                 }
 
-                has_count && all_valid && count_var_ok
+                (has_count && all_valid && count_var_ok, saw_distinct)
             }
         } else {
-            false
+            (false, false)
         };
 
         if !fusable {
+            i += 1;
+            continue;
+        }
+
+        // Same DISTINCT gating as fuse_match_return_aggregate: skip the fused
+        // path for unconstrained group nodes — see
+        // `distinct_fusable_3elem_with_constrained_group` for rationale.
+        if distinct_count
+            && !distinct_fusable_3elem_with_constrained_group(
+                &query.clauses[i],
+                &query.clauses[i + 1],
+            )
+        {
             i += 1;
             continue;
         }
@@ -1530,6 +1663,7 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                 with_clause,
                 secondary_match: None,
                 top_k: None,
+                distinct_count,
             },
         );
 

@@ -711,3 +711,162 @@ class TestLimitWithFilteringWhere:
         # No WHERE, all 5 candidates pass through; LIMIT 3 returns 3.
         result = filter_graph.cypher("MATCH (n:T) RETURN n.id LIMIT 3")
         assert len(result) == 3
+
+
+class TestCountDistinctFusion:
+    """Regression for fuse_match_return_aggregate / fuse_match_with_aggregate
+    being extended to accept count(DISTINCT v) on a node variable. Multi-edges
+    between the same pair must collapse to one in the count, and ORDER BY +
+    LIMIT must produce correct top-K rankings.
+    """
+
+    @pytest.fixture
+    def multiedge_graph(self):
+        # 4 people. Alice has 3 distinct friends (Bob, Carol, Dave), with
+        # multiple FRIEND edges to Bob (multi-edge stress for DISTINCT).
+        # Bob has 1 friend, Carol 2, Dave 0.
+        g = rg.KnowledgeGraph()
+        for name in ["Alice", "Bob", "Carol", "Dave"]:
+            g.cypher(f"CREATE (p:Person {{name: '{name}'}})")
+        edges = [
+            # (src, dst) — note Alice→Bob appears twice on purpose.
+            ("Alice", "Bob"),
+            ("Alice", "Bob"),
+            ("Alice", "Carol"),
+            ("Alice", "Dave"),
+            ("Bob", "Carol"),
+            ("Carol", "Dave"),
+            ("Carol", "Bob"),
+        ]
+        for src, dst in edges:
+            g.cypher(f"MATCH (a:Person {{name: '{src}'}}), (b:Person {{name: '{dst}'}}) CREATE (a)-[:FRIEND]->(b)")
+        return g
+
+    def test_count_distinct_dedups_multi_edges(self, multiedge_graph):
+        # Alice has 4 FRIEND edges out (2 to Bob, 1 to Carol, 1 to Dave),
+        # but only 3 distinct friends.
+        result = multiedge_graph.cypher(
+            "MATCH (a:Person {name: 'Alice'})-[:FRIEND]->(b:Person) "
+            "RETURN count(b) AS edges, count(DISTINCT b) AS friends"
+        )
+        assert len(result) == 1
+        assert result[0]["edges"] == 4
+        assert result[0]["friends"] == 3
+
+    def test_count_distinct_with_top_k_ranking(self, multiedge_graph):
+        # Top-2 by distinct outgoing friends:
+        # Alice: 3 distinct, Carol: 2 distinct, Bob: 1 distinct.
+        result = multiedge_graph.cypher(
+            "MATCH (a:Person)-[:FRIEND]->(b:Person) "
+            "RETURN a.name AS name, count(DISTINCT b) AS friends "
+            "ORDER BY friends DESC LIMIT 2"
+        )
+        rows = [(r["name"], r["friends"]) for r in result]
+        assert rows == [("Alice", 3), ("Carol", 2)]
+
+    def test_count_distinct_with_pipeline(self, multiedge_graph):
+        # WITH-pipeline form of the same query — fuse_match_with_aggregate path.
+        result = multiedge_graph.cypher(
+            "MATCH (a:Person)-[:FRIEND]->(b:Person) "
+            "WITH a.name AS name, count(DISTINCT b) AS friends "
+            "ORDER BY friends DESC LIMIT 2 "
+            "RETURN name, friends"
+        )
+        rows = [(r["name"], r["friends"]) for r in result]
+        assert rows == [("Alice", 3), ("Carol", 2)]
+
+    def test_count_distinct_matches_materializing_path(self, multiedge_graph):
+        # End-to-end: result of the fused path matches the brute-force
+        # materializing path for every actor.
+        fused = multiedge_graph.cypher(
+            "MATCH (a:Person)-[:FRIEND]->(b:Person) RETURN a.name AS name, count(DISTINCT b) AS friends ORDER BY name"
+        )
+        # Force the non-fused path by adding a DISTINCT on RETURN. This makes
+        # `r.distinct = true` so fuse_match_return_aggregate bails out.
+        materializing = multiedge_graph.cypher(
+            "MATCH (a:Person)-[:FRIEND]->(b:Person) "
+            "RETURN DISTINCT a.name AS name, count(DISTINCT b) AS friends "
+            "ORDER BY name"
+        )
+        fused_rows = [(r["name"], r["friends"]) for r in fused]
+        mat_rows = [(r["name"], r["friends"]) for r in materializing]
+        assert fused_rows == mat_rows
+
+
+class TestPropertyAnchoredCountFusion:
+    """Regression for the property-anchored single-MATCH fusion bug:
+    `MATCH (m {name: 'X'})<-[:R]-(p) RETURN m.title, count(p)` returned
+    empty rows because `try_count_simple_pattern` bailed when the bound
+    node had property filters and the fused executor unwrap_or(0)'d the
+    None into a zero count, which the row-skip guard then dropped.
+    """
+
+    @pytest.fixture
+    def hub_graph(self):
+        # Munch has 3 paintings via P170 (incoming).
+        # A control node Other has 1 painting via P170.
+        # An undirected scenario: Munch also has 2 outgoing FRIEND edges so
+        # `(m)-[r]-(p)` undirected sees 2 + 3 = 5 distinct peers.
+        g = rg.KnowledgeGraph()
+        g.cypher("CREATE (m:Creator {name: 'Munch'})")
+        g.cypher("CREATE (o:Creator {name: 'Other'})")
+        for i in range(3):
+            g.cypher(f"CREATE (p:Painting {{name: 'P{i}'}})")
+            g.cypher(f"MATCH (p:Painting {{name: 'P{i}'}}), (m:Creator {{name: 'Munch'}}) CREATE (p)-[:P170]->(m)")
+        g.cypher("CREATE (q:Painting {name: 'Q0'})")
+        g.cypher("MATCH (q:Painting {name: 'Q0'}), (o:Creator {name: 'Other'}) CREATE (q)-[:P170]->(o)")
+        # Two FRIEND outgoing edges from Munch (different node type for variety)
+        g.cypher("CREATE (f1:Person {name: 'F1'})")
+        g.cypher("CREATE (f2:Person {name: 'F2'})")
+        g.cypher("MATCH (m:Creator {name: 'Munch'}), (f1:Person {name: 'F1'}) CREATE (m)-[:FRIEND]->(f1)")
+        g.cypher("MATCH (m:Creator {name: 'Munch'}), (f2:Person {name: 'F2'}) CREATE (m)-[:FRIEND]->(f2)")
+        return g
+
+    def test_count_with_property_anchored_group(self, hub_graph):
+        # Group on the property-anchored node, count peers on the unbound side.
+        # Pre-fix this returned 0 rows.
+        result = hub_graph.cypher(
+            "MATCH (m:Creator {name: 'Munch'})<-[:P170]-(p) RETURN m.name AS who, count(p) AS works"
+        )
+        assert len(result) == 1
+        assert result[0]["who"] == "Munch"
+        assert result[0]["works"] == 3
+
+    def test_count_with_property_anchored_count_target(self, hub_graph):
+        # Anchor on the count-target side instead. The OTHER node (a) is
+        # the unbound count target; the bound side carries the property.
+        result = hub_graph.cypher(
+            "MATCH (a)-[:P170]->(b:Creator {name: 'Munch'}) RETURN b.name AS who, count(a) AS works"
+        )
+        assert len(result) == 1
+        assert result[0]["who"] == "Munch"
+        assert result[0]["works"] == 3
+
+    def test_count_distinct_with_property_anchored_group(self, hub_graph):
+        # Same shape as above but with DISTINCT — exercises the
+        # try_count_distinct_peers path.
+        result = hub_graph.cypher(
+            "MATCH (m:Creator {name: 'Munch'})<-[:P170]-(p) RETURN m.name AS who, count(DISTINCT p) AS works"
+        )
+        assert len(result) == 1
+        assert result[0]["works"] == 3
+
+    def test_count_undirected_with_property_anchored_group(self, hub_graph):
+        # Undirected `[r]-` should sum incoming+outgoing distinct peers.
+        # Munch has 3 incoming P170 + 0 outgoing P170 + 2 outgoing FRIEND
+        # + 0 incoming FRIEND. Restrict the relationship type so we only
+        # count one edge type and dedup correctly.
+        result = hub_graph.cypher(
+            "MATCH (m:Creator {name: 'Munch'})-[r:P170]-(p) RETURN m.name AS who, count(DISTINCT p) AS works"
+        )
+        assert len(result) == 1
+        assert result[0]["works"] == 3
+
+    def test_count_property_anchored_matches_materializing_path(self, hub_graph):
+        fused = hub_graph.cypher(
+            "MATCH (m:Creator {name: 'Munch'})<-[:P170]-(p) RETURN m.name AS who, count(DISTINCT p) AS works"
+        )
+        materializing = hub_graph.cypher(
+            "MATCH (m:Creator {name: 'Munch'})<-[:P170]-(p) RETURN DISTINCT m.name AS who, count(DISTINCT p) AS works"
+        )
+        assert [(r["who"], r["works"]) for r in fused] == [(r["who"], r["works"]) for r in materializing]

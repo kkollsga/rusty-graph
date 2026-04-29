@@ -510,8 +510,7 @@ impl KnowledgeGraph {
 
     /// Set a default query timeout (milliseconds) applied to all cypher() calls.
     ///
-    /// - `None` (default): fall through to the backend-aware default
-    ///   (Disk 10s, Mapped 60s, Memory none).
+    /// - `None` (default): fall through to the built-in default (180_000 ms / 3 min).
     /// - `0`: disable the deadline for every query unless a per-call
     ///   `timeout_ms` overrides.
     /// - Any positive value: use it as the default.
@@ -1158,9 +1157,9 @@ impl KnowledgeGraph {
     /// Args:
     ///     query: The Cypher query string
     ///     timeout_ms: Deadline in milliseconds. If omitted, uses
-    ///         `set_default_timeout()` when set, otherwise a backend-aware
-    ///         default (Disk: 10_000 ms, Mapped: 60_000 ms, Memory: none).
-    ///         Pass `0` to disable the deadline entirely for this call.
+    ///         `set_default_timeout()` when set, otherwise the built-in
+    ///         default of 180_000 ms (3 min). Pass `0` to disable the
+    ///         deadline entirely for this call.
     ///     max_rows: Cap on intermediate result rows; queries producing
     ///         more return an error. Defaults to `set_default_max_rows()`.
     ///
@@ -1597,17 +1596,13 @@ impl KnowledgeGraph {
 
 /// Backend-aware default Cypher timeout (milliseconds).
 ///
-/// Disk-backed graphs on external drives can hit pathological scans that
-/// run for minutes; a conservative default protects agents from runaway
-/// queries. Memory graphs are reliably fast, so no default deadline.
-/// Users can override per-call with `timeout_ms=N` (or `0` to disable),
-/// or globally via `set_default_timeout(ms)`.
-pub(crate) fn backend_default_timeout_ms(graph: &schema::DirGraph) -> Option<u64> {
-    if graph.graph.is_disk() {
-        Some(10_000)
-    } else if graph.graph.is_mapped() {
-        Some(60_000)
-    } else {
-        None
-    }
+/// Default Cypher query deadline applied when no per-call `timeout_ms` and
+/// no `set_default_timeout()` are set. A 3-minute ceiling is loose enough
+/// that legitimate cold queries on large mapped/disk graphs complete, while
+/// still guaranteeing that pathological scans (e.g. unanchored patterns on
+/// a 100M+ node graph) error out instead of wedging the host process or an
+/// MCP server. Users override per-call with `timeout_ms=N` (or `0` to
+/// disable), or globally via `set_default_timeout(ms)`.
+pub(crate) fn backend_default_timeout_ms(_graph: &schema::DirGraph) -> Option<u64> {
+    Some(180_000)
 }
