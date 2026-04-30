@@ -972,6 +972,69 @@ fn test_desugar_multi_match_return_aggregate() {
 }
 
 #[test]
+fn test_topk_absorbed_for_property_access_return() {
+    // Cohort top-K with property-access RETURN — the shape that drove
+    // the user's Wikidata timeout. After desugar→fuse, the planner
+    // must absorb ORDER BY/LIMIT into FusedMatchWithAggregate.top_k so
+    // p.title and p.description are evaluated K times, not |cohort|
+    // times.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:T1]->({id: 1}) \
+         MATCH (p)-[r]-(other) \
+         WHERE NOT (type(r) = 'T2' AND startNode(r) = other) \
+         RETURN p.title AS name, p.description AS desc, count(r) AS d \
+         ORDER BY d DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let topk_absorbed = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedMatchWithAggregate { top_k: Some(_), .. }));
+    assert!(
+        topk_absorbed,
+        "ORDER BY DESC LIMIT 10 must be absorbed into \
+         FusedMatchWithAggregate.top_k when RETURN projects \
+         properties of the group variable; clauses: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_topk_skipped_for_computed_return_expressions() {
+    // Computed RETURN expressions (arithmetic on aggregates here) are
+    // not safe to absorb — we'd need *all* rows to know which 10 win.
+    // Pin the bail-out so a future relaxation has to opt in.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:T1]->({id: 1}) \
+         MATCH (p)-[r]-() \
+         WITH p, count(r) AS total, 1 AS one \
+         RETURN p.title, total + one AS adjusted \
+         ORDER BY total DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let topk_absorbed = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedMatchWithAggregate { top_k: Some(_), .. }));
+    assert!(
+        !topk_absorbed,
+        "computed RETURN expressions must not absorb top_k; \
+         clauses: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
 fn test_desugar_skips_when_no_aggregate() {
     // No aggregate in RETURN → desugar must not fire (would just add
     // an unnecessary WITH).

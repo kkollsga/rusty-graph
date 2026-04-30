@@ -1940,9 +1940,12 @@ pub(super) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
 ///
 /// Pattern matched: `[FusedMatchWithAggregate, Return, OrderBy, Limit]`
 /// where:
-/// - Return is non-DISTINCT and every item is a plain alias of a
-///   WITH-projected column (no computed expressions; otherwise we'd
-///   skip rows the user actually wanted),
+/// - Return is non-DISTINCT and every item is either a plain reference
+///   to a WITH-projected alias *or* a property access on one of the
+///   group variables (`g.name`, `g.description`, …). The latter is
+///   safe because the executor inserts `node_bindings[group_var]` on
+///   every surviving row, so property reads happen K times — never on
+///   the discarded cohort members.
 /// - OrderBy has exactly one item, and it targets a `count(...)` alias
 ///   in the WITH (any other order key requires evaluating projections
 ///   first to know the sort value, defeating the optimisation),
@@ -2025,16 +2028,36 @@ pub(super) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             }
         };
 
-        // RETURN must be a pure pass-through projection of WITH aliases.
-        // (Computed RETURN expressions could need rows we throw away.)
+        // Identify the group variables — the variables underlying every
+        // non-aggregate WITH item. A downstream `g.<prop>` is safe even
+        // though it's not a literal alias because the executor preserves
+        // `node_bindings[g]` on the K-winner rows; property evaluation
+        // therefore costs K mmap reads, not |cohort| reads.
+        let mut group_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in &with_items {
+            if !is_aggregate_expression(&item.expression) {
+                match &item.expression {
+                    Expression::Variable(v) => {
+                        group_vars.insert(v.clone());
+                    }
+                    Expression::PropertyAccess { variable, .. } => {
+                        group_vars.insert(variable.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // RETURN must be a pure pass-through projection of WITH aliases,
+        // OR a property access on one of the group variables. Computed
+        // RETURN expressions (function calls, arithmetic, …) still bail —
+        // they may need rows we'd throw away.
         let return_ok = if let Clause::Return(r) = &query.clauses[i + 1] {
             !r.distinct
-                && r.items.iter().all(|item| {
-                    let alias = match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        _ => return false,
-                    };
-                    aliases.contains(&alias)
+                && r.items.iter().all(|item| match &item.expression {
+                    Expression::Variable(v) => aliases.contains(v),
+                    Expression::PropertyAccess { variable, .. } => group_vars.contains(variable),
+                    _ => false,
                 })
         } else {
             false

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.32] — 2026-04-30
+
+### Performance — cohort top-K with PropertyAccess RETURN now absorbs LIMIT
+
+`fuse_match_with_aggregate_top_k` previously required every RETURN
+item to be a plain alias of a WITH-projected column. Cohort queries
+of the form
+
+```cypher
+MATCH (p)-[:P27]->({id: 20})
+WITH p
+MATCH (p)-[r]-(other)
+WHERE NOT (type(r) = 'P50' AND startNode(r) = other)
+RETURN p.title, p.description, count(r) AS d
+ORDER BY d DESC LIMIT 10
+```
+
+include `p.title` and `p.description` (PropertyAccess) in the RETURN,
+so the absorber bailed and the fused operator emitted *every* cohort
+row before LIMIT — paying property-column I/O for ~73K Norwegians on
+Wikidata even though only 10 survived. The relaxed gate now accepts
+PropertyAccess on the WITH's group variable (the executor already
+preserves `node_bindings[group_var]` for K-winner rows). Warm-cache
+runtime on the Norwegians cohort fell from ≈0.9s to ≈0.4s; cold runs
+that previously exceeded the MCP 20s ceiling now stay under it.
+
 ## [0.8.31] — 2026-04-30
 
 ### Performance — fused OPTIONAL MATCH widens to derived aggregates and edge-var counts
