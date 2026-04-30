@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.31] — 2026-04-30
+
+### Performance — fused OPTIONAL MATCH widens to derived aggregates and edge-var counts
+
+Two follow-on fixes after the 0.8.30 release. Both close gaps in
+`fuse_optional_match_aggregate` that kept the cohort-style query in
+the issue from picking up its existing fast path:
+
+- **Edge-variable counts now fuse.** The fusion gate's local-binding
+  set was built from `collect_pattern_variables`, which only returns
+  *node* variables. `count(r)` over an OPTIONAL MATCH edge variable
+  failed the local-to-OPT check and fell back to the materialized
+  per-row expansion. Replaced with a local walk that includes edge
+  variables in the OPTIONAL pattern's binding set, minus any names
+  already bound by prior MATCH/WITH/UNWIND.
+
+- **Derived `total - count(rp)` expressions now fuse.** Previously
+  the gate accepted only pure `count(...)` aggregates; arithmetic
+  involving them blocked fusion entirely. The gate now recognizes
+  any expression whose only aggregate is `count(...)` and the
+  executor substitutes the per-row count into each `count(...)`
+  sub-tree before evaluating the surrounding arithmetic. Same row
+  cost as the pure-count path.
+
+- **Output columns now reflect the fused operator's own RETURN/WITH
+  items.** Previously the fused operator silently inherited the
+  upstream's column names, so a downstream consumer reading
+  `row["p50_in"]` got a `KeyError`. Visible only when the OPTIONAL
+  MATCH adds new RETURN columns the upstream WITH didn't have.
+
+`startNode(r)` / `endNode(r)` returning the matcher's anchor side
+instead of the actual graph endpoints (caught while testing) now
+look up the edge endpoints via `edge_index`. This was a pre-existing
+bug, exposed by Phase 3 actually exercising the predicate.
+
+**Wikidata cohort impact** (warm cache, 124M-node graph; queries
+from the issue's "narrow then enrich" report):
+- fm1 (`WHERE NOT (type(r) = 'P50' AND startNode(r) = other)`):
+  656ms → 624ms (~unchanged; the win was already in 0.8.30)
+- fm2 (post-aggregate OPTIONAL MATCH + `total - count(rp)`):
+  1290ms → **403ms** (~3.2× faster, fully fused)
+
 ## [0.8.30] — 2026-04-30
 
 ### Performance — relationship-predicate pushdown (Phase 3)

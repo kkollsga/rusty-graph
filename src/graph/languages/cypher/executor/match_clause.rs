@@ -14,6 +14,48 @@ use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
+/// Replace every `count(...)` function-call sub-tree in `expr` with a
+/// literal `Value::Int64(value)`. Used by the fused OPTIONAL MATCH
+/// path to evaluate derived expressions like `total - count(rp)`
+/// against a per-upstream-row count without re-running the OPTIONAL
+/// expansion. Only count() is substituted because that's the only
+/// aggregate the fused path computes inline; other aggregates are
+/// rejected upstream by `is_fusable_*_clause`.
+fn substitute_count_with_value(expr: &Expression, value: i64) -> Expression {
+    match expr {
+        Expression::FunctionCall { name, .. } if name == "count" => {
+            Expression::Literal(Value::Int64(value))
+        }
+        Expression::Add(l, r) => Expression::Add(
+            Box::new(substitute_count_with_value(l, value)),
+            Box::new(substitute_count_with_value(r, value)),
+        ),
+        Expression::Subtract(l, r) => Expression::Subtract(
+            Box::new(substitute_count_with_value(l, value)),
+            Box::new(substitute_count_with_value(r, value)),
+        ),
+        Expression::Multiply(l, r) => Expression::Multiply(
+            Box::new(substitute_count_with_value(l, value)),
+            Box::new(substitute_count_with_value(r, value)),
+        ),
+        Expression::Divide(l, r) => Expression::Divide(
+            Box::new(substitute_count_with_value(l, value)),
+            Box::new(substitute_count_with_value(r, value)),
+        ),
+        Expression::Modulo(l, r) => Expression::Modulo(
+            Box::new(substitute_count_with_value(l, value)),
+            Box::new(substitute_count_with_value(r, value)),
+        ),
+        Expression::Negate(inner) => {
+            Expression::Negate(Box::new(substitute_count_with_value(inner, value)))
+        }
+        // Concat / Case / etc. — leave alone; the gating function only
+        // accepts shapes this helper covers, so the fall-through path
+        // never sees a containing aggregate.
+        other => other.clone(),
+    }
+}
+
 impl<'a> CypherExecutor<'a> {
     pub(super) fn pattern_match_to_row(&self, m: PatternMatch) -> ResultRow {
         let binding_count = m.bindings.len();
@@ -1029,13 +1071,29 @@ impl<'a> CypherExecutor<'a> {
             return Ok(existing);
         }
 
-        // Identify which WITH items are group keys (variables) vs aggregates (count)
+        // Items split into three buckets:
+        // - group keys (Variable / PropertyAccess on pre-OPTIONAL var)
+        // - pure count aggregates (`count(rp)` directly)
+        // - derived expressions whose only aggregates are count() — e.g.
+        //   `total - count(rp) AS cultural`. The fused operator computes
+        //   count once per upstream row, substitutes it into each
+        //   derived expression, and evaluates the result. Same row cost
+        //   as the pure-count path; avoids the OPTIONAL MATCH expansion
+        //   that the materialized executor would otherwise run.
         let mut group_key_indices = Vec::new();
         let mut count_items: Vec<(usize, &ReturnItem)> = Vec::new();
+        let mut derived_items: Vec<(usize, &ReturnItem)> = Vec::new();
 
         for (i, item) in with_clause.items.iter().enumerate() {
             if is_aggregate_expression(&item.expression) {
-                count_items.push((i, item));
+                if matches!(
+                    &item.expression,
+                    Expression::FunctionCall { name, .. } if name == "count"
+                ) {
+                    count_items.push((i, item));
+                } else {
+                    derived_items.push((i, item));
+                }
             } else {
                 group_key_indices.push(i);
             }
@@ -1076,14 +1134,27 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Build projected values for this row
-            let mut projected =
-                Bindings::with_capacity(group_key_indices.len() + count_items.len());
+            let mut projected = Bindings::with_capacity(
+                group_key_indices.len() + count_items.len() + derived_items.len(),
+            );
 
             // Group key pass-throughs
             for &idx in &group_key_indices {
                 let item = &with_clause.items[idx];
                 let key = return_item_column_name(item);
                 let val = self.evaluate_expression(&item.expression, row)?;
+                projected.insert(key, val);
+            }
+
+            // Derived expressions with embedded count() — substitute the
+            // computed count into every count(...) sub-tree, then run
+            // through the standard expression evaluator. The row's
+            // projected bindings (e.g. `total` from a prior WITH) are
+            // already in scope.
+            for &(_, item) in &derived_items {
+                let key = return_item_column_name(item);
+                let substituted = substitute_count_with_value(&item.expression, match_count);
+                let val = self.evaluate_expression(&substituted, row)?;
                 projected.insert(key, val);
             }
 
@@ -1116,9 +1187,19 @@ impl<'a> CypherExecutor<'a> {
             result_rows.push(new_row);
         }
 
+        // Output columns come from this fused operator's own
+        // WITH/RETURN items, not the upstream's. Earlier code
+        // re-used `existing.columns`, which silently inherited the
+        // pre-OPTIONAL columns and dropped the post-OPTIONAL ones —
+        // visible as `KeyError` in Python clients reading by name.
+        let columns: Vec<String> = with_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
         let mut result = ResultSet {
             rows: result_rows,
-            columns: existing.columns,
+            columns,
             lazy_return_items: None,
         };
 

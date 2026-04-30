@@ -2,7 +2,6 @@
 //! into specialised physical plans.
 
 use super::super::ast::*;
-use super::index_selection::collect_pattern_variables;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::schema::DirGraph;
@@ -455,17 +454,68 @@ pub(super) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Collect variables defined in the OPTIONAL MATCH pattern *first* —
-        // we need this both to validate the count() args and to reject
-        // group-key PropertyAccess on OPTIONAL-bound variables. The fused
-        // executor evaluates group keys against the *source* row (before
-        // OPTIONAL MATCH expansion), so `pet.name` where `pet` only exists
-        // post-OPTIONAL would always be NULL — silently wrong.
+        // Collect variables defined *only* by this OPTIONAL MATCH —
+        // every pattern variable (node *and* edge) minus any that
+        // were already bound by a prior MATCH/WITH/UNWIND. The fused
+        // executor evaluates group keys against the *source* row
+        // (before OPTIONAL MATCH expansion), so `pet.name` where
+        // `pet` only exists post-OPTIONAL would always be NULL —
+        // silently wrong. Pre-bound anchors used inside the OPTIONAL
+        // pattern (e.g. the `(p)` in `OPTIONAL MATCH ()-[rp:P50]->(p)`
+        // after a prior `MATCH (p)…`) are fine because `p` resolves
+        // on the source row.
+        //
+        // `collect_pattern_variables` (the shared helper) returns
+        // *node* variables only — used elsewhere for type tracking
+        // — so we can't reuse it here without losing the edge var.
+        // Local closure walks Edge elements too.
+        let collect_all_pattern_vars =
+            |patterns: &[crate::graph::core::pattern_matching::Pattern]| -> Vec<String> {
+                let mut vars = Vec::new();
+                for pattern in patterns {
+                    for element in &pattern.elements {
+                        match element {
+                            PatternElement::Node(np) => {
+                                if let Some(ref v) = np.variable {
+                                    vars.push(v.clone());
+                                }
+                            }
+                            PatternElement::Edge(ep) => {
+                                if let Some(ref v) = ep.variable {
+                                    vars.push(v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                vars
+            };
+
+        let pre_bound_vars: std::collections::HashSet<String> = query.clauses[..i]
+            .iter()
+            .flat_map(|c| match c {
+                Clause::Match(m) | Clause::OptionalMatch(m) => {
+                    collect_all_pattern_vars(&m.patterns)
+                }
+                Clause::With(w) => w
+                    .items
+                    .iter()
+                    .filter_map(|it| {
+                        it.alias.clone().or_else(|| match &it.expression {
+                            Expression::Variable(v) => Some(v.clone()),
+                            _ => None,
+                        })
+                    })
+                    .collect(),
+                Clause::Unwind(u) => vec![u.alias.clone()],
+                _ => Vec::new(),
+            })
+            .collect();
         let opt_match_vars: std::collections::HashSet<String> =
             if let Clause::OptionalMatch(m) = &query.clauses[i] {
-                collect_pattern_variables(&m.patterns)
+                collect_all_pattern_vars(&m.patterns)
                     .into_iter()
-                    .map(|(name, _)| name)
+                    .filter(|v| !pre_bound_vars.contains(v))
                     .collect()
             } else {
                 i += 1;
@@ -494,32 +544,15 @@ pub(super) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
                 continue;
             }
         };
-        let all_counts_local = items.iter().all(|item| {
-            if let Expression::FunctionCall {
-                name,
-                args,
-                distinct,
-            } = &item.expression
-            {
-                if name == "count" {
-                    // Reject DISTINCT — fused path can't deduplicate
-                    if *distinct {
-                        return false;
-                    }
-                    // count(*) is always fine
-                    if args.len() == 1 && matches!(args[0], Expression::Star) {
-                        return true;
-                    }
-                    // count(var) — var must come from this OPTIONAL MATCH
-                    if let Some(Expression::Variable(var)) = args.first() {
-                        return opt_match_vars.contains(var);
-                    }
-                    // count(expr) — not a simple variable, bail
-                    return false;
-                }
-            }
-            true // non-aggregate items (group keys) are fine
-        });
+        // Validate every `count(...)` reachable inside each item — even
+        // when the count is wrapped in arithmetic (`total - count(rp)`).
+        // The fused executor substitutes the per-row count into every
+        // count() it finds, so each must reference an OPTIONAL-MATCH
+        // variable (or `*`) for the substitution to mean what the user
+        // wrote.
+        let all_counts_local = items
+            .iter()
+            .all(|item| count_args_local_to_opt(&item.expression, &opt_match_vars));
 
         if !all_counts_local {
             i += 1;
@@ -564,12 +597,19 @@ pub(super) fn is_fusable_with_clause(with: &WithClause) -> bool {
 
     for item in &with.items {
         if is_aggregate_expression(&item.expression) {
-            // Only fuse for count() — not sum/collect/avg etc.
             match &item.expression {
                 Expression::FunctionCall { name, .. } if name == "count" => {
                     has_count = true;
                 }
-                _ => return false, // Non-count aggregate → bail
+                expr if aggregates_only_count(expr) => {
+                    // Derived expression whose only aggregates are
+                    // count() — e.g. `total - count(rp) AS cultural`.
+                    // The fused executor substitutes the per-row count
+                    // and evaluates the rest through the standard
+                    // expression evaluator.
+                    has_count = true;
+                }
+                _ => return false,
             }
         } else {
             // Group key must be a simple variable pass-through
@@ -580,6 +620,38 @@ pub(super) fn is_fusable_with_clause(with: &WithClause) -> bool {
     }
 
     has_count
+}
+
+/// True when every aggregate function call inside `expr` is `count`.
+/// Used by the OPTIONAL-MATCH fusion gates to decide whether the
+/// fused executor's count→literal substitution covers the expression.
+/// Any other aggregate (sum/avg/min/max/collect/...) bails fusion;
+/// the materialized executor handles those via its general aggregate
+/// evaluator.
+fn aggregates_only_count(expr: &Expression) -> bool {
+    use super::super::ast::is_aggregate_expression;
+    match expr {
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct: _,
+        } => {
+            if is_aggregate_expression(expr) && name != "count" {
+                return false;
+            }
+            args.iter().all(aggregates_only_count)
+        }
+        Expression::Add(l, r)
+        | Expression::Subtract(l, r)
+        | Expression::Multiply(l, r)
+        | Expression::Divide(l, r)
+        | Expression::Modulo(l, r)
+        | Expression::Concat(l, r) => aggregates_only_count(l) && aggregates_only_count(r),
+        Expression::Negate(inner) => aggregates_only_count(inner),
+        // Leaves / non-arithmetic forms can't introduce a non-count
+        // aggregate, so they're trivially fine.
+        _ => true,
+    }
 }
 
 /// Check if a RETURN clause is eligible for fusion with an OPTIONAL MATCH.
@@ -600,12 +672,22 @@ pub(super) fn is_fusable_return_clause(
 
     for item in &ret.items {
         if is_aggregate_expression(&item.expression) {
-            // Only fuse for count() — not sum/collect/avg etc.
             match &item.expression {
                 Expression::FunctionCall { name, .. } if name == "count" => {
                     has_count = true;
                 }
-                _ => return false, // Non-count aggregate → bail
+                expr if aggregates_only_count(expr) => {
+                    // Derived expression — e.g. `total - count(rp)` —
+                    // the fused executor substitutes count and
+                    // evaluates the rest. The expression must not
+                    // touch a property of an OPTIONAL-MATCH-bound
+                    // variable (those evaluate to NULL pre-expansion).
+                    if expression_touches_vars(expr, opt_match_vars) {
+                        return false;
+                    }
+                    has_count = true;
+                }
+                _ => return false,
             }
         } else {
             // Group key must be a simple variable or PropertyAccess on a
@@ -623,6 +705,93 @@ pub(super) fn is_fusable_return_clause(
     }
 
     has_count
+}
+
+/// True when every `count(...)` reachable inside `expr` is non-DISTINCT
+/// and either `count(*)` or `count(var)` where `var` is in
+/// `opt_match_vars`. Non-`count` aggregates fail. Non-aggregate
+/// sub-expressions are skipped (they get evaluated against the source
+/// row at runtime, so any prior-clause variable is fine).
+fn count_args_local_to_opt(
+    expr: &Expression,
+    opt_match_vars: &std::collections::HashSet<String>,
+) -> bool {
+    match expr {
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } => {
+            if name == "count" {
+                if *distinct {
+                    return false;
+                }
+                if args.len() != 1 {
+                    return false;
+                }
+                match &args[0] {
+                    Expression::Star => true,
+                    Expression::Variable(v) => opt_match_vars.contains(v),
+                    _ => false,
+                }
+            } else {
+                // Non-count function — descend so a wrapped count gets
+                // checked, but bail if it's an aggregate that the
+                // fused path can't handle.
+                if super::super::ast::is_aggregate_expression(expr) {
+                    return false;
+                }
+                args.iter()
+                    .all(|a| count_args_local_to_opt(a, opt_match_vars))
+            }
+        }
+        Expression::Add(l, r)
+        | Expression::Subtract(l, r)
+        | Expression::Multiply(l, r)
+        | Expression::Divide(l, r)
+        | Expression::Modulo(l, r)
+        | Expression::Concat(l, r) => {
+            count_args_local_to_opt(l, opt_match_vars) && count_args_local_to_opt(r, opt_match_vars)
+        }
+        Expression::Negate(inner) => count_args_local_to_opt(inner, opt_match_vars),
+        // Variables, property accesses, literals, etc. — no count
+        // inside, fall through.
+        _ => true,
+    }
+}
+
+/// True when `expr` (or any sub-expression *outside of* a `count(...)`
+/// argument) references a variable in `vars` via Variable or
+/// PropertyAccess. Inside `count(rp)` the reference to `rp` is fine —
+/// the fused executor substitutes count() with a per-row literal
+/// before evaluation, so the OPTIONAL-bound variable never has to
+/// resolve. Outside count(), references to OPTIONAL-MATCH-only
+/// variables would be NULL pre-expansion and produce silently-wrong
+/// results.
+fn expression_touches_vars(expr: &Expression, vars: &std::collections::HashSet<String>) -> bool {
+    match expr {
+        Expression::Variable(v) => vars.contains(v),
+        Expression::PropertyAccess { variable, .. } => vars.contains(variable),
+        Expression::FunctionCall { name, args, .. } => {
+            // Arguments to count() are substituted away before
+            // evaluation, so they don't count as "touching" the var.
+            if name == "count" {
+                false
+            } else {
+                args.iter().any(|a| expression_touches_vars(a, vars))
+            }
+        }
+        Expression::Add(l, r)
+        | Expression::Subtract(l, r)
+        | Expression::Multiply(l, r)
+        | Expression::Divide(l, r)
+        | Expression::Modulo(l, r)
+        | Expression::Concat(l, r) => {
+            expression_touches_vars(l, vars) || expression_touches_vars(r, vars)
+        }
+        Expression::Negate(inner) => expression_touches_vars(inner, vars),
+        _ => false,
+    }
 }
 
 // Gate for DISTINCT-count fusion. The fused executor enumerates group node
