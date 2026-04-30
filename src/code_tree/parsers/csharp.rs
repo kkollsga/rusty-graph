@@ -342,18 +342,44 @@ impl CSharpParser {
     }
 
     fn get_base_types(node: Node, source: &[u8]) -> Vec<String> {
+        // C# grammar: `base_list = ":" type ("," type)*`, and the `<int>` in
+        // `IEnumerable<int>` is parsed as part of the type's `generic_name`
+        // node (so `<int>` is included in the node's text). Two earlier
+        // bugs lived here:
+        //   1. Filtering by a hardcoded list of node kinds dropped any
+        //      base type whose grammar kind wasn't on the list — in
+        //      practice every secondary base after the first was lost,
+        //      because the dotnet/runtime test corpus uses kinds the
+        //      filter never enumerated.
+        //   2. Generic args were retained as part of the bare name,
+        //      so `IEnumerable<int>` never matched the `IEnumerable`
+        //      entry in the resolution index.
         let mut out = Vec::new();
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "base_list" {
-                let mut bc = child.walk();
-                for sub in child.children(&mut bc) {
-                    if matches!(
-                        sub.kind(),
-                        "identifier" | "type_identifier" | "generic_name" | "qualified_name"
-                    ) {
-                        out.push(node_text(sub, source).to_string());
-                    }
+            if child.kind() != "base_list" {
+                continue;
+            }
+            let mut bc = child.walk();
+            for sub in child.children(&mut bc) {
+                if !sub.is_named() {
+                    continue;
+                }
+                // Primary-constructor argument list (`class Foo : Bar(x, y)`)
+                // is a sibling of the type, not a type itself.
+                if sub.kind() == "argument_list" {
+                    continue;
+                }
+                let text = node_text(sub, source).trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let base_name = match text.split_once('<') {
+                    Some((head, _)) => head.trim().to_string(),
+                    None => text.to_string(),
+                };
+                if !base_name.is_empty() {
+                    out.push(base_name);
                 }
             }
         }

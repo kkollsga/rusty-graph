@@ -15,7 +15,34 @@ pub mod typescript;
 use crate::code_tree::models::ParseResult;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use walkdir::WalkDir;
+
+/// Stack size for the parser worker pool.
+///
+/// Tree-sitter is recursive-descent. On macOS, std::thread (and therefore
+/// rayon) workers default to ~2 MB stacks while the main thread gets 8 MB.
+/// Pathological-but-valid inputs in the wild — e.g. dotnet/runtime's
+/// `JIT/Regression/JitBlue/GitHub_10215.cs`, a regression test that is
+/// literally a chain of thousands of `+` operators designed to stress
+/// recursive tree walkers — overflow the worker stack and SIGBUS the
+/// process. 16 MB clears every real-world case we've encountered without
+/// meaningfully affecting RSS (stacks are demand-paged).
+const PARSER_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Shared rayon pool used by every language parser's `parse_directory`.
+/// Lazily initialised on first use, then reused across languages and across
+/// repeat `build()` calls in the same process.
+fn parser_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(PARSER_THREAD_STACK_SIZE)
+            .thread_name(|i| format!("kglite-parser-{i}"))
+            .build()
+            .expect("failed to build kglite parser thread pool")
+    })
+}
 
 /// File extension → language identifier (mirrors registry.py::EXTENSION_MAP).
 pub const EXTENSION_MAP: &[(&str, &str)] = &[
@@ -66,9 +93,26 @@ pub trait LanguageParser: Sync {
     /// Parse a single source file at `filepath` (absolute) relative to `src_root`.
     fn parse_file(&self, filepath: &Path, src_root: &Path) -> ParseResult;
 
-    /// Parse every matching file under `src_root`. Default implementation walks
-    /// the directory via `walkdir`, collects paths, parses them in parallel with
-    /// rayon, and reduces the per-file results into one aggregate.
+    /// Parse a pre-collected slice of file paths in parallel. The hot path
+    /// for `build()`: the orchestrator walks the source tree once and
+    /// dispatches each per-language slice through here, avoiding the N+1
+    /// redundant walks that one-`parse_directory`-per-language would do.
+    fn parse_files(&self, files: &[PathBuf], src_root: &Path) -> ParseResult {
+        parser_pool().install(|| {
+            files
+                .par_iter()
+                .map(|fp| self.parse_file(fp, src_root))
+                .reduce(ParseResult::new, |mut acc, r| {
+                    acc.merge(r);
+                    acc
+                })
+        })
+    }
+
+    /// Parse every matching file under `src_root`. Convenience wrapper that
+    /// walks the tree and delegates to `parse_files`. Build-time orchestrator
+    /// uses a single shared walk instead — this entry point is kept for
+    /// callers that want to parse a single language end-to-end.
     fn parse_directory(&self, src_root: &Path, verbose: bool) -> ParseResult {
         let files: Vec<PathBuf> = WalkDir::new(src_root)
             .into_iter()
@@ -87,13 +131,7 @@ pub trait LanguageParser: Sync {
         if verbose {
             eprintln!("  Found {} {} files", files.len(), self.language_name());
         }
-        files
-            .par_iter()
-            .map(|fp| self.parse_file(fp, src_root))
-            .reduce(ParseResult::new, |mut acc, r| {
-                acc.merge(r);
-                acc
-            })
+        self.parse_files(&files, src_root)
     }
 }
 

@@ -174,7 +174,7 @@ fn modules_df(modules: &[ModuleRecord]) -> DataFrame {
     ])
 }
 
-fn functions_df(fns: &[FunctionInfo]) -> DataFrame {
+fn functions_df(fns: &[FunctionInfo], file_is_test: &HashMap<&str, bool>) -> DataFrame {
     build_df(vec![
         (
             "qualified_name",
@@ -254,7 +254,17 @@ fn functions_df(fns: &[FunctionInfo]) -> DataFrame {
         (
             "is_test",
             ColumnType::Boolean,
-            bool_col(fns.iter().map(|f| Some(meta_bool(f, "is_test"))).collect()),
+            bool_col(
+                fns.iter()
+                    .map(|f| {
+                        let in_test_file = file_is_test
+                            .get(f.file_path.as_str())
+                            .copied()
+                            .unwrap_or(false);
+                        Some(meta_bool(f, "is_test") || in_test_file)
+                    })
+                    .collect(),
+            ),
         ),
         (
             "is_pymethod",
@@ -831,16 +841,20 @@ pub struct DefinesEdge {
 
 fn defines_edges(result: &ParseResult) -> Vec<DefinesEdge> {
     let mut out = Vec::new();
-    // File DEFINES Function (top-level)
+    // File DEFINES Function — every function the file textually defines,
+    // including class methods. The previous `if !is_method` filter dropped
+    // every C# method (the language has no top-level functions), so 305k+
+    // method nodes carried no DEFINES edge from a File and looked like
+    // "external stubs" to any query that joined through File. The
+    // logical Class -[HAS_METHOD]-> Function edge is still emitted
+    // separately by the type-edge builder.
     for f in &result.functions {
-        if !f.is_method {
-            out.push(DefinesEdge {
-                source_type: "File".into(),
-                source_id: f.file_path.clone(),
-                target_type: "Function".into(),
-                target_id: f.qualified_name.clone(),
-            });
-        }
+        out.push(DefinesEdge {
+            source_type: "File".into(),
+            source_id: f.file_path.clone(),
+            target_type: "Function".into(),
+            target_id: f.qualified_name.clone(),
+        });
     }
     // File DEFINES Class / Struct / Enum / Interface / Protocol / Trait / Constant
     for c in &result.classes {
@@ -1096,9 +1110,14 @@ pub fn load_into_graph(
         .map_err(py_err)?;
     }
     if !result.functions.is_empty() {
+        let file_is_test: HashMap<&str, bool> = result
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.is_test))
+            .collect();
         maintain::add_nodes(
             graph,
-            functions_df(&result.functions),
+            functions_df(&result.functions, &file_is_test),
             "Function".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1200,11 +1219,10 @@ pub fn load_into_graph(
     mark(t_nodes, "nodes");
     let t_typeedges = std::time::Instant::now();
     // ── Type-relationship-derived external stubs (before HAS_METHOD/IMPLEMENTS use them) ─
-    // Build name → qname lookup for resolve() in type_edges.
-    let known_interfaces: std::collections::HashSet<String> =
-        result.interfaces.iter().map(|i| i.name.clone()).collect();
-    let known_classes_set: std::collections::HashSet<String> =
-        result.classes.iter().map(|c| c.name.clone()).collect();
+    // `name_to_qname` is the legacy first-match lookup, retained for the
+    // HAS_METHOD owner-resolution helpers; `build_type_edges` now also
+    // consults file-level imports and per-type kind, so interface targets
+    // route to Interface nodes even when an unrelated class shares the name.
     let mut name_to_qname: HashMap<String, String> = HashMap::new();
     for c in &result.classes {
         name_to_qname.insert(c.name.clone(), c.qualified_name.clone());
@@ -1218,8 +1236,9 @@ pub fn load_into_graph(
 
     let type_out = super::type_edges::build_type_edges(
         &result.type_relationships,
-        &known_interfaces,
-        &known_classes_set,
+        &result.files,
+        &result.classes,
+        &result.interfaces,
         &mut name_to_qname,
     );
 
@@ -1435,7 +1454,8 @@ pub fn load_into_graph(
     for name in super::super::parsers::cpp::CPP_NOISE_NAMES {
         noise.insert(*name);
     }
-    let call_edges = super::call_edges::build_call_edges(&result.functions, &noise, 5);
+    let call_edges =
+        super::call_edges::build_call_edges(&result.functions, &result.files, &noise, 5);
     if !call_edges.is_empty() {
         maintain::add_connections(
             graph,

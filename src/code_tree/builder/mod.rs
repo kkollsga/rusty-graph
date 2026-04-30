@@ -6,10 +6,12 @@ pub mod other_edges;
 pub mod type_edges;
 
 use crate::code_tree::models::ParseResult;
-use crate::code_tree::parsers::{detect_languages, get_parser};
+use crate::code_tree::parsers::{detect_languages, get_parser, language_for_path};
 use crate::graph::KnowledgeGraph;
 use pyo3::PyResult;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// Full `build()` entry point matching the Python API.
 ///
@@ -120,16 +122,48 @@ pub fn run_with_options(
 }
 
 fn parse_directory(dir: &Path, verbose: bool) -> ParseResult {
-    let mut combined = ParseResult::new();
-    let languages = detect_languages(dir);
-    if verbose {
-        eprintln!("  Detected languages in {}: {:?}", dir.display(), languages);
+    // One walk, partition by language. The previous implementation walked
+    // `dir` once for `detect_languages` and again per-language inside each
+    // parser's `parse_directory` — N+1 traversals of the same tree. On
+    // dotnet/runtime that was 8 walks of 57k entries; consolidating shaves
+    // ~1–2s off the parse phase before any per-file work begins.
+    let t_walk = std::time::Instant::now();
+    let mut by_lang: BTreeMap<&'static str, Vec<PathBuf>> = BTreeMap::new();
+    for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Some(lang) = language_for_path(entry.path()) {
+            by_lang
+                .entry(lang)
+                .or_default()
+                .push(entry.path().to_path_buf());
+        }
     }
-    for lang in languages {
+    if verbose {
+        let langs: Vec<&'static str> = by_lang.keys().copied().collect();
+        eprintln!("  Detected languages in {}: {:?}", dir.display(), langs);
+        for lang in &langs {
+            eprintln!("  Found {} {} files", by_lang[lang].len(), lang);
+        }
+        eprintln!("[timing] walk: {:.3}s", t_walk.elapsed().as_secs_f64());
+    }
+
+    let mut combined = ParseResult::new();
+    for (lang, files) in by_lang {
         let Some(parser) = get_parser(lang) else {
             continue;
         };
-        let result = parser.parse_directory(dir, verbose);
+        let t_lang = std::time::Instant::now();
+        let result = parser.parse_files(&files, dir);
+        if verbose {
+            eprintln!(
+                "[timing] parse {}: {:.3}s ({} files)",
+                lang,
+                t_lang.elapsed().as_secs_f64(),
+                files.len()
+            );
+        }
         combined.merge(result);
     }
     combined
@@ -172,9 +206,16 @@ fn finalize_and_load(
     }
 
     if let Some(dest) = save_to {
+        // Mirror the prep that `KnowledgeGraph.save()` does — without these
+        // steps, property column stores aren't materialised before
+        // serialisation and only `id`/`title`/`type` survive the round-trip.
+        let mut graph = graph;
+        crate::graph::io::file::prepare_save(&mut graph.inner);
+        std::sync::Arc::make_mut(&mut graph.inner).enable_columnar();
         let dest_str = dest.to_string_lossy();
         crate::graph::io::file::write_graph_v3(&graph.inner, &dest_str)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        return Ok(graph);
     }
     Ok(graph)
 }

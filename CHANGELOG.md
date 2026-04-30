@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.34] — 2026-05-01
+
+### Code-tree graph quality
+
+- **`File DEFINES Function` now includes methods.** The previous
+  `if !is_method` filter dropped every C# method (the language has no
+  top-level functions), so an entire codebase of methods looked
+  edge-less when joined through File. Class HAS_METHOD edges still
+  carry the logical hierarchy.
+- **Kind-aware target resolution for IMPLEMENTS / EXTENDS.** When a
+  bare base-type name matches multiple namespaces, `implements` now
+  prefers Interface candidates and `extends` prefers class-like
+  candidates. On dotnet/runtime the `Class -[IMPLEMENTS]-> Class`
+  noise (mis-typed because of name collisions) dropped from 1,869 to
+  90 rows, while the correct `Class -[IMPLEMENTS]-> Interface` rows
+  rose from 447 to 7,696.
+- **Auto-reroute `extends → implements` when the target is an
+  Interface.** Fixes the C# parser's "first base is always extends"
+  assumption for `class Foo : IDisposable` (no base class).
+- **`using`-directive scope as a CALLS resolution tier.** Calls like
+  `Assert.True` now pin to the `Assert` class actually imported by
+  the caller's file. On dotnet/runtime, `Xunit.Assert.True` collapses
+  from four collision-cloned entries (~11 k each, false equals) to a
+  single 11 k entry; `IDisposable` implementer count goes from 0 to
+  236, `IEnumerable<T>` from 0 to 305, `IEquatable` from 0 to 469.
+- **C# `get_base_types` captures every secondary base.** The hardcoded
+  list of accepted node kinds dropped any base type whose grammar
+  kind wasn't on it (in practice every base after the first), so
+  `class Foo : Bar, IDisposable` lost the IDisposable edge entirely.
+- **C# generic args are stripped from base type names** so
+  `IEnumerable<int>` resolves against the `IEnumerable` index entry.
+- **`is_test` propagates from File to defined Functions.** Previously
+  `meta_bool(f, "is_test")` returned `false` for every Function in
+  every language except Rust `#[test]`, so the codebase-level test
+  filter was unusable.
+- **`build(save_to=...)` now persists the full property graph.** The
+  build path skipped the `prepare_save` + `enable_columnar` steps
+  `KnowledgeGraph.save()` does, so everything except `id`/`title`/
+  `type` was stripped from the file. Round-tripped graphs now match
+  in-memory ones.
+
+### Performance
+
+- `code_tree.build` is ~15% faster on polyglot codebases. Two changes:
+  the orchestrator walks the source tree once and partitions files by
+  language instead of re-walking per parser (was N+1 traversals — 8 walks
+  of ~57k entries on dotnet/runtime); and a byte-level aho-corasick
+  pre-check skips the full-AST comment walk for files that contain no
+  TODO/FIXME/HACK/etc. keywords at all (the vast majority). On
+  dotnet/runtime: 20.3 s → 17.4 s wall-clock, mostly from the C# parse
+  phase (12.8 s → 11.2 s).
+- New per-language and per-phase timings printed under `verbose=True`.
+
+### Fixed
+
+- `code_tree.build` no longer SIGBUSes on deeply-nested expressions in
+  source files (e.g. dotnet/runtime's `JIT/Regression/JitBlue/GitHub_10215.cs`,
+  a regression test that is literally a chain of thousands of `+`
+  operators). Tree-sitter is recursive-descent and was overflowing the
+  rayon worker thread stack (~2 MB on macOS); parsers now share a
+  dedicated rayon pool with a 16 MB stack, so pathological-but-valid
+  inputs parse cleanly across all languages.
+
 ## [0.8.33] — 2026-04-30
 
 ### Tooling

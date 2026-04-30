@@ -1,8 +1,13 @@
-//! CALLS edge resolution — 5-tier scope-aware name matching.
+//! CALLS edge resolution — scope-aware name matching with import context.
 //!
-//! Ported from builder.py::_build_call_edges.
+//! Ported from builder.py::_build_call_edges, then extended with a
+//! namespace-import tier so that languages with explicit `using`/`import`
+//! directives (C#, Java, TS, Python, Go) disambiguate same-named symbols
+//! across namespaces. On dotnet/runtime this lifts CALLS resolution from
+//! ~9% to a meaningfully higher rate by pinning calls like
+//! `Assert.True` to the Assert class actually imported by the caller.
 
-use crate::code_tree::models::FunctionInfo;
+use crate::code_tree::models::{FileInfo, FunctionInfo};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -13,6 +18,26 @@ pub struct CallEdge {
     /// Comma-separated sorted unique line numbers.
     pub call_lines: String,
     pub call_count: i64,
+}
+
+/// True if `qname` lives under any of the namespace prefixes in `scopes`.
+/// A "lives under" match requires `qname` to start with `scope` followed by
+/// a `.` or `::` separator — `System` matches `System.IO.Stream` but not
+/// `Systemic`.
+fn qname_starts_with_any(qname: &str, scopes: &[String]) -> bool {
+    for scope in scopes {
+        if scope.is_empty() {
+            continue;
+        }
+        if qname.len() > scope.len()
+            && qname.starts_with(scope.as_str())
+            && (qname.as_bytes()[scope.len()] == b'.'
+                || (qname.len() > scope.len() + 1 && &qname[scope.len()..scope.len() + 2] == "::"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn infer_lang_group(qname: &str) -> &'static str {
@@ -39,6 +64,7 @@ fn infer_lang_group(qname: &str) -> &'static str {
 /// ambiguous.
 pub fn build_call_edges(
     functions: &[FunctionInfo],
+    files: &[FileInfo],
     excluded_names: &std::collections::HashSet<&str>,
     max_targets: usize,
 ) -> Vec<CallEdge> {
@@ -81,6 +107,14 @@ pub fn build_call_edges(
     let qname_to_file: HashMap<&str, &str> = functions
         .iter()
         .map(|f| (f.qualified_name.as_str(), f.file_path.as_str()))
+        .collect();
+
+    // file_path → imported namespace prefixes. Empty for files whose
+    // language doesn't track imports as namespace names.
+    let file_imports: HashMap<&str, &Vec<String>> = files
+        .iter()
+        .filter(|f| !f.imports.is_empty())
+        .map(|f| (f.path.as_str(), &f.imports))
         .collect();
 
     if verbose {
@@ -162,6 +196,26 @@ pub fn build_call_edges(
                             .iter()
                             .copied()
                             .filter(|t| qname_to_prefix.get(t).copied() == Some(prefix))
+                            .collect();
+                        if !narrowed.is_empty() {
+                            filtered = narrowed;
+                            targets = &filtered[..];
+                        }
+                    }
+                }
+
+                // Tier 2.5: namespace-import scope. Prefer candidates whose
+                // qname lives under a namespace the caller's file imports
+                // (or under the caller's own namespace). Critical for
+                // disambiguating `Assert.True` across xunit / fluentassertions
+                // / project-local assertion helpers — the caller's `using`
+                // list pins the correct one.
+                if targets.len() > 1 {
+                    if let Some(imports) = file_imports.get(caller_file) {
+                        let narrowed: Vec<&str> = targets
+                            .iter()
+                            .copied()
+                            .filter(|t| qname_starts_with_any(t, imports))
                             .collect();
                         if !narrowed.is_empty() {
                             filtered = narrowed;
