@@ -535,13 +535,11 @@ fn build_test_graph() -> DirGraph {
     let bob_idx = graph.graph.add_node(bob);
     graph
         .type_indices
-        .entry("Person".to_string())
-        .or_default()
+        .entry_or_default("Person".to_string())
         .push(alice_idx);
     graph
         .type_indices
-        .entry("Person".to_string())
-        .or_default()
+        .entry_or_default("Person".to_string())
         .push(bob_idx);
 
     let edge = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut graph.interner);
@@ -821,8 +819,7 @@ fn test_delete_node_no_edges() {
     let idx = graph.graph.add_node(node);
     graph
         .type_indices
-        .entry("Person".to_string())
-        .or_default()
+        .entry_or_default("Person".to_string())
         .push(idx);
 
     let query =
@@ -1088,7 +1085,7 @@ fn test_self_loop_pattern_same_variable() {
     // Build graph manually: Alice -KNOWS-> Bob, Alice -KNOWS-> Alice (self-loop)
     let mut graph = build_test_graph(); // Alice -> Bob via KNOWS
                                         // Add self-loop: Alice -> Alice
-    let alice_idx = graph.type_indices["Person"][0];
+    let alice_idx = graph.type_indices.get("Person").unwrap().get(0).unwrap();
     let self_edge = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut graph.interner);
     graph.graph.add_edge(alice_idx, alice_idx, self_edge);
 

@@ -191,7 +191,7 @@ impl BatchProcessor {
             for node_type in &affected_types {
                 // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
                 if let Some(indices) = graph.type_indices.get(node_type) {
-                    for &idx in indices {
+                    for idx in indices.iter() {
                         if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
                             if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
                                 let rid = *row_id;
@@ -312,13 +312,11 @@ impl BatchProcessor {
 
             graph
                 .type_indices
-                .entry(creation.node_type)
-                .or_default()
+                .entry_or_default(creation.node_type)
                 .push(node_idx);
             graph
                 .id_indices
-                .entry(node_type_for_index)
-                .or_default()
+                .entry_or_default(node_type_for_index)
                 .insert(id_for_index, node_idx);
             stats.creates += 1;
         }

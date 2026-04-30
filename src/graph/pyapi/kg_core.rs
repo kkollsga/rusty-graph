@@ -316,7 +316,7 @@ impl KnowledgeGraph {
             let type_indices = self.inner.type_indices.get(&nt).ok_or_else(|| {
                 pyo3::exceptions::PyKeyError::new_err(format!("Node type '{}' not found", nt))
             })?;
-            let indices: Vec<_> = type_indices.iter().copied().take(count).collect();
+            let indices: Vec<_> = type_indices.iter().take(count).collect();
             let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
                 &self.inner,
                 &indices,

@@ -56,7 +56,7 @@ impl<'a> CypherExecutor<'a> {
         // Build the R-tree entries. Skip containers without parsed geometry
         // or without a computable bbox.
         let mut entries: Vec<IndexedContainer> = Vec::with_capacity(container_indices.len());
-        for &idx in container_indices {
+        for idx in container_indices.iter() {
             self.ensure_node_spatial_cached(idx);
             let cache = self.spatial_node_cache.read().unwrap();
             if let Some(Some(data)) = cache.get(&idx.index()) {
@@ -80,7 +80,7 @@ impl<'a> CypherExecutor<'a> {
 
         let mut rows: Vec<ResultRow> = Vec::new();
 
-        for (probe_i, &probe_idx) in probe_indices.iter().enumerate() {
+        for (probe_i, probe_idx) in probe_indices.iter().enumerate() {
             self.ensure_node_spatial_cached(probe_idx);
             let (lat, lon) = {
                 let cache = self.spatial_node_cache.read().unwrap();

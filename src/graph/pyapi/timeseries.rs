@@ -519,7 +519,7 @@ fn parse_keys_from_python(keys: &Bound<'_, PyAny>) -> PyResult<Vec<NaiveDate>> {
 
 /// Find a node by its ID value, scanning all type indices (mutable).
 fn find_node_by_id(graph: &mut DirGraph, id: &Value) -> PyResult<NodeIndex> {
-    let types: Vec<String> = graph.type_indices.keys().cloned().collect();
+    let types: Vec<String> = graph.type_indices.keys().map(|s| s.to_string()).collect();
     for nt in &types {
         graph.build_id_index(nt);
         if let Some(idx) = graph.lookup_by_id_normalized(nt, id) {

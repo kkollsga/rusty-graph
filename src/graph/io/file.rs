@@ -198,8 +198,21 @@ impl FileMetadata {
         }
     }
 
-    /// Apply metadata fields to a DirGraph during load.
+    /// Apply metadata fields to a DirGraph during load. Equivalent to
+    /// `apply_to_with(graph, true)` — preserved for the in-memory `.kgl`
+    /// load path that doesn't have a separate `type_connectivity.bin.zst`.
+    #[allow(dead_code)]
     pub(crate) fn apply_to(self, graph: &mut DirGraph) {
+        self.apply_to_with(graph, true)
+    }
+
+    /// Apply metadata fields with control over the type-connectivity
+    /// derive fallback. Disk loaders pass `derive_type_connectivity=false`
+    /// when a dedicated `type_connectivity.bin.zst` will populate the
+    /// cache below — the cartesian-product derive over
+    /// `connection_type_metadata` clones millions of String triples on
+    /// large graphs and dominated load time before this gate.
+    pub(crate) fn apply_to_with(self, graph: &mut DirGraph, derive_type_connectivity: bool) {
         graph.schema_definition = self.schema_definition;
         graph.property_index_keys = self.property_index_keys;
         graph.composite_index_keys = self.composite_index_keys;
@@ -225,7 +238,7 @@ impl FileMetadata {
         // Restore type connectivity cache if persisted
         if let Some(triples) = self.type_connectivity {
             *graph.type_connectivity_cache.write().unwrap() = Some(triples);
-        } else if !graph.connection_type_metadata.is_empty() {
+        } else if derive_type_connectivity && !graph.connection_type_metadata.is_empty() {
             // Derive type connectivity from connection_type_metadata (instant, no I/O).
             // This covers older graphs that don't have persisted type_connectivity.
             let edge_counts = graph.edge_type_counts_cache.read().unwrap();
@@ -265,6 +278,272 @@ pub(crate) fn strip_type_connectivity(meta: &mut FileMetadata) {
     meta.type_connectivity = None;
 }
 
+/// Strip the two heavy HashMap fields from FileMetadata so the disk-mode
+/// save path can emit them into dedicated binary sidecars. On
+/// slice-built Wikidata graphs with 30K-50K node types, parsing these
+/// fields out of `metadata.json` cost 4-5 seconds; the binary form
+/// loads in <100 ms.
+pub(crate) fn strip_heavy_metadata(meta: &mut FileMetadata) {
+    meta.node_type_metadata.clear();
+    meta.connection_type_metadata.clear();
+}
+
+// ─── node_type_metadata.bin.zst (0.8.28 fast-load) ───────────────────────────
+//
+// Replaces ~50% of `metadata.json` parse cost on slice-built graphs. The
+// field is HashMap<String, HashMap<String, String>> = {type_name:
+// {prop_name: prop_type_str}}. JSON parses 50K outer × 3 inner entries
+// in ~2 s; the packed binary parses the same payload in <50 ms.
+//
+// Payload (pre-zstd):
+//   [ 0.. 8]  magic       = b"KGLNTM1\0"
+//   [ 8..12]  version     = u32 LE (= 1)
+//   [12..16]  num_types   = u32 LE
+//   per type (repeated num_types times):
+//     name_len:    u32 LE
+//     name:        [u8; name_len]   (UTF-8)
+//     num_props:   u32 LE
+//     per prop:
+//       prop_name_len: u32 LE
+//       prop_name:     [u8; prop_name_len]   (UTF-8)
+//       prop_type_len: u32 LE
+//       prop_type:     [u8; prop_type_len]   (UTF-8)
+
+const NODE_TYPE_META_MAGIC: &[u8; 8] = b"KGLNTM1\0";
+const NODE_TYPE_META_VERSION: u32 = 1;
+
+pub(crate) fn write_node_type_metadata_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    if graph.node_type_metadata.is_empty() {
+        return Ok(());
+    }
+
+    // Sort entries deterministically so re-saves produce byte-identical
+    // files for clean diffs.
+    let mut entries: Vec<(&String, &HashMap<String, String>)> =
+        graph.node_type_metadata.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
+    payload.extend_from_slice(NODE_TYPE_META_MAGIC);
+    payload.extend_from_slice(&NODE_TYPE_META_VERSION.to_le_bytes());
+    payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+
+    for (type_name, props) in entries {
+        payload.extend_from_slice(&(type_name.len() as u32).to_le_bytes());
+        payload.extend_from_slice(type_name.as_bytes());
+
+        let mut prop_pairs: Vec<(&String, &String)> = props.iter().collect();
+        prop_pairs.sort_by(|a, b| a.0.cmp(b.0));
+        payload.extend_from_slice(&(prop_pairs.len() as u32).to_le_bytes());
+        for (k, v) in prop_pairs {
+            payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            payload.extend_from_slice(k.as_bytes());
+            payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            payload.extend_from_slice(v.as_bytes());
+        }
+    }
+
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("node_type_metadata compression failed: {}", e))?;
+    std::fs::write(dir.join("node_type_metadata.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write node_type_metadata.bin.zst: {}", e))?;
+    Ok(())
+}
+
+pub(crate) fn read_node_type_metadata_bin(
+    dir: &std::path::Path,
+) -> io::Result<Option<HashMap<String, HashMap<String, String>>>> {
+    let path = dir.join("node_type_metadata.bin.zst");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let compressed = std::fs::read(&path)?;
+    let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    if bytes.len() < 16 || &bytes[..8] != NODE_TYPE_META_MAGIC {
+        return Ok(None);
+    }
+    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    if version != NODE_TYPE_META_VERSION {
+        return Ok(None);
+    }
+    let num_types = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+
+    let mut out = HashMap::with_capacity(num_types);
+    let mut cursor = 16usize;
+    for _ in 0..num_types {
+        let name = read_lp_string(&bytes, &mut cursor)?;
+        let num_props = read_u32(&bytes, &mut cursor)? as usize;
+        let mut props = HashMap::with_capacity(num_props);
+        for _ in 0..num_props {
+            let k = read_lp_string(&bytes, &mut cursor)?;
+            let v = read_lp_string(&bytes, &mut cursor)?;
+            props.insert(k, v);
+        }
+        out.insert(name, props);
+    }
+    Ok(Some(out))
+}
+
+// ─── connection_type_metadata.bin.zst (0.8.28 fast-load) ──────────────────────
+//
+// Replaces ~40% of `metadata.json` parse cost. Field is
+// HashMap<String, ConnectionTypeInfo>. ConnectionTypeInfo carries
+// source_types/target_types HashSets plus a property_types map.
+//
+// Payload (pre-zstd):
+//   [ 0.. 8]  magic       = b"KGLCTM1\0"
+//   [ 8..12]  version     = u32 LE (= 1)
+//   [12..16]  num_conns   = u32 LE
+//   per conn (repeated num_conns times):
+//     name_len:    u32, name: [u8]
+//     num_sources: u32, then (name_len + name) × num_sources
+//     num_targets: u32, then (name_len + name) × num_targets
+//     num_props:   u32, then (k_len + k + v_len + v) × num_props
+
+const CONN_TYPE_META_MAGIC: &[u8; 8] = b"KGLCTM1\0";
+const CONN_TYPE_META_VERSION: u32 = 1;
+
+pub(crate) fn write_connection_type_metadata_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    use crate::graph::schema::ConnectionTypeInfo;
+    if graph.connection_type_metadata.is_empty() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<(&String, &ConnectionTypeInfo)> =
+        graph.connection_type_metadata.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
+    payload.extend_from_slice(CONN_TYPE_META_MAGIC);
+    payload.extend_from_slice(&CONN_TYPE_META_VERSION.to_le_bytes());
+    payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+
+    for (conn_name, info) in entries {
+        payload.extend_from_slice(&(conn_name.len() as u32).to_le_bytes());
+        payload.extend_from_slice(conn_name.as_bytes());
+
+        let mut sources: Vec<&String> = info.source_types.iter().collect();
+        sources.sort();
+        payload.extend_from_slice(&(sources.len() as u32).to_le_bytes());
+        for s in sources {
+            payload.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            payload.extend_from_slice(s.as_bytes());
+        }
+
+        let mut targets: Vec<&String> = info.target_types.iter().collect();
+        targets.sort();
+        payload.extend_from_slice(&(targets.len() as u32).to_le_bytes());
+        for t in targets {
+            payload.extend_from_slice(&(t.len() as u32).to_le_bytes());
+            payload.extend_from_slice(t.as_bytes());
+        }
+
+        let mut props: Vec<(&String, &String)> = info.property_types.iter().collect();
+        props.sort_by(|a, b| a.0.cmp(b.0));
+        payload.extend_from_slice(&(props.len() as u32).to_le_bytes());
+        for (k, v) in props {
+            payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            payload.extend_from_slice(k.as_bytes());
+            payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            payload.extend_from_slice(v.as_bytes());
+        }
+    }
+
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("connection_type_metadata compression failed: {}", e))?;
+    std::fs::write(dir.join("connection_type_metadata.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write connection_type_metadata.bin.zst: {}", e))?;
+    Ok(())
+}
+
+pub(crate) fn read_connection_type_metadata_bin(
+    dir: &std::path::Path,
+) -> io::Result<Option<HashMap<String, crate::graph::schema::ConnectionTypeInfo>>> {
+    use crate::graph::schema::ConnectionTypeInfo;
+    let path = dir.join("connection_type_metadata.bin.zst");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let compressed = std::fs::read(&path)?;
+    let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    if bytes.len() < 16 || &bytes[..8] != CONN_TYPE_META_MAGIC {
+        return Ok(None);
+    }
+    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    if version != CONN_TYPE_META_VERSION {
+        return Ok(None);
+    }
+    let num_conns = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+
+    let mut out = HashMap::with_capacity(num_conns);
+    let mut cursor = 16usize;
+    for _ in 0..num_conns {
+        let name = read_lp_string(&bytes, &mut cursor)?;
+        let num_sources = read_u32(&bytes, &mut cursor)? as usize;
+        let mut source_types = std::collections::HashSet::with_capacity(num_sources);
+        for _ in 0..num_sources {
+            source_types.insert(read_lp_string(&bytes, &mut cursor)?);
+        }
+        let num_targets = read_u32(&bytes, &mut cursor)? as usize;
+        let mut target_types = std::collections::HashSet::with_capacity(num_targets);
+        for _ in 0..num_targets {
+            target_types.insert(read_lp_string(&bytes, &mut cursor)?);
+        }
+        let num_props = read_u32(&bytes, &mut cursor)? as usize;
+        let mut property_types = HashMap::with_capacity(num_props);
+        for _ in 0..num_props {
+            let k = read_lp_string(&bytes, &mut cursor)?;
+            let v = read_lp_string(&bytes, &mut cursor)?;
+            property_types.insert(k, v);
+        }
+        out.insert(
+            name,
+            ConnectionTypeInfo {
+                source_types,
+                target_types,
+                property_types,
+            },
+        );
+    }
+    Ok(Some(out))
+}
+
+// Helpers for length-prefixed string + u32 reads.
+#[inline]
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> io::Result<u32> {
+    if *cursor + 4 > bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "metadata sidecar truncated",
+        ));
+    }
+    let v = u32::from_le_bytes(bytes[*cursor..*cursor + 4].try_into().unwrap());
+    *cursor += 4;
+    Ok(v)
+}
+
+#[inline]
+fn read_lp_string(bytes: &[u8], cursor: &mut usize) -> io::Result<String> {
+    let len = read_u32(bytes, cursor)? as usize;
+    if *cursor + len > bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "metadata sidecar string truncated",
+        ));
+    }
+    let s = std::str::from_utf8(&bytes[*cursor..*cursor + len])
+        .map_err(io::Error::other)?
+        .to_string();
+    *cursor += len;
+    Ok(s)
+}
+
 // ─── type_indices.bin.zst (0.8.13 fast-load) ─────────────────────────────────
 //
 // Replaces a bincode-serialised `HashMap<String, Vec<NodeIndex>>` with a
@@ -290,58 +569,6 @@ pub(crate) fn strip_type_connectivity(meta: &mut FileMetadata) {
 
 const TYPE_INDICES_MAGIC: &[u8; 8] = b"KGLTIDX1";
 const TYPE_INDICES_VERSION: u32 = 1;
-
-/// Writer for `type_indices.bin.zst` in the new flat-CSR format.
-pub(crate) fn write_type_indices_bin(
-    dir: &std::path::Path,
-    graph: &DirGraph,
-) -> Result<(), String> {
-    let type_indices = &graph.type_indices;
-    // Sort type names by interner key for deterministic layout.
-    let mut entries: Vec<(u64, &String, &Vec<petgraph::graph::NodeIndex>)> =
-        Vec::with_capacity(type_indices.len());
-    let mut interner = graph.interner.clone();
-    for (name, nodes) in type_indices {
-        let key = interner.get_or_intern(name).as_u64();
-        entries.push((key, name, nodes));
-    }
-    entries.sort_by_key(|(k, _, _)| *k);
-
-    let num_types = entries.len() as u32;
-    let total_nodes: usize = entries.iter().map(|(_, _, v)| v.len()).sum();
-    let header_size = 24usize;
-    let type_keys_size = 8 * num_types as usize;
-    let offsets_size = 8 * (num_types as usize + 1);
-    let nodes_size = 4 * total_nodes;
-    let mut payload: Vec<u8> =
-        Vec::with_capacity(header_size + type_keys_size + offsets_size + nodes_size);
-
-    payload.extend_from_slice(TYPE_INDICES_MAGIC);
-    payload.extend_from_slice(&TYPE_INDICES_VERSION.to_le_bytes());
-    payload.extend_from_slice(&num_types.to_le_bytes());
-    payload.extend_from_slice(&(total_nodes as u64).to_le_bytes());
-
-    for (k, _, _) in &entries {
-        payload.extend_from_slice(&k.to_le_bytes());
-    }
-    let mut cum: u64 = 0;
-    payload.extend_from_slice(&cum.to_le_bytes());
-    for (_, _, v) in &entries {
-        cum += v.len() as u64;
-        payload.extend_from_slice(&cum.to_le_bytes());
-    }
-    for (_, _, v) in &entries {
-        for n in v.iter() {
-            payload.extend_from_slice(&(n.index() as u32).to_le_bytes());
-        }
-    }
-
-    let compressed = zstd::encode_all(payload.as_slice(), 3)
-        .map_err(|e| format!("type_indices compression failed: {}", e))?;
-    std::fs::write(dir.join("type_indices.bin.zst"), compressed)
-        .map_err(|e| format!("Failed to write type_indices.bin.zst: {}", e))?;
-    Ok(())
-}
 
 /// Reader for `type_indices.bin.zst` in the new flat-CSR format.
 /// Returns `Ok(None)` if the payload does not start with the
@@ -434,87 +661,14 @@ pub(crate) fn read_interner_bin(dir: &std::path::Path, graph: &mut DirGraph) -> 
     Ok(true)
 }
 
-// ─── id_indices.bin.zst (0.8.13 fast-load) ───────────────────────────────────
+// ─── id_indices.bin.zst legacy reader ─────────────────────────────────────
 //
-// Replaces bincode `HashMap<String, TypeIdIndex>` with per-variant
-// flat blocks keyed by interner hashes. `TypeIdIndex::Integer` becomes
-// two u32-packed arrays; `TypeIdIndex::General` keeps a
-// length-prefixed bincode blob (used only for mixed-id graphs).
-//
-// Payload (pre-zstd):
-//   [ 0.. 8]  magic     = b"KGLIIDX1"
-//   [ 8..12]  version   = u32 LE (= 1)
-//   [12..16]  num_types = u32 LE
-//   per-type block (repeated num_types times, 8-aligned on each start):
-//     [ 0.. 8]  type_key:    u64 LE   (InternedKey)
-//     [ 8.. 9]  variant_tag: u8       (0 = Integer, 1 = General)
-//     [ 9..16]  padding:     [u8; 7]
-//     [16..24]  num_entries: u64 LE
-//     payload:
-//       Integer (tag=0):
-//         keys:      [u32; num_entries]
-//         node_idxs: [u32; num_entries]
-//       General (tag=1):
-//         blob_len: u64 LE
-//         blob:     [u8; blob_len]   (bincode of HashMap<Value, NodeIndex>)
+// Read-only fallback for graphs saved by 0.8.13–0.8.27. Fresh saves use
+// the mmap-resident `id_indices.bin` raw layout from
+// `storage/disk/id_index.rs::write_id_indices_bin`.
 
 const ID_INDICES_MAGIC: &[u8; 8] = b"KGLIIDX1";
 const ID_INDICES_VERSION: u32 = 1;
-
-pub(crate) fn write_id_indices_bin(dir: &std::path::Path, graph: &DirGraph) -> Result<(), String> {
-    use crate::graph::schema::TypeIdIndex;
-
-    let id_indices = &graph.id_indices;
-    // Sort by interner key for deterministic output.
-    let mut interner = graph.interner.clone();
-    let mut entries: Vec<(u64, &String, &TypeIdIndex)> = id_indices
-        .iter()
-        .map(|(name, idx)| (interner.get_or_intern(name).as_u64(), name, idx))
-        .collect();
-    entries.sort_by_key(|(k, _, _)| *k);
-
-    let num_types = entries.len() as u32;
-    let mut payload: Vec<u8> = Vec::new();
-    payload.extend_from_slice(ID_INDICES_MAGIC);
-    payload.extend_from_slice(&ID_INDICES_VERSION.to_le_bytes());
-    payload.extend_from_slice(&num_types.to_le_bytes());
-
-    for (type_key, _, idx) in entries {
-        payload.extend_from_slice(&type_key.to_le_bytes());
-        match idx {
-            TypeIdIndex::Integer(map) => {
-                payload.push(0u8);
-                payload.extend_from_slice(&[0u8; 7]);
-                payload.extend_from_slice(&(map.len() as u64).to_le_bytes());
-                // Sort for deterministic output; id_indices.bin.zst is
-                // the stable canonical form, saves reload-diff churn.
-                let mut pairs: Vec<(&u32, &petgraph::graph::NodeIndex)> = map.iter().collect();
-                pairs.sort_by_key(|(k, _)| **k);
-                for (k, _) in &pairs {
-                    payload.extend_from_slice(&k.to_le_bytes());
-                }
-                for (_, v) in &pairs {
-                    payload.extend_from_slice(&(v.index() as u32).to_le_bytes());
-                }
-            }
-            TypeIdIndex::General(map) => {
-                payload.push(1u8);
-                payload.extend_from_slice(&[0u8; 7]);
-                payload.extend_from_slice(&(map.len() as u64).to_le_bytes());
-                let blob = bincode::serialize(map)
-                    .map_err(|e| format!("id_indices General-variant bincode failed: {}", e))?;
-                payload.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-                payload.extend_from_slice(&blob);
-            }
-        }
-    }
-
-    let compressed = zstd::encode_all(payload.as_slice(), 3)
-        .map_err(|e| format!("id_indices compression failed: {}", e))?;
-    std::fs::write(dir.join("id_indices.bin.zst"), compressed)
-        .map_err(|e| format!("Failed to write id_indices.bin.zst: {}", e))?;
-    Ok(())
-}
 
 pub(crate) fn read_id_indices_bin(
     payload: &[u8],
@@ -962,13 +1116,32 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
     let mut graph = DirGraph::new();
 
-    // Load DirGraph metadata
+    // Load DirGraph metadata. The two heavy HashMap fields
+    // (`node_type_metadata`, `connection_type_metadata`) come from
+    // dedicated binary sidecars (0.8.28+) when present — they cost
+    // 4-5 s of JSON parse on slice-built Wikidata graphs with 30K-50K
+    // types, vs <100 ms in the binary form. Older graphs keep the
+    // fields embedded in metadata.json and are picked up by the
+    // standard JSON parse below.
     let t = stage_timer();
     if dir.join("metadata.json").exists() {
-        let meta_str = std::fs::read_to_string(dir.join("metadata.json"))?;
-        let meta: FileMetadata = serde_json::from_str(&meta_str)
+        let meta_bytes = std::fs::read(dir.join("metadata.json"))?;
+        let mut meta: FileMetadata = serde_json::from_slice(&meta_bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        meta.apply_to(&mut graph);
+        if let Some(ntm) = read_node_type_metadata_bin(dir)? {
+            meta.node_type_metadata = ntm;
+        }
+        if let Some(ctm) = read_connection_type_metadata_bin(dir)? {
+            meta.connection_type_metadata = ctm;
+        }
+        // Skip the cartesian-product derive of `type_connectivity` at
+        // load time — on slice-built graphs with populated source/target
+        // sets it clones tens of millions of String triples (4-15 s).
+        // The cache is lazy-populated on first `describe()` access via
+        // the existing `compute_type_connectivity` fallback (see
+        // `introspection/describe.rs`); read sites that miss the cache
+        // already fall through to bounded edge scans.
+        meta.apply_to_with(&mut graph, false);
     }
     log_stage("metadata_json", t);
 
@@ -994,10 +1167,17 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     let t = stage_timer();
     let (disk_graph, temp_dir) =
         crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
-    // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
-    // Non-blocking — kernel reads asynchronously while we continue loading metadata.
-    disk_graph.prefetch_hot_regions();
     log_stage("disk_graph_load", t);
+    // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
+    // On macOS, `madvise(MADV_WILLNEED)` synchronously schedules readahead and
+    // can block in the syscall even on warm pages — costs ~0.5–1s on the
+    // Wikidata graph. Gated by `KGLITE_PREFETCH=1` so callers that want the
+    // first-query latency benefit can opt in. Default off.
+    if std::env::var_os("KGLITE_PREFETCH").is_some() {
+        let t = stage_timer();
+        disk_graph.prefetch_hot_regions();
+        log_stage("prefetch_hot_regions", t);
+    }
     // Phase 5: this is the `.kgl` → `KnowledgeGraph` construction boundary;
     // assembling the backend variant here is analogous to the PyO3 boundary
     // the storage refactor exempts. Stays as an enum literal.
@@ -1010,29 +1190,36 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
     // Load type_indices from disk, or rebuild from node_slots if file missing.
     //
-    // Phase 5: the fallback below reads `dg.node_slots` (a disk-internal mmap
-    // column) directly — no trait surface exposes it. The per-backend
-    // `impl GraphRead for DiskGraph` that Phase 5 adds will let this
-    // scan move into disk-backend code, collapsing the enum pattern. Until
-    // then, `GraphBackend::Disk(ref dg)` destructuring is required.
+    // Format priority:
+    //   1. type_indices.bin   — 0.8.28+ raw mmap-resident layout (lazy reads).
+    //   2. type_indices.bin.zst with KGLTIDX1 magic — 0.8.13 flat-CSR (eager).
+    //   3. type_indices.bin.zst as bincode HashMap — pre-0.8.13 (oldest).
+    //   4. node_slots scan fallback for graphs missing the file entirely.
     let t = stage_timer();
     if let GraphBackend::Disk(ref dg) = graph.graph {
-        let ti_path = dir.join("type_indices.bin.zst");
         let mut loaded = false;
-        if ti_path.exists() {
-            if let Ok(compressed) = std::fs::read(&ti_path) {
-                if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                    // 0.8.13 flat-CSR format first; fall back to bincode
-                    // for graphs saved by 0.8.12 and earlier.
-                    match read_type_indices_bin(&bytes, &graph.interner) {
-                        Ok(Some(indices)) => {
-                            graph.type_indices = indices;
-                            loaded = true;
-                        }
-                        _ => {
-                            if let Ok(indices) = bincode::deserialize(&bytes) {
-                                graph.type_indices = indices;
+        if let Some(base) =
+            crate::graph::storage::disk::type_index::TypeIndexBase::load_from(dir, &graph.interner)?
+        {
+            graph.type_indices =
+                crate::graph::storage::disk::type_index::TypeIndexStore::from_base(base);
+            loaded = true;
+        }
+        if !loaded {
+            let ti_path = dir.join("type_indices.bin.zst");
+            if ti_path.exists() {
+                if let Ok(compressed) = std::fs::read(&ti_path) {
+                    if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                        match read_type_indices_bin(&bytes, &graph.interner) {
+                            Ok(Some(indices)) => {
+                                graph.type_indices.replace_with(indices);
                                 loaded = true;
+                            }
+                            _ => {
+                                if let Ok(indices) = bincode::deserialize(&bytes) {
+                                    graph.type_indices.replace_with(indices);
+                                    loaded = true;
+                                }
                             }
                         }
                     }
@@ -1057,7 +1244,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
                     }
                 }
             }
-            graph.type_indices = new_type_indices;
+            graph.type_indices.replace_with(new_type_indices);
         }
     }
     log_stage("type_indices_load", t);
@@ -1155,19 +1342,30 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     graph.sync_disk_column_stores();
 
     // Load id_indices from disk.
+    //
+    // Three formats, in priority order:
+    //   1. id_indices.bin   — 0.8.28+ raw mmap-resident layout (lazy reads,
+    //      ~ms load even at Wikidata scale).
+    //   2. id_indices.bin.zst with KGLIIDX1 magic — 0.8.13 flat-CSR format
+    //      (eager decompress + HashMap rebuild; legacy fallback).
+    //   3. id_indices.bin.zst as bincode HashMap — pre-0.8.13 (oldest).
     let t = stage_timer();
     if crate::graph::storage::GraphRead::is_disk(&graph.graph) {
-        let id_indices_path = dir.join("id_indices.bin.zst");
-        if id_indices_path.exists() {
-            if let Ok(compressed) = std::fs::read(&id_indices_path) {
-                if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                    // 0.8.13 per-variant flat format first; fall back to
-                    // bincode for graphs saved by 0.8.12 and earlier.
-                    match read_id_indices_bin(&bytes, &graph.interner) {
-                        Ok(Some(indices)) => graph.id_indices = indices,
-                        _ => {
-                            if let Ok(indices) = bincode::deserialize(&bytes) {
-                                graph.id_indices = indices;
+        if let Some(base) =
+            crate::graph::storage::disk::id_index::IdIndexBase::load_from(dir, &graph.interner)?
+        {
+            graph.id_indices = crate::graph::storage::disk::id_index::IdIndexStore::from_base(base);
+        } else {
+            let id_indices_path = dir.join("id_indices.bin.zst");
+            if id_indices_path.exists() {
+                if let Ok(compressed) = std::fs::read(&id_indices_path) {
+                    if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                        match read_id_indices_bin(&bytes, &graph.interner) {
+                            Ok(Some(indices)) => graph.id_indices.replace_with(indices),
+                            _ => {
+                                if let Ok(indices) = bincode::deserialize(&bytes) {
+                                    graph.id_indices.replace_with(indices);
+                                }
                             }
                         }
                     }
@@ -1177,11 +1375,21 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     }
     log_stage("id_indices_load", t);
 
-    // 0.8.13: type_connectivity loads from a packed binary when present.
-    // The load path seeds `type_connectivity_cache` iff `FileMetadata::apply_to`
-    // left it empty (new-format metadata.json no longer carries the field).
+    // 0.8.28+: `type_connectivity_cache` is populated lazily on first
+    // access (in `introspection/describe.rs`'s
+    // `compute_type_connectivity` fallback). Pre-loading it eagerly was
+    // costing 15+ s on slice-built graphs (128 M triples × 3 String
+    // allocations each) for data that most query workloads never touch.
+    // Read sites that miss the cache already degrade gracefully to a
+    // bounded edge scan.
+    //
+    // Opt-in eager load: `KGLITE_EAGER_TYPE_CONNECTIVITY=1`. Users that
+    // call `describe()` immediately after load can set this to amortize
+    // the cost into load instead of the first describe().
     let t = stage_timer();
-    if !graph.has_type_connectivity_cache() {
+    if std::env::var_os("KGLITE_EAGER_TYPE_CONNECTIVITY").is_some()
+        && !graph.has_type_connectivity_cache()
+    {
         if let Ok(Some(triples)) = read_type_connectivity_bin(dir, &graph) {
             if !triples.is_empty() {
                 *graph.type_connectivity_cache.write().unwrap() = Some(triples);
@@ -1438,7 +1646,7 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
     for (type_name, store) in &dir_graph.column_stores {
         let has_id_title = store.has_id_title_columns();
         if let Some(indices) = dir_graph.type_indices.get(type_name) {
-            for (row_id, &node_idx) in indices.iter().enumerate() {
+            for (row_id, node_idx) in indices.iter().enumerate() {
                 if let Some(node) = dir_graph.graph.node_weight_mut(node_idx) {
                     node.properties = PropertyStorage::Columnar {
                         store: Arc::clone(store),

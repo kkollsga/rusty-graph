@@ -19,8 +19,7 @@ fn build_chain_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
         let idx = graph.graph.add_node(node);
         graph
             .type_indices
-            .entry("Chain".to_string())
-            .or_default()
+            .entry_or_default("Chain".to_string())
             .push(idx);
         indices.push(idx);
     }
@@ -46,8 +45,7 @@ fn build_triangle_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
         let idx = graph.graph.add_node(node);
         graph
             .type_indices
-            .entry("Node".to_string())
-            .or_default()
+            .entry_or_default("Node".to_string())
             .push(idx);
         indices.push(idx);
     }
@@ -75,8 +73,7 @@ fn build_disconnected_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
         let idx = graph.graph.add_node(node);
         graph
             .type_indices
-            .entry("Node".to_string())
-            .or_default()
+            .entry_or_default("Node".to_string())
             .push(idx);
         indices.push(idx);
     }
@@ -200,8 +197,7 @@ fn test_shortest_path_connection_type_filter() {
         let idx = graph.graph.add_node(node);
         graph
             .type_indices
-            .entry("Test".to_string())
-            .or_default()
+            .entry_or_default("Test".to_string())
             .push(idx);
         indices.push(idx);
     }

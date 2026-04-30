@@ -50,7 +50,7 @@ impl KnowledgeGraph {
             }
             None => {
                 // Build for all existing types
-                let types: Vec<String> = graph.type_indices.keys().cloned().collect();
+                let types: Vec<String> = graph.type_indices.keys().map(|s| s.to_string()).collect();
                 for node_type in types {
                     graph.build_id_index(&node_type);
                 }
@@ -372,7 +372,7 @@ impl KnowledgeGraph {
     fn node_type_counts(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
             let dict = PyDict::new(py);
-            for (node_type, indices) in &self.inner.type_indices {
+            for (node_type, indices) in self.inner.type_indices.iter() {
                 dict.set_item(node_type, indices.len())?;
             }
             Ok(dict.into())

@@ -63,7 +63,7 @@ pub(super) fn execute_orphan_node(
     let nodes = type_indices(graph, &node_type)?;
 
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let has_match = |dir: Direction| -> bool {
             let mut iter = graph.graph.edges_directed(nidx, dir);
             match edge_key {
@@ -101,7 +101,7 @@ pub(super) fn execute_self_loop(
     let edge_key = InternedKey::from_str(&edge_type);
 
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let hit = graph
             .graph
             .edges_directed(nidx, Direction::Outgoing)
@@ -131,11 +131,11 @@ pub(super) fn execute_cycle_2step(
     let (start_var, end_var) =
         require_two_node_yields(yield_items, "cycle_2step", "node_a", "node_b")?;
     let nodes = type_indices(graph, &node_type)?;
-    let node_set: std::collections::HashSet<NodeIndex> = nodes.iter().copied().collect();
+    let node_set: std::collections::HashSet<NodeIndex> = nodes.iter().collect();
     let edge_key = InternedKey::from_str(&edge_type);
 
     let mut rows = Vec::new();
-    for &a in nodes {
+    for a in nodes.iter() {
         for er_a in graph.graph.edges_directed(a, Direction::Outgoing) {
             if er_a.weight().connection_type != edge_key {
                 continue;
@@ -189,7 +189,7 @@ pub(super) fn execute_missing_required_edge(
     let edge_key = InternedKey::from_str(&edge_type);
 
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let has_edge = has_edge_of_type(graph, nidx, Direction::Outgoing, &edge_type, edge_key);
         if !has_edge {
             rows.push(make_node_row(&yield_var, nidx));
@@ -223,7 +223,7 @@ pub(super) fn execute_missing_inbound_edge(
     let edge_key = InternedKey::from_str(&edge_type);
 
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let has_edge = has_edge_of_type(graph, nidx, Direction::Incoming, &edge_type, edge_key);
         if !has_edge {
             rows.push(make_node_row(&yield_var, nidx));
@@ -257,14 +257,14 @@ pub(super) fn execute_duplicate_title(
 
     // Pass 1 — count titles
     let mut counts: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         if let Some(title) = title_of(graph, nidx) {
             *counts.entry(title).or_insert(0) += 1;
         }
     }
     // Pass 2 — emit nodes whose title count > 1
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         if let Some(title) = title_of(graph, nidx) {
             if counts.get(&title).copied().unwrap_or(0) > 1 {
                 rows.push(make_node_row(&yield_var, nidx));
@@ -387,7 +387,7 @@ pub(super) fn execute_cardinality_violation(
     let edge_key = InternedKey::from_str(&edge_type);
 
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let count = graph
             .graph
             .edges_directed(nidx, Direction::Outgoing)
@@ -534,7 +534,7 @@ pub(super) fn execute_null_property(
     let nodes = type_indices(graph, &node_type)?;
 
     let mut rows = Vec::new();
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let node = match graph.graph.node_weight(nidx) {
             Some(n) => n,
             None => continue,
@@ -602,7 +602,7 @@ pub(super) fn execute_kg_knn(
 
     let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(nodes.len());
     let config = graph.get_spatial_config(&target_type);
-    for &nidx in nodes {
+    for nidx in nodes.iter() {
         let node = match graph.graph.node_weight(nidx) {
             Some(n) => n,
             None => continue,
@@ -883,7 +883,10 @@ fn call_param_opt_i64(params: &HashMap<String, Value>, key: &str) -> Option<i64>
     }
 }
 
-fn type_indices<'a>(graph: &'a DirGraph, node_type: &str) -> Result<&'a Vec<NodeIndex>, String> {
+fn type_indices<'a>(
+    graph: &'a DirGraph,
+    node_type: &str,
+) -> Result<crate::graph::storage::disk::type_index::TypeNodesRef<'a>, String> {
     graph
         .type_indices
         .get(node_type)

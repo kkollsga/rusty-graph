@@ -96,8 +96,7 @@ pub fn extract_subgraph(
             // Update type indices
             new_graph
                 .type_indices
-                .entry(node_data.node_type_str(&source.interner).to_string())
-                .or_default()
+                .entry_or_default(node_data.node_type_str(&source.interner).to_string())
                 .push(new_idx);
         }
     }

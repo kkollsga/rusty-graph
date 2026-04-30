@@ -609,7 +609,7 @@ impl<'a> PatternExecutor<'a> {
             }
             // Use type index
             let type_nodes = match self.graph.type_indices.get(node_type) {
-                Some(indices) => indices.as_slice(),
+                Some(indices) => indices,
                 None => return Ok(vec![]),
             };
             if let Some(ref props) = pattern.properties {
@@ -618,7 +618,7 @@ impl<'a> PatternExecutor<'a> {
                 // 10s timeout on an external-drive-backed graph and
                 // would never observe cancellation without polling.
                 let mut out = Vec::new();
-                for (i, &idx) in type_nodes.iter().enumerate() {
+                for (i, idx) in type_nodes.iter().enumerate() {
                     if i & 0xFFF == 0 {
                         self.check_scan_deadline()?;
                     }

@@ -356,8 +356,7 @@ fn create_node(
     // Update type_indices
     graph
         .type_indices
-        .entry(label.clone())
-        .or_default()
+        .entry_or_default(label.clone())
         .push(node_idx);
 
     // Invalidate id_indices for this type (lazy rebuild on next lookup)
@@ -684,10 +683,11 @@ fn execute_delete(
 
     // Phase 7: index cleanup (StableDiGraph keeps remaining indices stable)
     for node_type in &affected_types {
-        // type_indices: remove deleted entries
-        if let Some(indices) = graph.type_indices.get_mut(node_type) {
-            indices.retain(|idx| !nodes_to_delete.contains(idx));
-        }
+        // type_indices: remove deleted entries (materializes base entry on
+        // first mutation; subsequent reads come from the overlay).
+        graph
+            .type_indices
+            .retain_in_type(node_type, |idx| !nodes_to_delete.contains(idx));
         // id_indices: invalidate for lazy rebuild
         graph.id_indices.remove(node_type);
         // property_indices: remove deleted entries for affected types
@@ -995,7 +995,7 @@ fn try_match_merge_pattern(
 
                 // 4. Fall back to linear scan (no index covers the pattern)
                 if let Some(type_nodes) = graph.type_indices.get(label) {
-                    for &idx in type_nodes {
+                    for idx in type_nodes.iter() {
                         if node_matches_all(idx, &expected_props) {
                             return Ok(Some(build_result(idx)));
                         }

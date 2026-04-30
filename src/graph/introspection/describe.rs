@@ -652,7 +652,7 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
     let connected_pairs = compute_connected_type_pairs(conn_stats);
 
     // Find disconnected types (core types with zero connections)
-    let mut disconnected: Vec<(&String, usize)> = graph
+    let mut disconnected: Vec<(&str, usize)> = graph
         .type_indices
         .iter()
         .filter(|(nt, _)| !graph.parent_types.contains_key(*nt) && !connected_types.contains(*nt))
@@ -950,7 +950,7 @@ fn write_type_detail(
             let mut child_strs: Vec<(usize, String)> = children
                 .iter()
                 .map(|child| {
-                    let count = graph.type_indices.get(*child).map(|v| v.len()).unwrap_or(0);
+                    let count = graph.type_indices.get(child).map(|v| v.len()).unwrap_or(0);
                     let prop_count = graph
                         .node_type_metadata
                         .get(*child)
@@ -1054,7 +1054,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
                 .get(nt)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            (nt.clone(), indices.len(), prop_count)
+            (nt.to_string(), indices.len(), prop_count)
         })
         .collect();
     // Sort by count descending, then alphabetically
@@ -1143,7 +1143,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     write_read_only_notice(&mut xml, graph);
 
     // Type distribution by size tier + top-20 types
-    let mut type_entries: Vec<(&String, usize)> = graph
+    let mut type_entries: Vec<(&str, usize)> = graph
         .type_indices
         .iter()
         .map(|(nt, indices)| (nt, indices.len()))
@@ -1269,7 +1269,7 @@ fn build_inventory_with_detail(graph: &DirGraph) -> String {
 
     // Full detail for each type (core only if tiers active)
     let has_tiers = !graph.parent_types.is_empty();
-    let mut type_names: Vec<&String> = graph
+    let mut type_names: Vec<&str> = graph
         .type_indices
         .keys()
         .filter(|nt| !has_tiers || !graph.parent_types.contains_key(*nt))
@@ -1316,13 +1316,9 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
                 ));
             }
             return Err(format!("Node type '{}' not found. Available: {}", t, {
-                let mut names: Vec<&String> = graph.type_indices.keys().collect();
+                let mut names: Vec<&str> = graph.type_indices.keys().collect();
                 names.sort();
-                names
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                names.join(", ")
             }));
         }
     }
@@ -1371,7 +1367,7 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
     // Find matching types (exclude supporting types).
     // Case-insensitive substring match without per-type allocation.
     let pattern_bytes = pattern_lower.as_bytes();
-    let mut matches: Vec<(&String, usize)> = graph
+    let mut matches: Vec<(&str, usize)> = graph
         .type_indices
         .iter()
         .filter(|(nt, _)| {
@@ -1398,7 +1394,7 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
 
     if matches.is_empty() {
         xml.push_str("  <no_matches/>\n");
-        let mut all_types: Vec<(&String, usize)> = graph
+        let mut all_types: Vec<(&str, usize)> = graph
             .type_indices
             .iter()
             .filter(|(nt, _)| !graph.parent_types.contains_key(*nt))
@@ -1437,7 +1433,7 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
 
     // Collect connected types across all matches for layer 1
     let mut connected_types: HashMap<String, usize> = HashMap::new();
-    let match_names: HashSet<&str> = matches.iter().map(|(nt, _)| nt.as_str()).collect();
+    let match_names: HashSet<&str> = matches.iter().map(|(nt, _)| *nt).collect();
 
     // Write matching types with their connections
     for &(nt, count) in &matches {

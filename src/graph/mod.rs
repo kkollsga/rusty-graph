@@ -375,8 +375,8 @@ impl KnowledgeGraph {
 
         // Try qualified_name (stored as "id") exact match first
         for nt in &types_to_search {
-            if let Some(indices) = self.inner.type_indices.get(*nt) {
-                for &idx in indices {
+            if let Some(indices) = self.inner.type_indices.get(nt) {
+                for idx in indices.iter() {
                     if let Some(node) = self.inner.get_node(idx) {
                         if *node.id() == name_val {
                             return (Some(idx), Vec::new());
@@ -392,8 +392,8 @@ impl KnowledgeGraph {
             let suffix = format!("::{}", name);
             let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
             for nt in &types_to_search {
-                if let Some(indices) = self.inner.type_indices.get(*nt) {
-                    for &idx in indices {
+                if let Some(indices) = self.inner.type_indices.get(nt) {
+                    for idx in indices.iter() {
                         if let Some(node) = self.inner.get_node(idx) {
                             if let Value::String(qn) = &*node.id() {
                                 if qn.ends_with(&suffix) {
@@ -414,8 +414,8 @@ impl KnowledgeGraph {
         // Fall back to name/title search
         let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
         for nt in &types_to_search {
-            if let Some(indices) = self.inner.type_indices.get(*nt) {
-                for &idx in indices {
+            if let Some(indices) = self.inner.type_indices.get(nt) {
+                for idx in indices.iter() {
                     if let Some(node) = self.inner.get_node(idx) {
                         let name_match = node
                             .get_field_ref("name")

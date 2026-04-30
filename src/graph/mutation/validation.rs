@@ -36,7 +36,7 @@ fn validate_nodes(
     // Check each node type defined in schema
     for (node_type, node_schema) in &schema.node_schemas {
         if let Some(node_indices) = graph.type_indices.get(node_type) {
-            for &node_idx in node_indices {
+            for node_idx in node_indices.iter() {
                 if let Some(node) = graph.get_node(node_idx) {
                     errors.extend(validate_single_node(node, node_type, node_schema));
                 }
@@ -46,10 +46,10 @@ fn validate_nodes(
 
     // Check for undefined node types (strict mode)
     if strict {
-        for (node_type, node_indices) in &graph.type_indices {
+        for (node_type, node_indices) in graph.type_indices.iter() {
             if !schema.node_schemas.contains_key(node_type) {
                 errors.push(ValidationError::UndefinedNodeType {
-                    node_type: node_type.clone(),
+                    node_type: node_type.to_string(),
                     count: node_indices.len(),
                 });
             }

@@ -218,7 +218,7 @@ pub(super) fn sample_unique_values(
     };
     let key = InternedKey::from_str(property);
     let backend = &graph.graph;
-    for &idx in indices {
+    for idx in indices.iter() {
         if unique.len() >= max {
             break;
         }
@@ -268,7 +268,7 @@ pub(super) fn compute_join_candidates(
     max_sample: usize,
 ) -> Vec<JoinCandidate> {
     // Collect core types (exclude supporting types)
-    let mut core_types: Vec<&String> = graph
+    let mut core_types: Vec<&str> = graph
         .type_indices
         .keys()
         .filter(|nt| !graph.parent_types.contains_key(*nt))
@@ -293,7 +293,7 @@ pub(super) fn compute_join_candidates(
             let right = core_types[j];
 
             // Skip already-connected pairs
-            if connected_pairs.contains(&(left.clone(), right.clone())) {
+            if connected_pairs.contains(&(left.to_string(), right.to_string())) {
                 continue;
             }
 
@@ -323,27 +323,27 @@ pub(super) fn compute_join_candidates(
                 // immutable+mutable borrows on `sample_cache`.
                 populate_sample(&mut sample_cache, graph, left, prop, max_sample);
                 if sample_cache
-                    .get(&(left.clone(), prop.clone()))
+                    .get(&(left.to_string(), prop.clone()))
                     .is_none_or(|v| v.is_none())
                 {
                     continue;
                 }
                 populate_sample(&mut sample_cache, graph, right, prop, max_sample);
-                let left_vals = match sample_cache.get(&(left.clone(), prop.clone())) {
+                let left_vals = match sample_cache.get(&(left.to_string(), prop.clone())) {
                     Some(Some(v)) => v,
                     _ => continue,
                 };
-                let right_vals = match sample_cache.get(&(right.clone(), prop.clone())) {
+                let right_vals = match sample_cache.get(&(right.to_string(), prop.clone())) {
                     Some(Some(v)) => v,
                     _ => continue,
                 };
                 let overlap = left_vals.intersection(right_vals).count();
                 if overlap > 0 {
                     candidates.push(JoinCandidate {
-                        left_type: left.clone(),
+                        left_type: left.to_string(),
                         left_prop: prop.clone(),
                         left_unique: left_vals.len(),
-                        right_type: right.clone(),
+                        right_type: right.to_string(),
                         right_prop: prop.clone(),
                         right_unique: right_vals.len(),
                         overlap,
@@ -379,7 +379,7 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
                 .cloned()
                 .unwrap_or_default();
             (
-                nt.clone(),
+                nt.to_string(),
                 NodeTypeOverview {
                     count: indices.len(),
                     properties,
@@ -526,7 +526,7 @@ pub fn compute_property_stats(
     let (scan_indices, sample_count): (Vec<petgraph::graph::NodeIndex>, usize) = match sample_size {
         Some(n) if n > 0 && n < total_nodes => {
             let step = total_nodes / n;
-            let sampled: Vec<_> = (0..n).map(|i| node_indices[i * step]).collect();
+            let sampled: Vec<_> = (0..n).filter_map(|i| node_indices.get(i * step)).collect();
             let count = sampled.len();
             (sampled, count)
         }
@@ -654,7 +654,7 @@ pub fn compute_neighbors_schema(
     let mut incoming: HashMap<(String, String), usize> = HashMap::new();
 
     let g = &graph.graph;
-    for &node_idx in node_indices {
+    for node_idx in node_indices.iter() {
         for edge_ref in g.edges_directed(node_idx, Direction::Outgoing) {
             if let Some(target_node) = graph.get_node(edge_ref.target()) {
                 let key = (
@@ -790,7 +790,7 @@ pub fn compute_sample<'a>(
         .ok_or_else(|| format!("Node type '{}' not found", node_type))?;
 
     let mut result = Vec::with_capacity(n.min(node_indices.len()));
-    for &idx in node_indices.iter().take(n) {
+    for idx in node_indices.iter().take(n) {
         if let Some(node) = graph.get_node(idx) {
             result.push(node);
         }

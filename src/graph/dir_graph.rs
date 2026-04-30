@@ -10,6 +10,8 @@ use crate::graph::schema::{
     EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
     SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex, TypeSchema,
 };
+use crate::graph::storage::disk::id_index::IdIndexStore;
+use crate::graph::storage::disk::type_index::TypeIndexStore;
 use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -28,8 +30,10 @@ use std::sync::{Arc, RwLock};
 pub struct DirGraph {
     pub(crate) graph: GraphBackend,
     /// Skipped during serialization — rebuilt from graph on load via `rebuild_type_indices()`.
+    /// On disk graphs the base layer is mmap-backed via `type_indices.bin`;
+    /// mutations land in an in-memory overlay.
     #[serde(skip)]
-    pub(crate) type_indices: HashMap<String, Vec<NodeIndex>>,
+    pub(crate) type_indices: TypeIndexStore,
     /// Optional schema definition for validation
     #[serde(default)]
     pub(crate) schema_definition: Option<SchemaDefinition>,
@@ -58,8 +62,10 @@ pub struct DirGraph {
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
+    /// On disk graphs the base layer is mmap-backed via `id_indices.bin`; mutations
+    /// land in an in-memory overlay (see `storage/disk/id_index.rs`).
     #[serde(skip)]
-    pub(crate) id_indices: HashMap<String, TypeIdIndex>,
+    pub(crate) id_indices: IdIndexStore,
     /// Fast O(1) lookup for connection types (interned). Populated on first edge access.
     #[serde(skip)]
     pub(crate) connection_types: std::collections::HashSet<InternedKey>,
@@ -202,7 +208,7 @@ impl DirGraph {
     pub fn new() -> Self {
         DirGraph {
             graph: GraphBackend::new(),
-            type_indices: HashMap::new(),
+            type_indices: TypeIndexStore::new(),
             schema_definition: None,
             property_indices: HashMap::new(),
             composite_indices: HashMap::new(),
@@ -210,7 +216,7 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
-            id_indices: HashMap::new(),
+            id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
@@ -245,7 +251,7 @@ impl DirGraph {
     pub fn from_graph(graph: GraphBackend) -> Self {
         DirGraph {
             graph,
-            type_indices: HashMap::new(),
+            type_indices: TypeIndexStore::new(),
             schema_definition: None,
             property_indices: HashMap::new(),
             composite_indices: HashMap::new(),
@@ -253,7 +259,7 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
-            id_indices: HashMap::new(),
+            id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
@@ -320,7 +326,7 @@ impl DirGraph {
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             entries.reserve(node_indices.len());
-            for &node_idx in node_indices {
+            for node_idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let node_id = node.id().into_owned();
                     if !matches!(node_id, Value::UniqueId(_)) {
@@ -377,7 +383,7 @@ impl DirGraph {
 
         // Read ids directly from column store using row_id from node_slots
         if let GraphBackend::Disk(ref dg) = self.graph {
-            for &node_idx in node_indices {
+            for node_idx in node_indices.iter() {
                 let slot = dg.node_slot(node_idx.index());
                 if slot.is_alive() {
                     if let Some(id_val) = store.get_id(slot.row_id) {
@@ -448,7 +454,7 @@ impl DirGraph {
         // Fallback: linear scan through type_indices when id_index is missing
         // (e.g., after DELETE invalidates id_indices for this type)
         if let Some(node_indices) = self.type_indices.get(node_type) {
-            for &node_idx in node_indices {
+            for node_idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let node_id = node.id();
                     if &*node_id == id {
@@ -657,7 +663,7 @@ impl DirGraph {
 
         // Get types from type_indices
         for node_type in self.type_indices.keys() {
-            types.insert(node_type.clone());
+            types.insert(node_type.to_string());
         }
 
         // Also include types from metadata (may have metadata but no live nodes)
@@ -717,7 +723,7 @@ impl DirGraph {
         let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
-            for &idx in node_indices {
+            for idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(idx) {
                     if let Some(value) = node.get_property(property) {
                         index.entry(value.into_owned()).or_default().push(idx);
@@ -809,7 +815,7 @@ impl DirGraph {
             std::collections::BTreeMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
-            for &idx in node_indices {
+            for idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(idx) {
                     if let Some(value) = node.get_property(property) {
                         index.entry(value.into_owned()).or_default().push(idx);
@@ -867,7 +873,7 @@ impl DirGraph {
         let mut index: HashMap<CompositeValue, Vec<NodeIndex>> = HashMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
-            for &idx in node_indices {
+            for idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(idx) {
                     // Extract values for all properties in order
                     let values: Vec<Value> = properties
@@ -1236,7 +1242,7 @@ impl DirGraph {
                     .push(node_idx);
             }
         }
-        self.type_indices = new_type_indices;
+        self.type_indices.replace_with(new_type_indices);
     }
 
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
@@ -1357,7 +1363,7 @@ impl DirGraph {
             }
         }
 
-        self.type_indices = new_type_indices;
+        self.type_indices.replace_with(new_type_indices);
         self.type_schemas = arc_schemas;
     }
 
@@ -1523,14 +1529,17 @@ impl DirGraph {
         // corrections never reached disk.
         self.sync_column_stores_from_disk();
 
-        // Save DirGraph metadata as JSON. 0.8.13: strip
-        // `type_connectivity` here — on the 81 GB Wikidata graph, this
-        // field alone is 266 MB of a 415 MB metadata.json (3.17 M
-        // entries × JSON strings). Persisted separately via
-        // `write_type_connectivity_bin`. In-memory .kgl saves keep the
-        // embedded form.
+        // Save DirGraph metadata. 0.8.13 stripped `type_connectivity`;
+        // 0.8.28 strips the two heavy HashMap fields
+        // (`node_type_metadata`, `connection_type_metadata`) into
+        // dedicated binary sidecars. The remaining metadata.json is
+        // small (under a few hundred KB even on Wikidata-scale) and
+        // parses in milliseconds.
+        crate::graph::io::file::write_node_type_metadata_bin(dir, self)?;
+        crate::graph::io::file::write_connection_type_metadata_bin(dir, self)?;
         let mut meta = crate::graph::io::file::build_disk_metadata(self);
         crate::graph::io::file::strip_type_connectivity(&mut meta);
+        crate::graph::io::file::strip_heavy_metadata(&mut meta);
         let meta_json = serde_json::to_string_pretty(&meta)
             .map_err(|e| format!("Metadata serialization failed: {}", e))?;
         std::fs::write(dir.join("metadata.json"), meta_json)
@@ -1650,12 +1659,20 @@ impl DirGraph {
         }
 
         // 0.8.13: type_indices uses a flat CSR binary keyed by interner
-        // hashes. id_indices uses per-variant flat blocks (Integer =
-        // two u32 arrays, General = length-prefixed bincode blob).
-        // Backward-compat readers fall through to the old bincode path
-        // on magic-byte mismatch — see `load_disk_dir`.
-        crate::graph::io::file::write_type_indices_bin(dir, self)?;
-        crate::graph::io::file::write_id_indices_bin(dir, self)?;
+        // hashes. 0.8.28+: id_indices uses an mmap-resident raw `.bin`
+        // layout — load reads via memory-mapped binary search, no eager
+        // HashMap rebuild. Backward-compat loaders fall through to the
+        // old bincode/zstd paths when the new file is absent.
+        crate::graph::storage::disk::type_index::write_type_indices_bin(
+            dir,
+            &self.type_indices,
+            &self.interner,
+        )?;
+        crate::graph::storage::disk::id_index::write_id_indices_bin(
+            dir,
+            &self.id_indices,
+            &self.interner,
+        )?;
 
         // Save embeddings if any (matches write_graph_v3 behavior for in-memory saves)
         if !self.embeddings.is_empty() {
@@ -1741,12 +1758,12 @@ impl DirGraph {
         let mut row_ids: HashMap<String, HashMap<NodeIndex, u32>> = HashMap::new();
 
         // Clean type_indices: remove entries for deleted/tombstoned nodes
-        for indices in self.type_indices.values_mut() {
-            indices.retain(|&idx| self.graph.node_weight(idx).is_some());
-        }
+        let graph_ref = &self.graph;
+        self.type_indices
+            .retain_all(|idx| graph_ref.node_weight(*idx).is_some());
 
         // First pass: create stores and push rows
-        for (node_type, indices) in &self.type_indices {
+        for (node_type, indices) in self.type_indices.iter() {
             let schema = match self.type_schemas.get(node_type) {
                 Some(s) => Arc::clone(s),
                 None => continue,
@@ -1760,7 +1777,7 @@ impl DirGraph {
             let mut store = ColumnStore::new(schema, &meta, &self.interner);
             let mut type_row_ids = HashMap::with_capacity(indices.len());
 
-            for &idx in indices {
+            for idx in indices.iter() {
                 if let Some(node) = self.graph.node_weight(idx) {
                     // Push id/title for every node. For Columnar nodes, read from
                     // the old column store. For Compact/Map nodes, use node.id/title.
@@ -1822,8 +1839,8 @@ impl DirGraph {
                 }
             }
 
-            stores.insert(node_type.clone(), store);
-            row_ids.insert(node_type.clone(), type_row_ids);
+            stores.insert(node_type.to_string(), store);
+            row_ids.insert(node_type.to_string(), type_row_ids);
         }
 
         // Spill to disk if over memory limit

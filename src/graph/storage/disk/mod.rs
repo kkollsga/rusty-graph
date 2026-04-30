@@ -13,5 +13,7 @@ pub mod edge_properties;
 pub mod graph;
 pub mod graph_persist;
 pub mod graph_property_index;
+pub mod id_index;
 pub mod property_index;
 pub mod segment_summary;
+pub mod type_index;

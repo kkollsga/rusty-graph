@@ -507,7 +507,7 @@ impl<'a> CypherExecutor<'a> {
                 count_alias,
             } => {
                 let mut result_rows = Vec::with_capacity(self.graph.type_indices.len());
-                for (node_type, indices) in &self.graph.type_indices {
+                for (node_type, indices) in self.graph.type_indices.iter() {
                     let mut projected = Bindings::with_capacity(2);
                     // Return as JSON list string to match labels() output format
                     projected.insert(

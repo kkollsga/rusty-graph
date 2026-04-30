@@ -56,7 +56,7 @@ impl KnowledgeGraph {
                     .type_indices
                     .get(node_type)
                     .map(|indices| {
-                        indices.iter().any(|&idx| {
+                        indices.iter().any(|idx| {
                             g.graph
                                 .node_weight(idx)
                                 .map(|n| n.has_property(text_column))
@@ -573,7 +573,7 @@ impl KnowledgeGraph {
             .inner
             .type_indices
             .get(node_type)
-            .cloned()
+            .map(|v| v.to_vec())
             .unwrap_or_default();
 
         for &node_idx in &node_indices {

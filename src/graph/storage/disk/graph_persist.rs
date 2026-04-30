@@ -714,8 +714,12 @@ impl DiskGraph {
         dir: &Path,
         interner: &mut crate::graph::schema::StringInterner,
     ) -> std::io::Result<(Self, PathBuf)> {
+        use crate::graph::io::load_timing::{log_stage, stage_timer};
+
+        let t = stage_timer();
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
+        log_stage("dg.meta_parse", t);
 
         // PR1 phase 4: CSR binaries live under seg_NNN/ when the graph
         // was written with csr_layout_version >= 1. Legacy .kgl directories
@@ -740,6 +744,7 @@ impl DiskGraph {
         // Lives inside graph dir so no external temp space required.
         let temp_dir = dir.join("_zst_cache");
 
+        let t = stage_timer();
         let (csr_dir, segment_csr): (PathBuf, SegmentCsr) = if meta.csr_layout_version >= 1 {
             let segs = enumerate_segment_dirs(dir);
             match segs.len() {
@@ -860,6 +865,7 @@ impl DiskGraph {
             };
             (dir.to_path_buf(), csr)
         };
+        log_stage("dg.segment_csr", t);
 
         let SegmentCsr {
             node_slots,
@@ -878,20 +884,46 @@ impl DiskGraph {
 
         // Load edge properties — columnar (format=1) or legacy (format=0).
         // In the segmented layout the files live alongside the CSR.
+        let t = stage_timer();
         let edge_properties = EdgePropertyStore::load_from(
             &csr_dir,
             meta.edge_properties_format,
             meta.edge_properties_meta,
             interner,
         )?;
+        log_stage("dg.edge_properties", t);
 
         // Load overflow edges (kept at the graph root; orthogonal to segments)
+        let t = stage_timer();
         let (overflow_out, overflow_in) = if dir.join("overflow_edges.bin.zst").exists() {
             let compressed = std::fs::read(dir.join("overflow_edges.bin.zst"))?;
             let bytes = zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
             bincode::deserialize(&bytes).map_err(std::io::Error::other)?
         } else {
             (HashMap::new(), HashMap::new())
+        };
+        log_stage("dg.overflow_edges", t);
+
+        let t = stage_timer();
+        let segment_manifest =
+            super::segment_summary::SegmentManifest::load_from(dir).unwrap_or_default();
+        log_stage("dg.segment_manifest", t);
+
+        // PR1 phase 8: serde-defaulted to 0 on pre-phase-8 graphs.
+        // Their `seg_000` already accounts for every node, so bump the
+        // watermark to `node_count` here. Without this, a re-save calls
+        // `seal_to_new_segment` with `tail_lo=0` and `tail_hi=node_count`,
+        // which writes a fresh empty `seg_001` AND truncates seg_000's
+        // `out_offsets.bin` / `in_offsets.bin` via `reconcile_seg0_csr`
+        // — corrupting the graph. Fresh phase-8+ graphs persist the
+        // correct watermark, so the bump is a no-op for them.
+        let sealed_nodes_bound = if meta.sealed_nodes_bound == 0
+            && !segment_manifest.is_empty()
+            && meta.node_count > 0
+        {
+            meta.node_count as u32
+        } else {
+            meta.sealed_nodes_bound
         };
 
         Ok((
@@ -938,12 +970,8 @@ impl DiskGraph {
                 // Legacy .kgl directories have no seg_manifest.json;
                 // load_from returns an empty manifest which subsequent
                 // PR1 phases treat as "pre-segmented, don't prune".
-                segment_manifest: super::segment_summary::SegmentManifest::load_from(dir)
-                    .unwrap_or_default(),
-                // PR1 phase 8: serde-defaulted to 0 on pre-phase-8 graphs
-                // (their single seg_000 accounts for everything). Fresh
-                // phase-8 graphs will advance the watermark on save.
-                sealed_nodes_bound: meta.sealed_nodes_bound,
+                segment_manifest,
+                sealed_nodes_bound,
             },
             temp_dir,
         ))

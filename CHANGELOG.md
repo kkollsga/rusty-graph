@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.28] — 2026-04-30
+
+### Performance — slice-built graph load (round 2)
+
+Continuation of the disk-graph load optimisation that landed earlier in
+this version. Three further changes drop slice-built Wikidata graph
+loads from seconds to ~100 ms:
+
+- **`metadata.json` heavy fields → binary sidecars.** The two
+  HashMap-of-HashMap fields (`node_type_metadata`,
+  `connection_type_metadata`) move into dedicated
+  `node_type_metadata.bin.zst` and `connection_type_metadata.bin.zst`
+  files with a hand-rolled length-prefixed format. On the 1B-triple
+  Wikidata slice, `metadata.json` shrinks from 5.0 MB to 23 KB, and
+  the parse drops from ~1 s to ~10 ms. (The custom `Serialize`/
+  `Deserialize` impls on `ConnectionTypeInfo` make bincode
+  round-tripping unsafe — hence the hand-rolled binary.)
+
+- **`type_connectivity_cache` is lazy.** Skipped both the
+  cartesian-product derive in `apply_to` (clones tens of millions of
+  String triples on slice-built graphs) and the eager
+  `type_connectivity.bin.zst` read at load. Existing read sites in
+  `introspection/describe.rs` already fall through to a bounded edge
+  scan when the cache is missing; first `describe()` triggers a
+  `compute_type_connectivity` populate. Set
+  `KGLITE_EAGER_TYPE_CONNECTIVITY=1` to opt back into eager loading
+  for workloads that immediately call `describe()`.
+
+- **`apply_to_with(graph, derive_type_connectivity: bool)`.** Splits
+  the implicit derive out of the metadata-application path so the
+  caller can opt out. The original `apply_to` is now a thin wrapper
+  that defaults to `true` for the in-memory `.kgl` load path (which
+  has no separate sidecar).
+
+**Round-2 measurements** (warm load, M2 macOS, external SSD):
+
+| graph        | nodes | round-1 | round-2 | total speedup vs original |
+|--------------|-------|---------|---------|---------------------------|
+| graph_500.0  | 6 M   | 770 ms  | **62 ms**  | (built fresh) |
+| graph_1000.0 | 16 M  | 4.89 s  | **113 ms** | 43× |
+| main wikidata| 124 M | 178 ms  | **179 ms** | 51× vs 9.08 s baseline |
+
+The remaining 100-180 ms is dominated by `column_stores_load`
+(72-124 ms) — a per-type ColumnStore wrapper construction that's
+already mmap-backed.
+
+### Fixed — seg_000 corruption on save of legacy disk graphs
+
+Pre-existing bug exposed by the migration round-trip benchmark: re-saving
+a disk graph whose `disk_graph_meta.json` carries `sealed_nodes_bound: 0`
+(the serde default for pre-phase-8 graphs) AND has a non-empty
+`seg_manifest.json` would call `seal_to_new_segment` with `tail_lo=0`,
+`tail_hi=node_count`. That writes a fresh empty `seg_001` AND truncates
+`seg_000/out_offsets.bin` and `seg_000/in_offsets.bin` to one entry via
+`reconcile_seg0_csr` — the on-disk CSR loses every edge offset, and the
+graph reloads with zero traversable edges (the edge data files survive,
+but without offsets nothing is reachable).
+
+`DiskGraph::load_from_dir` now bumps `sealed_nodes_bound` to `node_count`
+when it detects the legacy zero with a populated segment manifest. Fresh
+phase-8+ graphs persist the correct watermark, so the bump is a no-op
+for them.
+
+### Performance — disk-graph load
+
+`kglite.load(path)` on the 124M-node Wikidata graph drops from ~9.0s to
+~5.5s warm-cache today, and to ~1s once the graph is re-saved with this
+version. Three changes:
+
+- **`prefetch_hot_regions` no longer runs by default.** It called
+  `madvise(MADV_WILLNEED)` on the 1.9 GB out_offsets + in_offsets arrays.
+  On macOS that syscall synchronously schedules readahead and blocks even
+  on warm pages — costing ~2.7s of every load on Wikidata-scale graphs.
+  The kernel pages in offsets on first query anyway, so the upfront cost
+  was a tax with no payoff for typical anchored-MATCH workloads. Set
+  `KGLITE_PREFETCH=1` to opt in for first-query latency-sensitive use
+  cases.
+
+- **`id_indices` is now mmap-resident.** New raw `id_indices.bin`
+  layout: header + sorted-by-type-key directory + per-type sorted u32
+  keys / u32 NodeIndex arrays. Lookups are O(log N) binary search on a
+  cache-friendly contiguous slice instead of O(1) HashMap probe with a
+  cache miss; cost in practice is parity (~50-100 ns either way for
+  13M-entry types). Eliminates the 124M `HashMap::insert` rebuild that
+  cost ~5.3s on Wikidata. New struct `IdIndexStore` in
+  `storage/disk/id_index.rs` with overlay for post-load mutations.
+
+- **`type_indices` is now mmap-resident.** New raw `type_indices.bin`
+  layout: header + directory + contiguous `[u32]` slices per type. Reads
+  return a `TypeNodesRef` view that yields `NodeIndex` either directly
+  from the overlay `Vec` or by reinterpreting the mmap'd `u32` slice.
+  Eliminates the 124M `Vec::push` rebuild that cost ~890ms on Wikidata.
+  New struct `TypeIndexStore` in `storage/disk/type_index.rs` with
+  overlay for post-load mutations (delete paths promote to overlay on
+  first mutation).
+
+- **Sub-stage instrumentation** for `DiskGraph::load_from_dir`. Set
+  `KGLITE_LOAD_TIMING=1` and stages emit `[TIMING] dg.<name> dur_ms=N`
+  lines to stderr (segment_csr, edge_properties, overflow_edges,
+  segment_manifest). Useful for measuring the next round of load
+  optimizations.
+
+**Backward compatibility.** Loaders try the new `id_indices.bin` /
+`type_indices.bin` first, fall back to the old `.bin.zst` legacy
+formats, then to a node_slots scan. Existing graphs continue to load —
+slower until re-saved. Re-save once with `g.save(path)` to migrate.
+
+**RSS reduction.** Wikidata peak RSS post-load drops from 3.6 GB to
+~500 MB (the Integer-variant id_indices + type_indices were the bulk
+of heap). General-variant id_indices entries still materialize on
+first access.
+
 ## [0.8.27] — 2026-04-29
 
 ### Changed

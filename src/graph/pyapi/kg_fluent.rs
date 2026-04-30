@@ -1153,8 +1153,8 @@ impl KnowledgeGraph {
 
         let mut results: Vec<schema::NodeInfo> = Vec::new();
         for nt in &types_to_search {
-            if let Some(indices) = self.inner.type_indices.get(*nt) {
-                for &idx in indices {
+            if let Some(indices) = self.inner.type_indices.get(nt) {
+                for idx in indices.iter() {
                     if let Some(node) = self.inner.get_node(idx) {
                         let matches = match match_type {
                             "contains" => {
@@ -1482,15 +1482,12 @@ impl KnowledgeGraph {
 
         // Find the File node by its id (path)
         let file_idx = if let Some(indices) = self.inner.type_indices.get("File") {
-            indices
-                .iter()
-                .find(|&&idx| {
-                    self.inner
-                        .get_node(idx)
-                        .map(|n| *n.id() == file_id)
-                        .unwrap_or(false)
-                })
-                .copied()
+            indices.iter().find(|idx| {
+                self.inner
+                    .get_node(*idx)
+                    .map(|n| *n.id() == file_id)
+                    .unwrap_or(false)
+            })
         } else {
             None
         };

@@ -199,7 +199,7 @@ fn filter_nodes_by_conditions(
             if key == TYPE_FIELD {
                 if let Some(type_nodes) = graph.type_indices.get(type_value) {
                     // Use HashSet for O(1) lookups
-                    let type_set: HashSet<_> = type_nodes.iter().collect();
+                    let type_set: HashSet<NodeIndex> = type_nodes.iter().collect();
                     return nodes
                         .into_iter()
                         .filter(|node| type_set.contains(node))
@@ -517,7 +517,7 @@ pub fn filter_nodes(
                     if let Some(type_nodes) = graph.type_indices.get(type_value) {
                         let processed = process_nodes(
                             graph,
-                            type_nodes.clone(),
+                            type_nodes.to_vec(),
                             None,
                             sort_fields.as_ref(),
                             max_nodes,

@@ -782,13 +782,17 @@ fn get_source_info(
 
 /// Get all candidate target nodes from type_indices.
 fn get_target_candidates(graph: &DirGraph, target_type: &str) -> Result<Vec<NodeIndex>, String> {
-    graph.type_indices.get(target_type).cloned().ok_or_else(|| {
-        let available: Vec<&String> = graph.type_indices.keys().collect();
-        format!(
-            "Target type '{}' not found in graph. Available: {:?}",
-            target_type, available
-        )
-    })
+    graph
+        .type_indices
+        .get(target_type)
+        .map(|v| v.to_vec())
+        .ok_or_else(|| {
+            let available: Vec<&str> = graph.type_indices.keys().collect();
+            format!(
+                "Target type '{}' not found in graph. Available: {:?}",
+                target_type, available
+            )
+        })
 }
 
 /// Insert matched pairs into a new selection level, applying optional filter/sort/limit.

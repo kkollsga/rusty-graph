@@ -158,7 +158,7 @@ pub(super) fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, Typ
         // Embeddings
         tc.has_embeddings = graph.embeddings.keys().any(|(nt, _)| nt == node_type);
 
-        caps.insert(node_type.clone(), tc);
+        caps.insert(node_type.to_string(), tc);
     }
     caps
 }
@@ -225,7 +225,7 @@ pub(super) fn compute_neighbors_schema_sampled(
     let mut incoming: HashMap<(String, String), usize> = HashMap::new();
 
     let g = &graph.graph;
-    for &node_idx in node_indices.iter().take(sample_count) {
+    for node_idx in node_indices.iter().take(sample_count) {
         for edge_ref in g.edges_directed(node_idx, Direction::Outgoing) {
             if let Some(target_node) = graph.get_node(edge_ref.target()) {
                 let key = (

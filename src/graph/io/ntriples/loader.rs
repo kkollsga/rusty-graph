@@ -533,7 +533,7 @@ pub fn load_ntriples(
         let wanted: std::collections::HashSet<u32> = graph
             .type_indices
             .keys()
-            .filter_map(|type_name| parse_qcode_number(type_name))
+            .filter_map(parse_qcode_number)
             .collect();
 
         // Pull those labels (and only those) from the journal. One
@@ -552,7 +552,7 @@ pub fn load_ntriples(
             if let Some(qnum) = parse_qcode_number(type_name) {
                 if let Some(label) = label_lookup.get(&qnum) {
                     if label != type_name {
-                        renames.push((type_name.clone(), label.clone()));
+                        renames.push((type_name.to_string(), label.clone()));
                     }
                 }
             }
@@ -578,8 +578,7 @@ pub fn load_ntriples(
                 if let Some(indices) = graph.type_indices.remove(old_name) {
                     graph
                         .type_indices
-                        .entry(new_name.clone())
-                        .or_default()
+                        .entry_or_default(new_name.clone())
                         .extend(indices);
                 }
                 // Merge node_type_metadata: keep the richer entry (more property keys)
@@ -930,8 +929,7 @@ pub fn load_ntriples(
                     let type_name = graph.interner.resolve(type_key).to_string();
                     graph
                         .type_indices
-                        .entry(type_name)
-                        .or_default()
+                        .entry_or_default(type_name)
                         .push(petgraph::graph::NodeIndex::new(i));
                 }
             }
@@ -1007,7 +1005,7 @@ pub fn load_ntriples(
     // Uses column stores directly — no node materialization, no arena growth.
     if graph.graph.is_disk() {
         let id_start = Instant::now();
-        let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
+        let type_names: Vec<String> = graph.type_indices.keys().map(|s| s.to_string()).collect();
         for type_name in &type_names {
             graph.build_id_index_from_columns(type_name);
         }
@@ -1083,48 +1081,50 @@ pub fn load_ntriples(
                 );
             }
 
-            // Save DirGraph metadata
+            // Save DirGraph metadata. 0.8.28+ emits the two heavy HashMap
+            // fields as separate binary sidecars and strips them from the
+            // JSON; the remaining JSON is tiny and parses in ms.
             let save_step = Instant::now();
-            let meta = crate::graph::io::file::build_disk_metadata(graph);
+            let _ = crate::graph::io::file::write_node_type_metadata_bin(&data_dir, graph);
+            let _ = crate::graph::io::file::write_connection_type_metadata_bin(&data_dir, graph);
+            let mut meta = crate::graph::io::file::build_disk_metadata(graph);
+            crate::graph::io::file::strip_heavy_metadata(&mut meta);
             if let Ok(json) = serde_json::to_string_pretty(&meta) {
                 let _ = std::fs::write(data_dir.join("metadata.json"), json);
             }
             if build_debug() {
-                eplog!(
-                    "  metadata.json: {}",
-                    fmt_dur(save_step.elapsed().as_secs_f64())
-                );
+                eplog!("  metadata: {}", fmt_dur(save_step.elapsed().as_secs_f64()));
             }
 
-            // Save id_indices (bincode + zstd) so load() doesn't rebuild them
+            // Save id_indices as raw mmap-friendly `.bin` (0.8.28+).
             let save_step = Instant::now();
             if !graph.id_indices.is_empty() {
-                if let Ok(bytes) = bincode::serialize(&graph.id_indices) {
-                    if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
-                        let _ = std::fs::write(data_dir.join("id_indices.bin.zst"), compressed);
-                    }
-                }
+                let _ = crate::graph::storage::disk::id_index::write_id_indices_bin(
+                    &data_dir,
+                    &graph.id_indices,
+                    &graph.interner,
+                );
             }
             if build_debug() {
                 eplog!(
-                    "  id_indices.bin.zst ({} types): {}",
+                    "  id_indices.bin ({} types): {}",
                     graph.id_indices.len(),
                     fmt_dur(save_step.elapsed().as_secs_f64())
                 );
             }
 
-            // Save type_indices (bincode + zstd) so load() doesn't rebuild from node_slots
+            // Save type_indices as raw mmap-friendly `.bin` (0.8.28+).
             let save_step = Instant::now();
             if !graph.type_indices.is_empty() {
-                if let Ok(bytes) = bincode::serialize(&graph.type_indices) {
-                    if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
-                        let _ = std::fs::write(data_dir.join("type_indices.bin.zst"), compressed);
-                    }
-                }
+                let _ = crate::graph::storage::disk::type_index::write_type_indices_bin(
+                    &data_dir,
+                    &graph.type_indices,
+                    &graph.interner,
+                );
             }
             if build_debug() {
                 eplog!(
-                    "  type_indices.bin.zst ({} types): {}",
+                    "  type_indices.bin ({} types): {}",
                     graph.type_indices.len(),
                     fmt_dur(save_step.elapsed().as_secs_f64())
                 );
@@ -1302,8 +1302,7 @@ fn flush_entity(
     // Update type_indices
     graph
         .type_indices
-        .entry(node_type.clone())
-        .or_default()
+        .entry_or_default(node_type.clone())
         .push(node_idx);
 
     // For disk mode: write directly to qnum_to_idx mmap (skip id_indices to save ~11 GB RAM).
@@ -1317,8 +1316,7 @@ fn flush_entity(
     } else {
         graph
             .id_indices
-            .entry(node_type)
-            .or_default()
+            .entry_or_default(node_type)
             .insert(id_value, node_idx);
     }
 

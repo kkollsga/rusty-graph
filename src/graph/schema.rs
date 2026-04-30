@@ -1826,8 +1826,7 @@ mod maintenance_tests {
             );
             let idx = g.graph.add_node(node);
             g.type_indices
-                .entry("Person".to_string())
-                .or_default()
+                .entry_or_default("Person".to_string())
                 .push(idx);
         }
         if num_edges {
@@ -1889,7 +1888,7 @@ mod maintenance_tests {
 
         // type_indices should be rebuilt
         assert_eq!(g.type_indices.len(), 1);
-        assert_eq!(g.type_indices["Person"].len(), 5);
+        assert_eq!(g.type_indices.get("Person").unwrap().len(), 5);
     }
 
     #[test]
@@ -1949,14 +1948,18 @@ mod maintenance_tests {
         // Delete node 2
         g.graph.remove_node(NodeIndex::new(2));
         // type_indices still has the stale entry
-        assert_eq!(g.type_indices["Person"].len(), 5);
+        assert_eq!(g.type_indices.get("Person").unwrap().len(), 5);
 
         g.reindex();
 
         // Now type_indices should reflect only 4 live nodes
-        assert_eq!(g.type_indices["Person"].len(), 4);
+        assert_eq!(g.type_indices.get("Person").unwrap().len(), 4);
         // And none of them should be index 2
-        assert!(!g.type_indices["Person"].contains(&NodeIndex::new(2)));
+        assert!(!g
+            .type_indices
+            .get("Person")
+            .unwrap()
+            .contains(&NodeIndex::new(2)));
     }
 
     #[test]
@@ -2030,8 +2033,8 @@ mod maintenance_tests {
         g.vacuum();
 
         // type_indices should point to valid, contiguous indices
-        assert_eq!(g.type_indices["Person"].len(), 4);
-        for &idx in &g.type_indices["Person"] {
+        assert_eq!(g.type_indices.get("Person").unwrap().len(), 4);
+        for idx in g.type_indices.get("Person").unwrap().iter() {
             assert!(g.graph.node_weight(idx).is_some());
         }
     }
@@ -2087,8 +2090,7 @@ mod maintenance_tests {
             &mut g.interner,
         ));
         g.type_indices
-            .entry("Person".to_string())
-            .or_default()
+            .entry_or_default("Person".to_string())
             .push(n0);
         g.create_index("Person", "city");
 
@@ -2103,8 +2105,7 @@ mod maintenance_tests {
             &mut g.interner,
         ));
         g.type_indices
-            .entry("Person".to_string())
-            .or_default()
+            .entry_or_default("Person".to_string())
             .push(n1);
         g.update_property_indices_for_add("Person", n1);
 
@@ -2130,8 +2131,7 @@ mod maintenance_tests {
             &mut g.interner,
         ));
         g.type_indices
-            .entry("Person".to_string())
-            .or_default()
+            .entry_or_default("Person".to_string())
             .push(n0);
         g.create_index("Person", "city");
 
@@ -2164,8 +2164,7 @@ mod maintenance_tests {
             &mut g.interner,
         ));
         g.type_indices
-            .entry("Person".to_string())
-            .or_default()
+            .entry_or_default("Person".to_string())
             .push(n0);
         g.create_index("Person", "city");
 
@@ -2195,8 +2194,7 @@ mod maintenance_tests {
             &mut g.interner,
         ));
         g.type_indices
-            .entry("Person".to_string())
-            .or_default()
+            .entry_or_default("Person".to_string())
             .push(n0);
         g.create_composite_index("Person", &["city", "age"]);
 
@@ -2236,8 +2234,7 @@ mod maintenance_tests {
             &mut g.interner,
         ));
         g.type_indices
-            .entry("Person".to_string())
-            .or_default()
+            .entry_or_default("Person".to_string())
             .push(n0);
         // No index created — these should be no-ops without crash
         g.update_property_indices_for_add("Person", n0);
@@ -2274,7 +2271,7 @@ mod maintenance_tests {
             .get("Person")
             .unwrap()
             .iter()
-            .map(|&idx| {
+            .map(|idx| {
                 let n = g.graph.node_weight(idx).unwrap();
                 let age = n
                     .get_property("age")
@@ -2296,7 +2293,7 @@ mod maintenance_tests {
             .get("Person")
             .unwrap()
             .iter()
-            .map(|&idx| {
+            .map(|idx| {
                 let n = g.graph.node_weight(idx).unwrap();
                 let age = n
                     .get_property("age")
@@ -2327,7 +2324,7 @@ mod maintenance_tests {
         assert!(!g.is_columnar());
 
         // Verify properties still work
-        let idx = g.type_indices.get("Person").unwrap()[0];
+        let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
         let node = g.graph.node_weight(idx).unwrap();
         assert!(matches!(node.properties, PropertyStorage::Compact { .. }));
         assert!(node.get_property("age").is_some());
@@ -2342,7 +2339,7 @@ mod maintenance_tests {
         g.compact_properties();
         g.enable_columnar();
 
-        let idx = g.type_indices.get("Person").unwrap()[0];
+        let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
         let node = g.graph.node_weight_mut(idx).unwrap();
 
         // Update existing property
@@ -2362,7 +2359,7 @@ mod maintenance_tests {
         g.compact_properties();
         g.enable_columnar();
 
-        let idx = g.type_indices.get("Person").unwrap()[0];
+        let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
         let node = g.graph.node_weight(idx).unwrap();
 
         assert_eq!(node.property_count(), 1); // just "age"
