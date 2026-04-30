@@ -1005,6 +1005,38 @@ fn test_topk_absorbed_for_property_access_return() {
 }
 
 #[test]
+fn test_topk_absorbed_with_explicit_pass_through_with() {
+    // The user's *exact* shape from the Wikidata Q1 timeout, with the
+    // explicit `WITH p` between the two MATCHes. fold_pass_through_with
+    // must remove it, then desugar+fuse must produce a
+    // FusedMatchWithAggregate with top_k = Some — otherwise the cohort's
+    // p.title and p.description columns are read for every group key.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:P27]->({id: 20}) \
+         WITH p \
+         MATCH (p)-[r]-(other) \
+         WHERE NOT (type(r) = 'P50' AND startNode(r) = other) \
+         RETURN p.title AS name, p.description AS desc, count(r) AS connections \
+         ORDER BY connections DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let topk_absorbed = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedMatchWithAggregate { top_k: Some(_), .. }));
+    assert!(
+        topk_absorbed,
+        "user's exact Q1 shape must absorb top_k; clauses: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
 fn test_topk_skipped_for_computed_return_expressions() {
     // Computed RETURN expressions (arithmetic on aggregates here) are
     // not safe to absorb — we'd need *all* rows to know which 10 win.
