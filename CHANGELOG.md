@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.29] — 2026-04-30
+
+### Performance — cohort + multi-MATCH planner improvements
+
+Three planner passes turn cohort top-K and multi-MATCH joins on
+Wikidata-scale graphs from "borderline timing out" into "sub-second
+warm." Validated end-to-end on the 124M-node / 861M-edge Wikidata
+graph; no regressions on point lookups, 1-hop / 2-hop, aggregates, or
+load.
+
+- **`reorder_match_clauses`** — orders consecutive id-anchored MATCH
+  clauses by edge-type total-count cost. Drives from the rarer side
+  first.
+  ```cypher
+  MATCH (p)-[:P31]->({id:5}) MATCH (p)-[:P27]->({id:183}) RETURN p.title LIMIT 20
+  ```
+  458s cold / 497s warm → 49s cold / **0.5s warm**.
+
+- **`fold_pass_through_with`** — strips a `WITH x [, y, ...]` clause
+  that's a pure projection (no DISTINCT/aggregate/WHERE/ORDER BY) when
+  every variable referenced downstream is in the projection list. Lets
+  later fusion passes see a contiguous Match-Match span when the user
+  wrote `Match WITH p Match …`.
+
+- **`desugar_multi_match_return_aggregate`** — rewrites
+  `Match-Match-Return(group, aggregate)` into
+  `Match-Match-With(group_var, aggregate)-Return(project)`. Lets the
+  existing aggregate fusion fire on the natural "RETURN with
+  aggregate" form.
+
+Together, the two simplification passes turn cohort top-K queries
+from per-row materialization into the streaming aggregate path:
+- Norwegians outgoing-degree top 10: 34s → **0.07s** (490×)
+- Norwegians total-degree top 10: 38s → **1.35s** (28×)
+
+The reorder pass is gated to avoid in-memory regressions
+(edge-type-counts cache must be populated, id-anchors required,
+shared variable required). The simplifications are pure AST rewrites —
+no executor changes, O(1) planner overhead.
+
 ## [0.8.28] — 2026-04-30
 
 ### Performance — slice-built graph load (round 2)

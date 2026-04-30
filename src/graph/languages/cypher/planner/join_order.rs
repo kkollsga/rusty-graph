@@ -190,6 +190,189 @@ pub(super) fn estimate_node_selectivity(
     }
 }
 
+/// Reorder consecutive MATCH clauses by edge-type total-count cost.
+///
+/// For a span of `MATCH … MATCH …` clauses where every clause has an
+/// `{id: X}` anchor on one endpoint and a known connection type, drive
+/// the cheaper one first. The cost proxy is the connection type's total
+/// edge count from `edge_type_counts_cache` — O(1) per clause when the
+/// cache is populated (always for graphs loaded from disk; warmed during
+/// build for in-memory graphs that exercise it).
+///
+/// **The motivating case (Wikidata, 124M nodes / 861M edges):**
+/// ```cypher
+/// MATCH (p)-[:P31]->({id:5})       -- ~80M P31 edges total
+/// MATCH (p)-[:P27]->({id:183})     -- ~3M P27 edges total
+/// RETURN p.title LIMIT 20
+/// ```
+/// Without this pass the executor enumerates 13.4M humans then filters
+/// each by P27 — observed at ~500s. Driving from M2 first (3M Germans →
+/// per-row P31 check) is ~25× cheaper.
+///
+/// Safety conditions (any miss → no reorder):
+/// - At least 2 consecutive `Match` clauses (not OPTIONAL, no path
+///   assignments).
+/// - `edge_type_counts_cache` is populated (avoids triggering a fresh
+///   O(E) scan at plan time).
+/// - Every clause in the span has an `{id: X}` anchor on at least one
+///   endpoint of every pattern, AND a connection type whose total-edge
+///   count is known. This restricts us to queries where the proxy is a
+///   real upper bound on expansion size.
+/// - All clauses in the span share at least one variable (otherwise no
+///   join, no benefit).
+/// - The cost ordering would actually change.
+///
+/// Runs *before* `optimize_pattern_start_node` so subsequent reversal
+/// sees the new clause order and accumulates `bound_vars` correctly.
+pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
+    if !graph.has_edge_type_counts_cache() {
+        return;
+    }
+    let edge_counts = graph.get_edge_type_counts();
+
+    let mut i = 0;
+    while i < query.clauses.len() {
+        // Find a span of consecutive non-OPTIONAL MATCH clauses with no
+        // path assignments. Stops at any other clause kind (WITH, WHERE,
+        // RETURN, etc.) to preserve their semantic boundaries.
+        let mut j = i;
+        while j < query.clauses.len() {
+            match &query.clauses[j] {
+                Clause::Match(m) if m.path_assignments.is_empty() => j += 1,
+                _ => break,
+            }
+        }
+        if j - i < 2 {
+            i = j.max(i + 1);
+            continue;
+        }
+
+        // Estimate cost for each MATCH in the span. Bail on the whole span
+        // if any clause is unscoreable — partial knowledge could mislead
+        // a sort.
+        let mut costs: Vec<usize> = Vec::with_capacity(j - i);
+        let mut all_scored = true;
+        for k in i..j {
+            let m = match &query.clauses[k] {
+                Clause::Match(m) => m,
+                _ => unreachable!(),
+            };
+            match estimate_match_edge_cost(m, &edge_counts) {
+                Some(c) => costs.push(c),
+                None => {
+                    all_scored = false;
+                    break;
+                }
+            }
+        }
+        if !all_scored {
+            i = j;
+            continue;
+        }
+
+        if !shares_variable_across(&query.clauses[i..j]) {
+            i = j;
+            continue;
+        }
+
+        // Stable sort by (cost, original_index) so equal costs preserve
+        // textual order (no churn).
+        let mut order: Vec<(usize, usize)> = costs.iter().copied().enumerate().collect();
+        order.sort_by_key(|&(orig, c)| (c, orig));
+
+        let already_sorted = order
+            .iter()
+            .enumerate()
+            .all(|(pos, &(orig, _))| pos == orig);
+        if !already_sorted {
+            let extracted: Vec<Clause> = query.clauses.drain(i..j).collect();
+            for (offset, &(orig, _)) in order.iter().enumerate() {
+                query.clauses.insert(i + offset, extracted[orig].clone());
+            }
+        }
+
+        i = j;
+    }
+}
+
+/// Cost proxy for a MATCH clause: sum of total edge counts (over all
+/// connection types in its patterns), provided every pattern is
+/// id-anchored. Returns `None` if the clause is unscoreable under the
+/// safety rules in [`reorder_match_clauses`].
+fn estimate_match_edge_cost(
+    m: &MatchClause,
+    edge_counts: &std::collections::HashMap<String, usize>,
+) -> Option<usize> {
+    let mut total: usize = 0;
+    for pattern in &m.patterns {
+        if pattern.elements.len() < 3 {
+            // A node-only pattern carries no edge cost; ordering it
+            // relative to edge-bearing patterns is meaningless under
+            // this proxy. Bail.
+            return None;
+        }
+        // Need at least one id-anchored endpoint on every pattern in
+        // the clause. Mid-pattern nodes are not checked — typical case
+        // is `(node)-[:T]->(node)`.
+        let first = &pattern.elements[0];
+        let last = pattern.elements.last().unwrap();
+        if !is_id_anchored(first) && !is_id_anchored(last) {
+            return None;
+        }
+        // Sum the total edge count of every typed edge in the pattern.
+        for elem in &pattern.elements {
+            if let PatternElement::Edge(ep) = elem {
+                let ct = ep.connection_type.as_ref()?;
+                let count = edge_counts.get(ct)?;
+                total = total.saturating_add(*count);
+            }
+        }
+    }
+    Some(total)
+}
+
+fn is_id_anchored(elem: &PatternElement) -> bool {
+    let np = match elem {
+        PatternElement::Node(np) => np,
+        _ => return false,
+    };
+    let props = match &np.properties {
+        Some(p) => p,
+        None => return false,
+    };
+    props.iter().any(|(prop, matcher)| {
+        prop == "id"
+            && matches!(
+                matcher,
+                PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_)
+            )
+    })
+}
+
+fn shares_variable_across(clauses: &[Clause]) -> bool {
+    let mut common: Option<HashSet<String>> = None;
+    for clause in clauses {
+        let m = match clause {
+            Clause::Match(m) => m,
+            _ => return false,
+        };
+        let vars: HashSet<String> = m
+            .patterns
+            .iter()
+            .flat_map(|p| p.elements.iter())
+            .filter_map(|e| match e {
+                PatternElement::Node(np) => np.variable.clone(),
+                _ => None,
+            })
+            .collect();
+        common = Some(match common {
+            None => vars,
+            Some(prev) => prev.intersection(&vars).cloned().collect(),
+        });
+    }
+    common.is_some_and(|s| !s.is_empty())
+}
+
 /// Reorder patterns within a MATCH clause so the most selective pattern runs first.
 ///
 /// For `MATCH (n)-[:P31]->({id:6256}), (n)-[:P30]->({id:46})`, the pattern with

@@ -28,8 +28,11 @@ use fusion::{
     fuse_vector_score_order_limit, mark_return_lazy_eligible,
 };
 use index_selection::push_where_into_match;
-use join_order::{optimize_pattern_start_node, reorder_match_patterns};
-use simplification::{fold_or_to_in, push_distinct_into_match, push_limit_into_match};
+use join_order::{optimize_pattern_start_node, reorder_match_clauses, reorder_match_patterns};
+use simplification::{
+    desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
+    push_distinct_into_match, push_limit_into_match,
+};
 
 /// Annotate the top-level query's terminal RETURN with `lazy_eligible`
 /// when no downstream operator forces row materialisation. Called once
@@ -66,7 +69,19 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     push_where_into_match(query, params);
     fold_or_to_in(query);
     push_where_into_match(query, params); // second pass: push newly-created IN predicates
+                                          // Strip pass-through WITH clauses that block downstream fusion. Runs
+                                          // before the cross-clause MATCH reorder so the latter sees a
+                                          // contiguous Match-Match span when a `WITH p` sat between them.
+    fold_pass_through_with(query);
+    // Rewrite `Match-Match-Return(group, agg)` into `Match-Match-With
+    // (group, agg)-Return(project)` so the existing aggregate-fusion +
+    // top-K pipeline picks it up.
+    desugar_multi_match_return_aggregate(query);
     fuse_spatial_join(query, graph);
+    // Cross-clause MATCH ordering uses connection-type total counts as an
+    // O(1) cost proxy. Runs before pattern_start_node so reversal sees
+    // the post-reorder clause sequence and tracks `bound_vars` correctly.
+    reorder_match_clauses(query, graph);
     optimize_pattern_start_node(query, graph);
     reorder_match_patterns(query, graph);
     push_limit_into_match(query, graph);

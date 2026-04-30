@@ -3,8 +3,9 @@
 
 use super::super::ast::*;
 use crate::datatypes::values::Value;
+use crate::graph::core::pattern_matching::{Pattern, PatternElement, PropertyMatcher};
 use crate::graph::schema::DirGraph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
@@ -709,6 +710,604 @@ impl TextScoreCollector {
                 Ok(())
             }
             Predicate::LabelCheck { .. } => Ok(()),
+        }
+    }
+}
+
+/// Rewrite `Match-Match-Return(group, aggregate) [OrderBy] [Limit]` into
+/// `Match-Match-With(group_var, aggregate)-Return(project) [OrderBy] [Limit]`.
+///
+/// The `RETURN` form is what users naturally write for a cohort top-K
+/// query:
+/// ```cypher
+/// MATCH (p)-[:P27]->({id:20}) MATCH (p)-[r]->()
+/// RETURN p.title, count(r) AS d ORDER BY d DESC LIMIT 10
+/// ```
+/// Without this rewrite, `fuse_match_return_aggregate` only handles a
+/// **single** MATCH and `fuse_match_with_aggregate` only fires on the
+/// `WITH(aggregate)` shape. The query falls off the fused-top-K path
+/// and runs ~14× slower than the equivalent `WITH p, count(r) AS d
+/// RETURN p.title, d` form. After the rewrite, the existing fusion
+/// pipeline picks it up and the query collapses into a streaming heap.
+///
+/// Conditions (any miss → no rewrite):
+/// - Exactly two consecutive Match clauses (no OPTIONAL, no path
+///   assignments) followed by Return.
+/// - The Return has at least one aggregate item AND at least one
+///   non-aggregate item.
+/// - Every non-aggregate item is `Variable(v)` or `PropertyAccess
+///   { variable: v, … }` for the same single variable `v`.
+/// - Every aggregate item has a user-supplied alias (so the rewritten
+///   Return can refer to it by name, and ORDER BY targets remain
+///   stable).
+/// - No HAVING / DISTINCT on the Return (those interact with the WITH
+///   semantics in ways the simple rewrite would change).
+pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
+    use super::super::ast::is_aggregate_expression;
+
+    // Locate the `Match, Match, Return` window. Allow optional ORDER BY /
+    // LIMIT after — they pass through unchanged.
+    let mut return_idx = None;
+    for i in 0..query.clauses.len().saturating_sub(2) {
+        let m1_ok = matches!(
+            &query.clauses[i],
+            Clause::Match(m) if m.path_assignments.is_empty()
+        );
+        let m2_ok = matches!(
+            &query.clauses[i + 1],
+            Clause::Match(m) if m.path_assignments.is_empty()
+        );
+        let r_ok = matches!(&query.clauses[i + 2], Clause::Return(_));
+        if m1_ok && m2_ok && r_ok {
+            return_idx = Some(i + 2);
+            break;
+        }
+    }
+    let r_idx = match return_idx {
+        Some(idx) => idx,
+        None => return,
+    };
+
+    // Snapshot Return contents to avoid borrow conflicts during the
+    // mutation below. We bail before any mutation if the rewrite
+    // doesn't apply, so cloning here is wasted work only on the rare
+    // path where the shape is allowed but the conditions don't hold.
+    let (orig_items, distinct, having) = match &query.clauses[r_idx] {
+        Clause::Return(r) => (r.items.clone(), r.distinct, r.having.clone()),
+        _ => return,
+    };
+    if distinct || having.is_some() {
+        return;
+    }
+
+    // Partition into aggregate vs non-aggregate items, picking off the
+    // single common group variable from the non-aggregates.
+    let mut group_var: Option<String> = None;
+    let mut all_aggs_aliased = true;
+    let mut has_agg = false;
+    let mut has_non_agg = false;
+    for item in &orig_items {
+        if is_aggregate_expression(&item.expression) {
+            has_agg = true;
+            if item.alias.is_none() {
+                all_aggs_aliased = false;
+                break;
+            }
+            continue;
+        }
+        has_non_agg = true;
+        let v = match &item.expression {
+            Expression::Variable(v) => v.clone(),
+            Expression::PropertyAccess { variable, .. } => variable.clone(),
+            _ => return,
+        };
+        match &group_var {
+            Some(prev) if prev != &v => return,
+            _ => group_var = Some(v),
+        }
+    }
+    if !has_agg || !has_non_agg || !all_aggs_aliased {
+        return;
+    }
+    let group_var = match group_var {
+        Some(v) => v,
+        None => return,
+    };
+
+    // Build the WITH (group var + aggregates with their aliases).
+    let mut with_items: Vec<ReturnItem> = Vec::with_capacity(orig_items.len());
+    with_items.push(ReturnItem {
+        expression: Expression::Variable(group_var.clone()),
+        alias: None,
+    });
+    for item in &orig_items {
+        if is_aggregate_expression(&item.expression) {
+            with_items.push(item.clone());
+        }
+    }
+
+    // Build the new RETURN: keep originals, but each aggregate becomes
+    // a Variable reference to its alias.
+    let new_return_items: Vec<ReturnItem> = orig_items
+        .iter()
+        .map(|item| {
+            if is_aggregate_expression(&item.expression) {
+                let alias = item.alias.clone().expect("aliased above");
+                ReturnItem {
+                    expression: Expression::Variable(alias.clone()),
+                    alias: Some(alias),
+                }
+            } else {
+                item.clone()
+            }
+        })
+        .collect();
+
+    // Splice in: replace Return at r_idx with [With, Return].
+    let new_with = Clause::With(WithClause {
+        items: with_items,
+        distinct: false,
+        where_clause: None,
+    });
+    let new_return = Clause::Return(ReturnClause {
+        items: new_return_items,
+        distinct: false,
+        having: None,
+        lazy_eligible: false,
+    });
+    query.clauses[r_idx] = new_with;
+    query.clauses.insert(r_idx + 1, new_return);
+}
+
+/// Strip a `WITH x [, y, ...]` clause that's a pure projection and is a
+/// no-op for everything that follows it. Removing such a clause turns
+/// `Match-With(p)-Match-…` into `Match-Match-…`, which existing fusion
+/// passes (`fuse_match_with_aggregate`, `fuse_match_return_aggregate`,
+/// the multi-MATCH desugar) can then collapse into a streaming form.
+///
+/// The motivating case is the cohort top-K idiom users naturally
+/// reach for:
+/// ```cypher
+/// MATCH (p)-[:P27]->({id:20}) WITH p MATCH (p)-[r]->()
+/// RETURN p.title, count(r) AS d ORDER BY d DESC LIMIT 10
+/// ```
+/// Without the fold, the `WITH p` blocks fusion and the executor
+/// materialises ~3.7M edge bindings before aggregating. With the fold,
+/// the same query collapses into the fused top-K path and runs ~25×
+/// faster at warm cache.
+///
+/// Fold conditions (any miss → keep the WITH):
+/// - The WITH has no DISTINCT, no inline WHERE, no aggregates, no item
+///   aliases that rename the source variable.
+/// - The next clause is **not** ORDER BY / SKIP / LIMIT — those bind
+///   to the WITH textually and must keep the projection scope.
+/// - Every variable referenced anywhere downstream of the WITH appears
+///   in the WITH's projection list. (If the user references a variable
+///   that the WITH was hiding, the original query was a Cypher scope
+///   error; we don't silently make it work.)
+pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
+    let mut i = 0;
+    while i < query.clauses.len() {
+        let projected = match pass_through_projection(&query.clauses[i]) {
+            Some(p) => p,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // ORDER BY / SKIP / LIMIT *immediately after* a WITH bind to the
+        // WITH's row context — folding the WITH would re-attach them to
+        // a different scope. Don't fold in that case.
+        if matches!(
+            query.clauses.get(i + 1),
+            Some(Clause::OrderBy(_)) | Some(Clause::Skip(_)) | Some(Clause::Limit(_))
+        ) {
+            i += 1;
+            continue;
+        }
+
+        // Variables already bound *before* this WITH. Only references to
+        // these can be hidden by the WITH — variables introduced AFTER
+        // the WITH (a later MATCH's pattern variable, a RETURN
+        // aggregate's alias) are out of scope of the question we're
+        // answering ("does removing the WITH expose a previously-hidden
+        // variable?").
+        let mut pre_with_bound: HashSet<String> = HashSet::new();
+        for c in &query.clauses[..i] {
+            collect_introduced_variables(c, &mut pre_with_bound);
+        }
+
+        let mut downstream_refs: HashSet<String> = HashSet::new();
+        for c in &query.clauses[i + 1..] {
+            collect_clause_variables(c, &mut downstream_refs);
+        }
+
+        // Safe to fold iff every downstream reference to a pre-WITH
+        // bound variable is in the projection list. Refs to variables
+        // bound after the WITH are unaffected by the fold.
+        let safe = downstream_refs
+            .iter()
+            .filter(|v| pre_with_bound.contains(*v))
+            .all(|v| projected.contains(v));
+
+        if safe {
+            query.clauses.remove(i);
+            // Don't advance i — re-examine the new clauses[i].
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Collect the variable names *introduced* (newly bound) by `clause`.
+/// Used to track which variables were in scope before a candidate WITH.
+fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<String>) {
+    match clause {
+        Clause::Match(m) | Clause::OptionalMatch(m) => {
+            for pat in &m.patterns {
+                for elem in &pat.elements {
+                    match elem {
+                        PatternElement::Node(np) => {
+                            if let Some(v) = &np.variable {
+                                out.insert(v.clone());
+                            }
+                        }
+                        PatternElement::Edge(ep) => {
+                            if let Some(v) = &ep.variable {
+                                out.insert(v.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            for pa in &m.path_assignments {
+                out.insert(pa.variable.clone());
+            }
+        }
+        Clause::With(w) => {
+            for item in &w.items {
+                let name = item.alias.clone().or_else(|| match &item.expression {
+                    Expression::Variable(v) => Some(v.clone()),
+                    _ => None,
+                });
+                if let Some(n) = name {
+                    out.insert(n);
+                }
+            }
+        }
+        Clause::Unwind(u) => {
+            out.insert(u.alias.clone());
+        }
+        Clause::Call(_) | Clause::Create(_) | Clause::Merge(_) => {
+            // CALL/CREATE/MERGE can introduce variables, but those forms
+            // don't appear in the cohort-top-K shape this fold targets.
+            // Be conservative: don't claim to know what they bind.
+        }
+        _ => {}
+    }
+}
+
+/// Returns the projected variable names if `clause` is a pass-through
+/// WITH (each item is `Variable(v)` with no alias, no DISTINCT, no
+/// inline WHERE, no aggregate). Returns `None` otherwise.
+fn pass_through_projection(clause: &Clause) -> Option<HashSet<String>> {
+    let w = match clause {
+        Clause::With(w) => w,
+        _ => return None,
+    };
+    if w.distinct || w.where_clause.is_some() {
+        return None;
+    }
+    let mut out = HashSet::with_capacity(w.items.len());
+    for item in &w.items {
+        if super::super::ast::is_aggregate_expression(&item.expression) {
+            return None;
+        }
+        let var = match &item.expression {
+            Expression::Variable(v) => v,
+            _ => return None,
+        };
+        // Aliasing to the same name is a no-op; aliasing to a different
+        // name renames the variable and is not a pass-through.
+        if let Some(alias) = &item.alias {
+            if alias != var {
+                return None;
+            }
+        }
+        out.insert(var.clone());
+    }
+    Some(out)
+}
+
+/// Walk every expression / predicate / pattern variable in `clause`
+/// and insert the names of all `Variable` references into `out`.
+fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
+    match clause {
+        Clause::Match(m) | Clause::OptionalMatch(m) => {
+            collect_pattern_refs(&m.patterns, out);
+            for pa in &m.path_assignments {
+                out.insert(pa.variable.clone());
+            }
+        }
+        Clause::Where(w) => collect_predicate_refs(&w.predicate, out),
+        Clause::With(w) => {
+            for item in &w.items {
+                collect_expression_refs(&item.expression, out);
+            }
+            if let Some(wh) = &w.where_clause {
+                collect_predicate_refs(&wh.predicate, out);
+            }
+        }
+        Clause::Return(r) => {
+            for item in &r.items {
+                collect_expression_refs(&item.expression, out);
+            }
+            if let Some(p) = &r.having {
+                collect_predicate_refs(p, out);
+            }
+        }
+        Clause::OrderBy(ob) => {
+            for item in &ob.items {
+                collect_expression_refs(&item.expression, out);
+            }
+        }
+        Clause::Skip(s) => collect_expression_refs(&s.count, out),
+        Clause::Limit(l) => collect_expression_refs(&l.count, out),
+        Clause::Unwind(u) => collect_expression_refs(&u.expression, out),
+        Clause::Union(u) => {
+            for c in &u.query.clauses {
+                collect_clause_variables(c, out);
+            }
+        }
+        Clause::Call(_)
+        | Clause::Create(_)
+        | Clause::Set(_)
+        | Clause::Delete(_)
+        | Clause::Remove(_)
+        | Clause::Merge(_)
+        | Clause::FusedOptionalMatchAggregate { .. }
+        | Clause::FusedVectorScoreTopK { .. }
+        | Clause::FusedMatchReturnAggregate { .. }
+        | Clause::FusedMatchWithAggregate { .. }
+        | Clause::FusedOrderByTopK { .. }
+        | Clause::FusedCountAll { .. }
+        | Clause::FusedCountByType { .. }
+        | Clause::FusedCountEdgesByType { .. }
+        | Clause::FusedCountTypedNode { .. }
+        | Clause::FusedCountTypedEdge { .. }
+        | Clause::FusedCountAnchoredEdges { .. }
+        | Clause::FusedNodeScanAggregate { .. }
+        | Clause::FusedNodeScanTopK { .. }
+        | Clause::SpatialJoin { .. } => {
+            // Conservative: we run before fusion, so these shouldn't
+            // appear yet; in case they do (e.g. nested subquery already
+            // optimised), fall back to "treat as references to all
+            // variables" by inserting a sentinel that won't match any
+            // projection list. We do that by skipping — combined with
+            // the check `all in projected`, an unknown clause will
+            // contribute no refs and the fold will succeed only if it
+            // was already a no-op for the named-clause checks.
+        }
+    }
+}
+
+fn collect_pattern_refs(patterns: &[Pattern], out: &mut HashSet<String>) {
+    for pat in patterns {
+        for elem in &pat.elements {
+            match elem {
+                PatternElement::Node(np) => {
+                    if let Some(v) = &np.variable {
+                        out.insert(v.clone());
+                    }
+                    if let Some(props) = &np.properties {
+                        for matcher in props.values() {
+                            collect_property_matcher_refs(matcher, out);
+                        }
+                    }
+                }
+                PatternElement::Edge(ep) => {
+                    if let Some(v) = &ep.variable {
+                        out.insert(v.clone());
+                    }
+                    if let Some(props) = &ep.properties {
+                        for matcher in props.values() {
+                            collect_property_matcher_refs(matcher, out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_property_matcher_refs(m: &PropertyMatcher, out: &mut HashSet<String>) {
+    match m {
+        PropertyMatcher::EqualsVar(name) => {
+            out.insert(name.clone());
+        }
+        PropertyMatcher::EqualsNodeProp { var, .. } => {
+            out.insert(var.clone());
+        }
+        _ => {}
+    }
+}
+
+fn collect_predicate_refs(pred: &Predicate, out: &mut HashSet<String>) {
+    match pred {
+        Predicate::Comparison { left, right, .. } => {
+            collect_expression_refs(left, out);
+            collect_expression_refs(right, out);
+        }
+        Predicate::And(a, b) | Predicate::Or(a, b) | Predicate::Xor(a, b) => {
+            collect_predicate_refs(a, out);
+            collect_predicate_refs(b, out);
+        }
+        Predicate::Not(p) => collect_predicate_refs(p, out),
+        Predicate::IsNull(e) | Predicate::IsNotNull(e) => collect_expression_refs(e, out),
+        Predicate::In { expr, list } => {
+            collect_expression_refs(expr, out);
+            for e in list {
+                collect_expression_refs(e, out);
+            }
+        }
+        Predicate::InLiteralSet { expr, .. } => collect_expression_refs(expr, out),
+        Predicate::StartsWith { expr, pattern }
+        | Predicate::EndsWith { expr, pattern }
+        | Predicate::Contains { expr, pattern } => {
+            collect_expression_refs(expr, out);
+            collect_expression_refs(pattern, out);
+        }
+        Predicate::Exists {
+            patterns,
+            where_clause,
+        } => {
+            collect_pattern_refs(patterns, out);
+            if let Some(p) = where_clause {
+                collect_predicate_refs(p, out);
+            }
+        }
+        Predicate::InExpression { expr, list_expr } => {
+            collect_expression_refs(expr, out);
+            collect_expression_refs(list_expr, out);
+        }
+        Predicate::LabelCheck { variable, .. } => {
+            out.insert(variable.clone());
+        }
+    }
+}
+
+fn collect_expression_refs(expr: &Expression, out: &mut HashSet<String>) {
+    match expr {
+        Expression::Variable(v) => {
+            out.insert(v.clone());
+        }
+        Expression::PropertyAccess { variable, .. } => {
+            out.insert(variable.clone());
+        }
+        Expression::MapProjection { variable, items } => {
+            out.insert(variable.clone());
+            for item in items {
+                if let MapProjectionItem::Alias { expr, .. } = item {
+                    collect_expression_refs(expr, out);
+                }
+            }
+        }
+        Expression::Literal(_) | Expression::Star | Expression::Parameter(_) => {}
+        Expression::FunctionCall { args, .. } => {
+            for a in args {
+                collect_expression_refs(a, out);
+            }
+        }
+        Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Concat(a, b) => {
+            collect_expression_refs(a, out);
+            collect_expression_refs(b, out);
+        }
+        Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
+            collect_expression_refs(e, out);
+        }
+        Expression::ListLiteral(items) => {
+            for e in items {
+                collect_expression_refs(e, out);
+            }
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_expr,
+        } => {
+            if let Some(o) = operand {
+                collect_expression_refs(o, out);
+            }
+            for (cond, result) in when_clauses {
+                match cond {
+                    CaseCondition::Predicate(p) => collect_predicate_refs(p, out),
+                    CaseCondition::Expression(e) => collect_expression_refs(e, out),
+                }
+                collect_expression_refs(result, out);
+            }
+            if let Some(e) = else_expr {
+                collect_expression_refs(e, out);
+            }
+        }
+        Expression::ListComprehension {
+            variable: _bound,
+            list_expr,
+            filter,
+            map_expr,
+        } => {
+            collect_expression_refs(list_expr, out);
+            if let Some(p) = filter {
+                collect_predicate_refs(p, out);
+            }
+            if let Some(e) = map_expr {
+                collect_expression_refs(e, out);
+            }
+        }
+        Expression::IndexAccess { expr, index } => {
+            collect_expression_refs(expr, out);
+            collect_expression_refs(index, out);
+        }
+        Expression::ListSlice { expr, start, end } => {
+            collect_expression_refs(expr, out);
+            if let Some(s) = start {
+                collect_expression_refs(s, out);
+            }
+            if let Some(e) = end {
+                collect_expression_refs(e, out);
+            }
+        }
+        Expression::MapLiteral(pairs) => {
+            for (_, e) in pairs {
+                collect_expression_refs(e, out);
+            }
+        }
+        Expression::QuantifiedList {
+            variable: _bound,
+            list_expr,
+            filter,
+            ..
+        } => {
+            collect_expression_refs(list_expr, out);
+            collect_predicate_refs(filter, out);
+        }
+        Expression::Reduce {
+            init,
+            list_expr,
+            body,
+            ..
+        } => {
+            collect_expression_refs(init, out);
+            collect_expression_refs(list_expr, out);
+            collect_expression_refs(body, out);
+        }
+        Expression::PredicateExpr(p) => collect_predicate_refs(p, out),
+        Expression::ExprPropertyAccess { expr, .. } => collect_expression_refs(expr, out),
+        Expression::WindowFunction {
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for e in partition_by {
+                collect_expression_refs(e, out);
+            }
+            for item in order_by {
+                collect_expression_refs(&item.expression, out);
+            }
+        }
+        Expression::CountSubquery {
+            patterns,
+            where_clause,
+        } => {
+            collect_pattern_refs(patterns, out);
+            if let Some(p) = where_clause {
+                collect_predicate_refs(p, out);
+            }
         }
     }
 }

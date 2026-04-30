@@ -567,6 +567,151 @@ fn test_limit_pushdown_multi_match_safety() {
 }
 
 #[test]
+fn test_reorder_match_clauses_picks_rare_edge_first() {
+    // Two MATCH clauses share `p`, both id-anchored on the other end. The
+    // planner should drive the smaller-edge-type clause first so the
+    // executor enumerates fewer rows before joining.
+    //
+    // Motivating real-world case (Wikidata):
+    //   MATCH (p)-[:P31]->({id:5})    -- 80M instance-of edges
+    //   MATCH (p)-[:P27]->({id:183})  -- 3M citizenship edges
+    // → swap so P27 drives, then per-row check P31. ~25× cheaper.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:VERY_COMMON]->({id: 1}) \
+         MATCH (p)-[:RARE]->({id: 2}) \
+         RETURN p",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    {
+        let mut cache = graph.edge_type_counts_cache.write().unwrap();
+        let mut counts = HashMap::new();
+        counts.insert("VERY_COMMON".to_string(), 1_000_000);
+        counts.insert("RARE".to_string(), 1_000);
+        *cache = Some(counts);
+    }
+
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let matches: Vec<_> = query
+        .clauses
+        .iter()
+        .filter_map(|c| match c {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(matches.len(), 2, "expected two MATCH clauses preserved");
+
+    // First MATCH after reorder must be the RARE one.
+    let first_edge_type = matches[0].patterns[0].elements.iter().find_map(|e| {
+        if let PatternElement::Edge(ep) = e {
+            ep.connection_type.clone()
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        first_edge_type.as_deref(),
+        Some("RARE"),
+        "RARE (lower edge-type cost) should be promoted to first MATCH; \
+         got first edge type = {first_edge_type:?}"
+    );
+}
+
+#[test]
+fn test_reorder_match_clauses_skips_when_cache_missing() {
+    // Same query shape as above, but no edge_type_counts_cache populated.
+    // The reorder pass must bail (avoid triggering an O(E) cache build
+    // at plan time) and leave the original clause order intact.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:VERY_COMMON]->({id: 1}) \
+         MATCH (p)-[:RARE]->({id: 2}) \
+         RETURN p",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    // Confirm cache is unset to start.
+    assert!(!graph.has_edge_type_counts_cache());
+
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    // Original textual order preserved: VERY_COMMON first.
+    let matches: Vec<_> = query
+        .clauses
+        .iter()
+        .filter_map(|c| match c {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(matches.len(), 2);
+    let first_edge_type = matches[0].patterns[0].elements.iter().find_map(|e| {
+        if let PatternElement::Edge(ep) = e {
+            ep.connection_type.clone()
+        } else {
+            None
+        }
+    });
+    assert_eq!(first_edge_type.as_deref(), Some("VERY_COMMON"));
+    // Cache must still be empty — the planner did not force a build.
+    assert!(
+        !graph.has_edge_type_counts_cache(),
+        "planner must not warm the edge-type-counts cache from the optimization path"
+    );
+}
+
+#[test]
+fn test_reorder_match_clauses_requires_id_anchor() {
+    // No id anchor on either MATCH → cannot use the edge-count proxy
+    // safely (other-end fan-in dominates and isn't captured). Pass must
+    // leave order intact even if the cache is populated.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:VERY_COMMON]->(q) \
+         MATCH (p)-[:RARE]->(r) \
+         RETURN p",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    {
+        let mut cache = graph.edge_type_counts_cache.write().unwrap();
+        let mut counts = HashMap::new();
+        counts.insert("VERY_COMMON".to_string(), 1_000_000);
+        counts.insert("RARE".to_string(), 1_000);
+        *cache = Some(counts);
+    }
+
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let matches: Vec<_> = query
+        .clauses
+        .iter()
+        .filter_map(|c| match c {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    let first_edge_type = matches[0].patterns[0].elements.iter().find_map(|e| {
+        if let PatternElement::Edge(ep) = e {
+            ep.connection_type.clone()
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        first_edge_type.as_deref(),
+        Some("VERY_COMMON"),
+        "without id-anchored endpoints the proxy is unreliable; do not reorder"
+    );
+}
+
+#[test]
 fn test_fuse_match_return_aggregate_count_distinct() {
     // Single-MATCH + RETURN with count(DISTINCT v) on the OTHER node variable
     // — the planner should now fuse this and set distinct_count=true.
@@ -689,5 +834,195 @@ fn test_count_distinct_5_element_pattern_not_fused() {
     assert!(
         !fused_with_distinct,
         "5-element distinct-count pattern must not be fused"
+    );
+}
+
+#[test]
+fn test_fold_pass_through_with_between_matches() {
+    // The cohort-top-K shape: `Match WITH p Match Return ...`. The
+    // pass-through WITH should be stripped so downstream Match-Match
+    // fusion can fire.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:T1]->({id: 1}) \
+         WITH p \
+         MATCH (p)-[r]->() \
+         RETURN p.title, count(r) AS d \
+         ORDER BY d DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    // No bare WITH clause should remain — the pass-through one was
+    // dropped, and the multi-MATCH desugar produced a NEW with(agg)
+    // that should have been consumed by fuse_match_with_aggregate +
+    // fuse_match_with_aggregate_top_k.
+    let bare_with_count = query
+        .clauses
+        .iter()
+        .filter(|c| matches!(c, Clause::With(_)))
+        .count();
+    assert_eq!(
+        bare_with_count, 0,
+        "pass-through WITH must be stripped, and any synthesized WITH \
+         must be absorbed by aggregate fusion; got query: {:#?}",
+        query.clauses
+    );
+
+    // The query should have collapsed into a FusedMatchWithAggregate —
+    // the streaming aggregate path. (top_k absorption is a separate
+    // win that requires a pure-variable RETURN; we still benefit from
+    // the streaming aggregate even when the RETURN includes
+    // `p.title`.)
+    let has_fused_aggregate = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedMatchWithAggregate { .. }));
+    assert!(
+        has_fused_aggregate,
+        "expected the cohort query to land on the fused streaming \
+         aggregate path; clauses: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_fold_pass_through_with_keeps_useful_with() {
+    // A non-pass-through WITH (here aliasing or referencing extra
+    // variables that subsequent clauses need) must NOT be folded.
+    let mut query = parse_cypher("MATCH (p)-[r]->(q) WITH p, r RETURN p, r LIMIT 10").unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    // The pass-through WITH `WITH p, r` covers exactly what RETURN
+    // references, so it CAN be safely folded in this case. To ensure
+    // the converse test, use a different shape where the WITH
+    // *renames* a variable.
+    let mut renaming =
+        parse_cypher("MATCH (p)-[r]->(q) WITH p AS person RETURN person LIMIT 10").unwrap();
+    optimize(&mut renaming, &graph, &params);
+    let has_with = renaming
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::With(_)));
+    assert!(
+        has_with,
+        "renaming WITH (`p AS person`) must not be folded — it changes scope"
+    );
+}
+
+#[test]
+fn test_fold_pass_through_with_skipped_when_orderby_follows() {
+    // ORDER BY immediately after a WITH binds to the WITH's row scope.
+    // Folding the WITH would move the ORDER BY's binding context.
+    let mut query =
+        parse_cypher("MATCH (p)-[:T]->({id: 1}) WITH p ORDER BY p.title LIMIT 10 RETURN p")
+            .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    // The WITH is preserved because ORDER BY follows it.
+    let has_with = query.clauses.iter().any(|c| matches!(c, Clause::With(_)));
+    assert!(
+        has_with,
+        "WITH followed by ORDER BY/SKIP/LIMIT must not be folded; \
+         clauses: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_desugar_multi_match_return_aggregate() {
+    // The Variant-B shape (Match-Match-Return-aggregate, no WITH).
+    // Should be rewritten into Match-Match-With(group, agg)-Return so
+    // the existing aggregate fusion fires.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:T1]->({id: 1}) \
+         MATCH (p)-[r]->() \
+         RETURN p.title, count(r) AS d \
+         ORDER BY d DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    // Expected outcome: the aggregate fusion absorbs the synthesized
+    // WITH into a FusedMatchWithAggregate (the streaming aggregate
+    // path). top_k absorption requires a pure-variable RETURN — that's
+    // covered by a separate fusion when the RETURN qualifies; this
+    // test only pins the desugar→fusion handoff.
+    let landed_on_fused_aggregate = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedMatchWithAggregate { .. }));
+    assert!(
+        landed_on_fused_aggregate,
+        "Match-Match-Return-aggregate must desugar and fuse into the \
+         streaming aggregate path; clauses: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_desugar_skips_when_no_aggregate() {
+    // No aggregate in RETURN → desugar must not fire (would just add
+    // an unnecessary WITH).
+    let mut query = parse_cypher(
+        "MATCH (p)-[:T1]->({id: 1}) \
+         MATCH (p)-[:T2]->({id: 2}) \
+         RETURN p.title \
+         LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let bare_with_count = query
+        .clauses
+        .iter()
+        .filter(|c| matches!(c, Clause::With(_)))
+        .count();
+    assert_eq!(
+        bare_with_count, 0,
+        "desugar must not introduce a WITH when RETURN has no aggregate"
+    );
+}
+
+#[test]
+fn test_desugar_skips_when_multiple_group_vars() {
+    // Two distinct group variables (`p.title`, `q.name`) — the simple
+    // single-variable rewrite doesn't apply; bail.
+    let mut query = parse_cypher(
+        "MATCH (p)-[:T1]->({id: 1}) \
+         MATCH (p)-[r]->(q) \
+         RETURN p.title, q.title, count(r) AS d \
+         ORDER BY d DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    // Should NOT have produced a FusedMatchWithAggregate — the desugar
+    // was correctly skipped, leaving the query for the slow path.
+    let fused_count = query
+        .clauses
+        .iter()
+        .filter(|c| matches!(c, Clause::FusedMatchWithAggregate { .. }))
+        .count();
+    assert_eq!(
+        fused_count, 0,
+        "multi-group-variable RETURN must not be auto-rewritten"
     );
 }
