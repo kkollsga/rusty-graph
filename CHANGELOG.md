@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.33] — 2026-04-30
+
+### Tooling
+
+- New `bench/bench_cohort_cold.py` — spawns a fresh Python subprocess
+  per (query, iteration) and runs `sudo purge` between each so the
+  OS page cache is dropped before the kglite mmap is re-faulted.
+  Settles "is plan X actually faster than plan Y?" questions that
+  warm-cache timings can't answer.
+- Planner regression test pinning that the user's exact cohort top-K
+  shape (with explicit `WITH p` between MATCHes) absorbs `top_k`
+  after the fold + desugar + fuse pipeline.
+
 ## [0.8.32] — 2026-04-30
 
 ### Performance — cohort top-K with PropertyAccess RETURN now absorbs LIMIT
