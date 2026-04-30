@@ -2974,6 +2974,7 @@ class KnowledgeGraph:
         params: Optional[dict[str, Any]] = None,
         timeout_ms: Optional[int] = None,
         max_rows: Optional[int] = None,
+        streaming: bool = True,
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 
@@ -3015,6 +3016,15 @@ class KnowledgeGraph:
                 disable the deadline for this call.
             max_rows: Cap on intermediate rows; defaults to
                 ``set_default_max_rows()``.
+            streaming: When ``True`` (default), the executor absorbs
+                compatible clause runs (currently
+                ``WITH/RETURN(group, agg) [ORDER BY ... LIMIT k]``) into
+                a streaming pipeline that builds aggregate state inline
+                and replaces full sort + truncate with a heap-pruned
+                top-K (O(n log k) instead of O(n log n)). Pass ``False``
+                to force the materialized executor — useful for
+                debugging parity issues; behaviour should otherwise be
+                identical.
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,

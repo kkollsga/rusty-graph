@@ -340,19 +340,31 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "start_node" | "startnode" => {
-                // start_node(r) → source node of the bound relationship
+                // start_node(r) / startNode(r) → source node of the
+                // bound relationship in the graph. Look up via
+                // `edge_index` rather than `EdgeBinding.source` —
+                // the binding stores the pattern's left endpoint,
+                // which is *not* the same as the edge's graph source
+                // when the matcher anchored on the right endpoint and
+                // walked incoming.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(edge) = row.edge_bindings.get(var.as_str()) {
-                        return Ok(Value::NodeRef(edge.source.index() as u32));
+                        if let Some((src, _)) = self.graph.graph.edge_endpoints(edge.edge_index) {
+                            return Ok(Value::NodeRef(src.index() as u32));
+                        }
                     }
                 }
                 Ok(Value::Null)
             }
             "end_node" | "endnode" => {
-                // end_node(r) → target node of the bound relationship
+                // end_node(r) / endNode(r) → target node of the
+                // bound relationship in the graph. See `start_node`
+                // above for the reason we go through `edge_index`.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(edge) = row.edge_bindings.get(var.as_str()) {
-                        return Ok(Value::NodeRef(edge.target.index() as u32));
+                        if let Some((_, tgt)) = self.graph.graph.edge_endpoints(edge.edge_index) {
+                            return Ok(Value::NodeRef(tgt.index() as u32));
+                        }
                     }
                 }
                 Ok(Value::Null)

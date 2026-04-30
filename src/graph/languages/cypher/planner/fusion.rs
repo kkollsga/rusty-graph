@@ -7,6 +7,16 @@ use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::schema::DirGraph;
 
+// Note: an earlier draft of this module exposed
+// `match_clause_has_edge_filter` and bailed every fused pass when any
+// edge carried an inline filter. That regressed unfiltered cohort
+// queries by ~250× — the fused histogram fast path got thrown away
+// even though it was still safe to use. The current design keeps
+// fusion enabled and has each fused count helper apply the filter
+// inline (`try_count_simple_pattern`, `try_count_distinct_peers`) or
+// bail itself (`try_fast_with_aggregate_via_histogram`). See those
+// helpers for the details.
+
 pub(super) fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph) {
     use crate::graph::core::pattern_matching::{EdgeDirection, PropertyMatcher};
 

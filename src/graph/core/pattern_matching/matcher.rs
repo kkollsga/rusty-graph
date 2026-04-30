@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use super::pattern::{
-    EdgeDirection, EdgePattern, MatchBinding, NodePattern, Pattern, PatternElement, PatternMatch,
-    PropertyMatcher,
+    AnchorSide, EdgeDirection, EdgePattern, MatchBinding, NodePattern, Pattern, PatternElement,
+    PatternMatch, PropertyMatcher,
 };
 
 /// Minimum match count to use parallel expansion via rayon.
@@ -1367,6 +1367,38 @@ impl<'a> PatternExecutor<'a> {
                     }
                 } else if let Some(key) = conn_key {
                     if edge_data.connection_type != key {
+                        continue;
+                    }
+                }
+
+                // Inline edge filter pushed from a downstream WHERE.
+                // Skip if the predicate rejects this edge — eliminates
+                // rows the post-expansion WHERE would have discarded
+                // anyway, so the dominant cost (binding allocation +
+                // node-property reads below) never happens. The
+                // `if let Some` guards the no-filter hot path with a
+                // single branch-predicted check.
+                if let Some(ref filter) = edge_pattern.edge_filter {
+                    let edge_source = edge.source();
+                    let edge_target = edge.target();
+                    // Map the matcher's `direction` onto "is the peer
+                    // node on the edge's start side?" — the form
+                    // RelEdgePredicate works with.
+                    let peer_is_start = match (filter.anchor, direction) {
+                        (AnchorSide::Source, Direction::Outgoing) => false,
+                        (AnchorSide::Source, Direction::Incoming) => true,
+                        (AnchorSide::Target, Direction::Outgoing) => true,
+                        (AnchorSide::Target, Direction::Incoming) => false,
+                    };
+                    let conn_ty = edge_data.connection_type;
+                    let keep = filter.predicate.eval(
+                        conn_ty,
+                        peer_is_start,
+                        edge_source,
+                        edge_target,
+                        &|prop: &str| edge_data.get_property(prop).cloned(),
+                    );
+                    if !keep {
                         continue;
                     }
                 }

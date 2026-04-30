@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.30] — 2026-04-30
+
+### Performance — relationship-predicate pushdown (Phase 3)
+
+Pushes `WHERE` sub-predicates that reference only the edge variable
+(and the structural peer endpoint of that edge in the pattern) into
+the matcher's expansion loop, *before* per-edge bindings allocate.
+Selective edge filters that previously forced the materialized 100M+
+row path now run during expansion via the disk CSR sorted-edge-type
+binary search.
+
+- **`extract_pushable_rel_predicates`** in
+  `src/graph/languages/cypher/planner/rel_predicate_pushdown.rs`
+  recognizes `type(r) = 'X'` / `type(r) IN […]`, `r.<prop> OP <lit>`
+  for `=`/`<>`/`<`/`<=`/`>`/`>=`, and `startNode(r) = peer` /
+  `endNode(r) = peer` against the structural peer in the same
+  pattern. AND/OR/NOT compositions of those leaves push as a unit
+  when the entire subtree is pushable; partial pushdowns over OR /
+  NOT correctly leave the predicate alone.
+- **`EdgePattern::edge_filter`** carries the compiled
+  `RelEdgePredicate` to the matcher. The hot loop in
+  `pattern_matching/matcher.rs` evaluates it after the existing
+  connection-type check and before the property check — single
+  branch-predicted `if let Some` for the no-filter path.
+- **Fused count phase honors the filter.** The fused
+  `FusedMatch{Return,With}Aggregate` operators run their own count
+  loop via `try_count_simple_pattern` /
+  `try_count_distinct_peers`; both now apply the inline filter
+  during edge iteration so fused queries with a pushed predicate
+  produce correct results without falling back to the materialized
+  path. `try_fast_with_aggregate_via_histogram` bails when a filter
+  is set (the histogram counts every edge of a type by definition).
+
+`startNode(r)` / `endNode(r)` previously returned the
+`EdgeBinding`'s pattern-anchor side instead of the actual graph
+source/target — silently wrong when the planner anchored on the
+right-hand pattern endpoint and walked incoming edges. Fixed by
+looking up the edge endpoints via `edge_index`.
+
+**Wikidata cohort impact** (warm cache, 124M-node graph):
+- baseline `MATCH (p:Q20-citizen)-[r]-()` aggregate: 224ms
+- `WHERE type(r) = 'P19'` (selective): 47s → **667ms** (~70× faster)
+- `WHERE type(r) IN ['P19', 'P569', 'P570']`: 47s → **670ms**
+- `WHERE NOT (type(r) = 'P50' AND startNode(r) = other)`: 60s → **656ms** (~90× faster, correct result)
+
+### Performance — streaming aggregate + heap top-K (Phase 1)
+
+First slice of a multi-phase rework that lifts streaming primitives
+into the Cypher generic execution path. Falling out of the fused fast
+path used to cost ~1000× on cohort-scale queries; this slice closes
+the gap on shapes that combine `WITH(group, agg)` with `ORDER BY …
+LIMIT k` decorations the existing fused operators don't cover.
+
+- **`RowStream` operator pipeline** in
+  `src/graph/languages/cypher/executor/stream/`. The driver in
+  `executor::execute` tries to absorb a contiguous clause run
+  (`WITH/RETURN(group, agg) [→ ORDER BY → LIMIT]`) into a single
+  streaming pipeline before the materialized executor sees the
+  clauses. On no match the driver falls through with the input
+  `ResultSet` unchanged.
+
+- **`StreamingAggregate`**: hash aggregate that builds per-group state
+  inline as upstream rows arrive — same I/O profile as the
+  materialized path (NodeIndex surrogate keys, deferred property
+  reads, re-bucket-by-resolved-value at finalization). Supports
+  `count(*)`, `count[(DISTINCT) expr]`,
+  `sum/avg/min/max[(DISTINCT) expr]`. Other aggregates (`collect`,
+  `std`, percentiles, arithmetic on aggregates) bail to the
+  materialized executor unchanged.
+
+- **`HeapTopK`**: `BinaryHeap` of capacity K replaces the full sort +
+  truncate path for streaming pipelines that end in `ORDER BY <expr>
+  [ASC|DESC] LIMIT k`. O(n log k) instead of O(n log n).
+
+- **`streaming` kwarg on `kg.cypher`** (default `True`). Pass
+  `streaming=False` to force the materialized executor — useful for
+  parity debugging.
+
+Phases 2-4 will widen recognized shapes (multi-MATCH, OPTIONAL MATCH
+streaming, post-aggregate `WHERE`), inline relationship predicates
+into pattern expansion, and retire the shape-matched fused operators
+once benchmarks confirm streaming parity.
+
 ## [0.8.29] — 2026-04-30
 
 ### Performance — cohort + multi-MATCH planner improvements

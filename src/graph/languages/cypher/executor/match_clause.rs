@@ -61,6 +61,46 @@ impl<'a> CypherExecutor<'a> {
         row
     }
 
+    /// Expand a single upstream row through the OPTIONAL MATCH
+    /// patterns, returning the rows produced. Same semantics as the
+    /// per-row body of [`Self::execute_optional_match`] minus the
+    /// outer `existing.rows.is_empty()` first-clause case (the
+    /// streaming path only enters when the upstream is non-empty).
+    /// Used by [`super::stream::optional_match`].
+    pub(super) fn stream_expand_optional(
+        &self,
+        clause: &MatchClause,
+        row: &ResultRow,
+    ) -> Result<Vec<ResultRow>, String> {
+        let mut expanded = Vec::new();
+        for pattern in &clause.patterns {
+            let resolved;
+            let pat = if Self::pattern_has_vars(pattern) {
+                resolved = self.resolve_pattern_vars(pattern, row);
+                &resolved
+            } else {
+                pattern
+            };
+            let pe = PatternExecutor::with_bindings_and_params(
+                self.graph,
+                None,
+                &row.node_bindings,
+                self.params,
+            )
+            .set_deadline(self.deadline);
+            let matches = pe.execute(pat)?;
+            for m in &matches {
+                if !self.bindings_compatible(row, m) {
+                    continue;
+                }
+                let mut new_row = row.clone();
+                self.merge_match_into_row(&mut new_row, m);
+                expanded.push(new_row);
+            }
+        }
+        Ok(expanded)
+    }
+
     /// Merge a PatternMatch's bindings into an existing ResultRow
     pub(super) fn merge_match_into_row(&self, row: &mut ResultRow, m: &PatternMatch) {
         for (var, binding) in &m.bindings {
@@ -495,10 +535,13 @@ impl<'a> CypherExecutor<'a> {
         let interned_conn = conn_type.map(InternedKey::from_str);
         let interned_other_type = other_type.as_ref().map(|t| InternedKey::from_str(t));
 
-        // Fast path: when no property filters on the unbound node, use
-        // count_edges_filtered which avoids EdgeData materialization entirely.
-        // On disk with sorted CSR: binary search + sequential count (zero allocations).
-        if other_props.is_none() {
+        // Fast path: when no property filters on the unbound node *and*
+        // no inline edge filter, use count_edges_filtered which avoids
+        // EdgeData materialization entirely. On disk with sorted CSR:
+        // binary search + sequential count (zero allocations). When an
+        // edge_filter is set we fall through — the slow loop below
+        // checks each edge's predicate without ever building a row.
+        if other_props.is_none() && edge.edge_filter.is_none() {
             let mut count: usize = 0;
             for &dir in traverse_dirs {
                 count = count.saturating_add(self.graph.graph.count_edges_filtered(
@@ -519,8 +562,33 @@ impl<'a> CypherExecutor<'a> {
         let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut count: i64 = 0;
         let mut iter: usize = 0;
+        // The inline filter (if any) was pushed by the planner from a
+        // downstream WHERE; apply it per edge so the count reflects the
+        // post-filter row set. AnchorSide::Source assumption matches
+        // `try_count_simple_pattern`'s `(Some(a_idx), None)` arm — the
+        // bound side is the pattern's left endpoint.
+        let edge_filter = edge.edge_filter.as_ref();
 
         for &dir in traverse_dirs {
+            // Translate the matcher's `direction` into the
+            // peer_is_start boolean RelEdgePredicate works with.
+            // bound_idx is always the anchor; `dir` describes its
+            // outward direction. For `Source` anchor:
+            //   Outgoing → peer = edge.target → peer_is_start = false
+            //   Incoming → peer = edge.source → peer_is_start = true
+            // For `Target` anchor (right-bound) it's reversed.
+            let peer_is_start = if let Some(f) = edge_filter {
+                use crate::graph::core::pattern_matching::pattern::AnchorSide;
+                match (f.anchor, dir) {
+                    (AnchorSide::Source, Direction::Outgoing) => false,
+                    (AnchorSide::Source, Direction::Incoming) => true,
+                    (AnchorSide::Target, Direction::Outgoing) => true,
+                    (AnchorSide::Target, Direction::Incoming) => false,
+                }
+            } else {
+                false
+            };
+
             for edge_ref in self
                 .graph
                 .graph
@@ -543,6 +611,22 @@ impl<'a> CypherExecutor<'a> {
                             continue;
                         }
                     } else {
+                        continue;
+                    }
+                }
+
+                if let Some(filter) = edge_filter {
+                    let edge_data = edge_ref.weight();
+                    let conn_ty = edge_data.connection_type;
+                    let edge_source = edge_ref.source();
+                    let edge_target = edge_ref.target();
+                    if !filter.predicate.eval(
+                        conn_ty,
+                        peer_is_start,
+                        edge_source,
+                        edge_target,
+                        &|prop: &str| edge_data.get_property(prop).cloned(),
+                    ) {
                         continue;
                     }
                 }
@@ -645,8 +729,21 @@ impl<'a> CypherExecutor<'a> {
         let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut peers: HashSet<NodeIndex> = HashSet::new();
         let mut iter: usize = 0;
+        let edge_filter = edge.edge_filter.as_ref();
 
         for &dir in traverse_dirs {
+            let peer_is_start = if let Some(f) = edge_filter {
+                use crate::graph::core::pattern_matching::pattern::AnchorSide;
+                match (f.anchor, dir) {
+                    (AnchorSide::Source, Direction::Outgoing) => false,
+                    (AnchorSide::Source, Direction::Incoming) => true,
+                    (AnchorSide::Target, Direction::Outgoing) => true,
+                    (AnchorSide::Target, Direction::Incoming) => false,
+                }
+            } else {
+                false
+            };
+
             for edge_ref in self
                 .graph
                 .graph
@@ -671,6 +768,21 @@ impl<'a> CypherExecutor<'a> {
                 };
                 if peers.contains(&other_idx) {
                     continue;
+                }
+                if let Some(filter) = edge_filter {
+                    let edge_data = edge_ref.weight();
+                    let conn_ty = edge_data.connection_type;
+                    let edge_source = edge_ref.source();
+                    let edge_target = edge_ref.target();
+                    if !filter.predicate.eval(
+                        conn_ty,
+                        peer_is_start,
+                        edge_source,
+                        edge_target,
+                        &|prop: &str| edge_data.get_property(prop).cloned(),
+                    ) {
+                        continue;
+                    }
                 }
                 if let Some(required_type) = interned_other_type {
                     if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
@@ -2314,10 +2426,19 @@ impl<'a> CypherExecutor<'a> {
         if pattern.elements.len() != 3 || group_elem_idx != 2 {
             return Ok(None);
         }
-        let edge_conn_type = match &pattern.elements[1] {
-            PatternElement::Edge(ep) => ep.connection_type.as_deref(),
+        // Histogram fast path counts every edge of the given type — it
+        // can't apply an arbitrary `edge_filter` pushed from a WHERE
+        // clause. Bail when one is present so the caller falls back to
+        // per-source iteration via `try_count_simple_pattern`, which
+        // does honor the filter inline.
+        let edge_pat = match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep,
             _ => return Ok(None),
         };
+        if edge_pat.edge_filter.is_some() {
+            return Ok(None);
+        }
+        let edge_conn_type = edge_pat.connection_type.as_deref();
         let Some(ct_str) = edge_conn_type else {
             return Ok(None);
         };

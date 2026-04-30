@@ -1179,7 +1179,8 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true))]
+    #[allow(clippy::too_many_arguments)]
     fn cypher(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -1188,6 +1189,7 @@ impl KnowledgeGraph {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
         max_rows: Option<usize>,
+        streaming: bool,
     ) -> PyResult<Py<PyAny>> {
         let self_ref = slf.borrow();
         let effective_timeout = timeout_ms
@@ -1361,7 +1363,8 @@ impl KnowledgeGraph {
             let query_started = std::time::Instant::now();
             let result = {
                 let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline)
-                    .with_max_rows(effective_max_rows);
+                    .with_max_rows(effective_max_rows)
+                    .with_streaming(streaming);
                 py.detach(|| executor.execute(&parsed))
             }
             .map_err(|e| {

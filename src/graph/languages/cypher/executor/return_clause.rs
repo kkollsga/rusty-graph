@@ -394,7 +394,7 @@ impl<'a> CypherExecutor<'a> {
     /// the post-grouping materialization pass — builds a minimal one-binding
     /// row and routes through the normal expression evaluator so all special
     /// cases (title alias, disk fast paths, etc.) stay in one place.
-    fn resolve_node_prop_for_group(
+    pub(super) fn resolve_node_prop_for_group(
         &self,
         node_idx: petgraph::graph::NodeIndex,
         expr: &Expression,

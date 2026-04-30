@@ -17,6 +17,7 @@ pub mod cost_model;
 pub mod fusion;
 pub mod index_selection;
 pub mod join_order;
+pub mod rel_predicate_pushdown;
 pub mod schema_check;
 pub mod simplification;
 
@@ -29,6 +30,7 @@ use fusion::{
 };
 use index_selection::push_where_into_match;
 use join_order::{optimize_pattern_start_node, reorder_match_clauses, reorder_match_patterns};
+use rel_predicate_pushdown::extract_pushable_rel_predicates;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
     push_distinct_into_match, push_limit_into_match,
@@ -69,9 +71,14 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     push_where_into_match(query, params);
     fold_or_to_in(query);
     push_where_into_match(query, params); // second pass: push newly-created IN predicates
-                                          // Strip pass-through WITH clauses that block downstream fusion. Runs
-                                          // before the cross-clause MATCH reorder so the latter sees a
-                                          // contiguous Match-Match span when a `WITH p` sat between them.
+                                          // Inline edge predicates (`type(r) = 'X'`, `r.prop OP lit`,
+                                          // `startNode(r) = peer`) that the post-expansion WHERE would
+                                          // otherwise evaluate row-by-row. The matcher applies them during
+                                          // expansion, before per-edge bindings are allocated.
+    extract_pushable_rel_predicates(query);
+    // Strip pass-through WITH clauses that block downstream fusion. Runs
+    // before the cross-clause MATCH reorder so the latter sees a
+    // contiguous Match-Match span when a `WITH p` sat between them.
     fold_pass_through_with(query);
     // Rewrite `Match-Match-Return(group, agg)` into `Match-Match-With
     // (group, agg)-Return(project)` so the existing aggregate-fusion +

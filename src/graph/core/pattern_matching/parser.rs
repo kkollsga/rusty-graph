@@ -512,6 +512,7 @@ impl Parser {
             var_length,
             needs_path_info: true,
             skip_target_type_check: false,
+            edge_filter: None,
         })
     }
 

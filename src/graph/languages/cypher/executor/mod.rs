@@ -249,12 +249,12 @@ pub fn clause_display_name(clause: &Clause) -> String {
 /// Supports parameterized queries via `$param` syntax, optional deadlines
 /// for timeout enforcement, and pre-computed caches for vector similarity.
 pub struct CypherExecutor<'a> {
-    graph: &'a DirGraph,
-    params: &'a HashMap<String, Value>,
+    pub(super) graph: &'a DirGraph,
+    pub(super) params: &'a HashMap<String, Value>,
     /// Cache for vector_score constant arguments (set once on first call, thread-safe).
     vs_cache: OnceLock<VectorScoreCache>,
     /// Optional deadline for aborting long-running queries.
-    deadline: Option<Instant>,
+    pub(super) deadline: Option<Instant>,
     /// Optional cap on intermediate result rows. Queries exceeding this return an error.
     max_rows: Option<usize>,
     /// Per-node spatial data cache — populated on first access per NodeIndex.
@@ -262,6 +262,10 @@ pub struct CypherExecutor<'a> {
     spatial_node_cache: RwLock<HashMap<usize, Option<NodeSpatialData>>>,
     /// Compiled regex cache — avoids recompiling the same pattern per row.
     regex_cache: RwLock<HashMap<String, regex::Regex>>,
+    /// When `true`, the executor tries to absorb compatible clause runs
+    /// into the streaming pipeline ([`stream::pipeline::try_run_streaming`]).
+    /// Default `true`; disabled per-query via `kg.cypher(streaming=False)`.
+    streaming: bool,
 }
 
 impl<'a> CypherExecutor<'a> {
@@ -278,12 +282,21 @@ impl<'a> CypherExecutor<'a> {
             max_rows: None,
             spatial_node_cache: RwLock::new(HashMap::new()),
             regex_cache: RwLock::new(HashMap::new()),
+            streaming: true,
         }
     }
 
     /// Set the maximum number of intermediate result rows.
     pub fn with_max_rows(mut self, max_rows: Option<usize>) -> Self {
         self.max_rows = max_rows;
+        self
+    }
+
+    /// Enable or disable the streaming-pipeline path. Default is
+    /// `true`; the Python boundary exposes this as the
+    /// `kg.cypher(streaming=…)` kwarg.
+    pub fn with_streaming(mut self, streaming: bool) -> Self {
+        self.streaming = streaming;
         self
     }
 
@@ -377,6 +390,35 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 None
             };
+
+            // Streaming-pipeline path: when enabled, try to absorb a
+            // contiguous run of clauses (typically `WITH/RETURN(group,
+            // agg)` optionally followed by `ORDER BY → LIMIT`) into a
+            // single streaming pipeline that avoids the materialize-
+            // then-bucket cost of the generic aggregator. On match,
+            // advance `i` by the number of absorbed clauses; on no
+            // match, the function returns the input result_set
+            // unchanged so we fall through to the materialized executor.
+            if self.streaming
+                && !profiling
+                && inline_where.is_none()
+                && !matches!(clause, Clause::Match(_) | Clause::OptionalMatch(_))
+            {
+                match stream::pipeline::try_run_streaming(self, &query.clauses[i..], result_set)? {
+                    stream::pipeline::StreamingOutcome::Absorbed(run) => {
+                        for off in 1..run.absorbed {
+                            if i + off < skip_clause.len() {
+                                skip_clause[i + off] = true;
+                            }
+                        }
+                        result_set = run.result;
+                        continue;
+                    }
+                    stream::pipeline::StreamingOutcome::Bailed(rs) => {
+                        result_set = rs;
+                    }
+                }
+            }
 
             if profiling {
                 let rows_in = result_set.rows.len();
@@ -1192,6 +1234,7 @@ pub mod return_clause;
 pub mod rule_procedures;
 pub mod scalar_functions;
 pub mod spatial_join;
+pub mod stream;
 #[cfg(test)]
 pub mod tests;
 pub mod where_clause;

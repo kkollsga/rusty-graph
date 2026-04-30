@@ -61,6 +61,201 @@ pub struct EdgePattern {
     /// Set by the query planner when connection_type_metadata confirms a single
     /// target type (outgoing) or source type (incoming).
     pub skip_target_type_check: bool,
+    /// Inline filter pushed from a downstream `WHERE` predicate that
+    /// references only the edge variable (and the structural peer of
+    /// the edge in this pattern). Applied during expansion in the
+    /// matcher hot loop, *before* a row is materialized — eliminates
+    /// edges whose post-materialization WHERE would have rejected
+    /// them. The Cypher planner's
+    /// [`super::super::languages::cypher::planner::rel_predicate_pushdown`]
+    /// pass populates this field; it stays `None` for callers that
+    /// build patterns by hand.
+    pub edge_filter: Option<RelEdgeFilter>,
+}
+
+/// Inline edge filter — evaluated during expansion to skip edges the
+/// downstream `WHERE` would have discarded. The single
+/// [`RelEdgePredicate`] is wrapped to carry the original anchor side
+/// of the edge (which determines how `startNode(r)` / `endNode(r)`
+/// map onto the matcher's `direction` parameter).
+#[derive(Debug, Clone)]
+pub struct RelEdgeFilter {
+    pub predicate: RelEdgePredicate,
+    /// Which side of the edge the matcher anchors on, so the matcher
+    /// can map `direction` back to startNode/endNode semantics.
+    /// `Source` means the matcher is expanding outward from the
+    /// pattern's left node; `Target` means from the right node.
+    /// Set by the planner when it compiles `startNode(r) = …` /
+    /// `endNode(r) = …` references.
+    pub anchor: AnchorSide,
+}
+
+/// Which pattern endpoint the matcher is treating as the anchor when
+/// expanding edges. The planner records this when compiling
+/// startNode/endNode predicates so the matcher can answer those at
+/// runtime against `direction`.
+///
+/// `Target` is currently unused — the rel-pushdown pass only emits
+/// `Source`-anchored filters because the planner reverses pattern
+/// direction elsewhere (`reorder_match_patterns`) before pushdown
+/// runs. Kept around so a future planner pass that emits filters
+/// after-reversal has a name for "the right endpoint is the anchor."
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorSide {
+    /// Anchor is the left endpoint of the pattern (typical case —
+    /// `(anchor)-[r]-(peer)`). Matcher's `direction == Outgoing`
+    /// means the edge goes anchor→peer; `Incoming` means peer→anchor.
+    Source,
+    /// Anchor is the right endpoint of the pattern (used when the
+    /// planner reverses pattern direction for selectivity). Matcher's
+    /// `direction == Outgoing` then means peer→anchor in the original
+    /// pattern's frame of reference.
+    Target,
+}
+
+/// Compiled per-edge predicate used by [`RelEdgeFilter`]. Evaluated in
+/// the matcher hot loop with `(edge_data, direction)` and an optional
+/// pre-resolved peer node. Anything outside this enum the planner is
+/// able to compile leaves the WHERE clause untouched and falls
+/// through to the materialized predicate evaluator.
+///
+/// `StartNodeIs` / `EndNodeIs` (with a bound `NodeIndex`) are
+/// reserved for a future pushdown that sees `startNode(r) = $param`
+/// or `startNode(r) = priorVar` after parameter / pre-binding
+/// resolution. The current pass only emits the peer-relative variants.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum RelEdgePredicate {
+    /// Always-true sentinel — used as the identity for And/Or
+    /// simplification at compile time.
+    True,
+    /// Always-false sentinel.
+    False,
+    /// `type(r)` is one of these connection types.
+    TypeIn(Vec<InternedKey>),
+    /// `r.<prop> OP <value>` for the supplied operator.
+    Property {
+        prop: String,
+        op: PropOp,
+        value: Value,
+    },
+    /// `startNode(r) = <peer endpoint>` / `endNode(r) = <peer
+    /// endpoint>`. Encoded as a direction equality in the matcher's
+    /// frame of reference: `StartNodeIsPeer` is true iff the edge's
+    /// source equals the pattern's peer, which (for a `Source`-anchored
+    /// pattern) maps to `direction == Incoming`.
+    StartNodeIsPeer,
+    EndNodeIsPeer,
+    /// `r.<endpoint>(...) = <bound NodeIndex>` — startNode/endNode
+    /// compared against a node bound elsewhere (pre-bindings or a
+    /// prior-clause variable). The matcher checks the resolved
+    /// NodeIndex against the edge's source/target.
+    StartNodeIs(NodeIndex),
+    EndNodeIs(NodeIndex),
+    /// All sub-predicates must hold.
+    And(Vec<RelEdgePredicate>),
+    /// At least one sub-predicate must hold.
+    Or(Vec<RelEdgePredicate>),
+    /// Negated sub-predicate.
+    Not(Box<RelEdgePredicate>),
+}
+
+/// Comparison operator for [`RelEdgePredicate::Property`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropOp {
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+impl RelEdgePredicate {
+    /// Evaluate the predicate for a single edge during expansion.
+    ///
+    /// `connection_type` and `get_prop` give access to the edge body
+    /// without requiring the matcher to materialize a full
+    /// `EdgeData`. `peer_dir` is the matcher's per-edge direction
+    /// translated into a consistent "is the peer on the start side?"
+    /// boolean (the matcher computes this once per edge using the
+    /// stored [`AnchorSide`]).
+    ///
+    /// Returns `true` to keep the edge, `false` to skip.
+    #[inline]
+    pub fn eval(
+        &self,
+        connection_type: InternedKey,
+        peer_is_start: bool,
+        edge_source: NodeIndex,
+        edge_target: NodeIndex,
+        get_prop: &impl Fn(&str) -> Option<Value>,
+    ) -> bool {
+        match self {
+            RelEdgePredicate::True => true,
+            RelEdgePredicate::False => false,
+            RelEdgePredicate::TypeIn(types) => types.contains(&connection_type),
+            RelEdgePredicate::Property { prop, op, value } => {
+                match get_prop(prop) {
+                    Some(v) => match op {
+                        PropOp::Eq => crate::graph::core::filtering::values_equal(&v, value),
+                        PropOp::Ne => !crate::graph::core::filtering::values_equal(&v, value),
+                        PropOp::Gt => matches!(
+                            crate::graph::core::filtering::compare_values(&v, value),
+                            Some(std::cmp::Ordering::Greater)
+                        ),
+                        PropOp::Ge => matches!(
+                            crate::graph::core::filtering::compare_values(&v, value),
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        ),
+                        PropOp::Lt => matches!(
+                            crate::graph::core::filtering::compare_values(&v, value),
+                            Some(std::cmp::Ordering::Less)
+                        ),
+                        PropOp::Le => matches!(
+                            crate::graph::core::filtering::compare_values(&v, value),
+                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                        ),
+                    },
+                    // Cypher: missing property → predicate is unknown,
+                    // not true. Equality and `<` of a missing prop both
+                    // discard the edge, matching the materialized
+                    // evaluator's behaviour.
+                    None => false,
+                }
+            }
+            RelEdgePredicate::StartNodeIsPeer => peer_is_start,
+            RelEdgePredicate::EndNodeIsPeer => !peer_is_start,
+            RelEdgePredicate::StartNodeIs(idx) => edge_source == *idx,
+            RelEdgePredicate::EndNodeIs(idx) => edge_target == *idx,
+            RelEdgePredicate::And(items) => items.iter().all(|p| {
+                p.eval(
+                    connection_type,
+                    peer_is_start,
+                    edge_source,
+                    edge_target,
+                    get_prop,
+                )
+            }),
+            RelEdgePredicate::Or(items) => items.iter().any(|p| {
+                p.eval(
+                    connection_type,
+                    peer_is_start,
+                    edge_source,
+                    edge_target,
+                    get_prop,
+                )
+            }),
+            RelEdgePredicate::Not(inner) => !inner.eval(
+                connection_type,
+                peer_is_start,
+                edge_source,
+                edge_target,
+                get_prop,
+            ),
+        }
+    }
 }
 
 /// Direction of edge traversal
