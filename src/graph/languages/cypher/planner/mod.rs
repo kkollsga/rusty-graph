@@ -169,8 +169,16 @@ pub fn mark_lazy_eligibility(query: &mut CypherQuery) {
 /// callers (executor, transactions, mutations) don't need to think about
 /// the disable knob.
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
-    let empty: HashSet<String> = HashSet::new();
-    optimize_with_disabled(query, graph, params, &empty);
+    optimize_with_disabled(query, graph, params, empty_disabled_set());
+}
+
+/// Process-lifetime empty `HashSet<String>` used as the no-knob default.
+/// Avoids a fresh `HashSet::new()` allocation on every cypher call —
+/// negligible per-call (no heap alloc on empty), but the static is
+/// clearer about intent and removes per-call stack-frame setup.
+pub(crate) fn empty_disabled_set() -> &'static HashSet<String> {
+    static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashSet::new)
 }
 
 /// Run the optimizer pipeline, skipping any pass whose name is in
@@ -212,6 +220,9 @@ fn debug_check_invariants(query: &CypherQuery, after_pass_name: &str) {
     if let Err(msg) = check_return_with_items_non_empty(query) {
         panic!("Pass `{after_pass_name}` produced invalid IR: {msg}");
     }
+    if let Err(msg) = check_limit_skip_nonnegative(query) {
+        panic!("Pass `{after_pass_name}` produced invalid IR: {msg}");
+    }
 }
 
 /// Every Match / OptionalMatch must have at least one pattern, and each
@@ -249,6 +260,38 @@ fn check_return_with_items_non_empty(query: &CypherQuery) -> Result<(), String> 
             }
             Clause::With(w) if w.items.is_empty() => {
                 return Err(format!("With clause at index {idx} has no items"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Literal LIMIT / SKIP values must be non-negative. Catches passes
+/// that synthesize a literal hint (e.g. fusion top-K) and forget to
+/// clamp at zero. Non-literal values (parameters, expressions) are left
+/// alone — the executor handles those at runtime.
+#[cfg(debug_assertions)]
+fn check_limit_skip_nonnegative(query: &CypherQuery) -> Result<(), String> {
+    for (idx, clause) in query.clauses.iter().enumerate() {
+        match clause {
+            Clause::Limit(l) => {
+                if let Expression::Literal(Value::Int64(n)) = &l.count {
+                    if *n < 0 {
+                        return Err(format!(
+                            "Limit clause at index {idx} has negative literal {n}"
+                        ));
+                    }
+                }
+            }
+            Clause::Skip(s) => {
+                if let Expression::Literal(Value::Int64(n)) = &s.count {
+                    if *n < 0 {
+                        return Err(format!(
+                            "Skip clause at index {idx} has negative literal {n}"
+                        ));
+                    }
+                }
             }
             _ => {}
         }
@@ -463,11 +506,15 @@ fn pass_reorder_predicates_by_cost(query: &mut CypherQuery, _ctx: &PassCtx) {
 }
 
 /// **Pass:** `mark_fast_var_length_paths` — When a variable-length
-/// edge `[r:T*1..N]` has no path assignment and no edge variable,
-/// mark `needs_path_info=false` so the executor uses a fast BFS with
-/// global dedup. KNOWN DIVERGENCE: this dedups by target node, while
-/// the slow path keeps one row per distinct path — see
-/// `tests/test_cypher_differential.py::KNOWN_DIVERGENT`.
+/// edge `[:T*1..N]` has no path assignment and no edge variable AND
+/// the downstream RETURN/WITH is `DISTINCT` or composed of dedup-safe
+/// aggregates (`min/max/count(DISTINCT)/collect(DISTINCT)`), mark
+/// `needs_path_info=false` so the executor uses a fast BFS with
+/// global target-node dedup. The downstream-safety check is critical:
+/// row count is implicit path count, so dedup-by-target silently
+/// drops rows when the user wrote a plain per-path projection like
+/// `RETURN q.name`. WHY-BAIL: anything else stays on the slow per-
+/// path BFS — correct, just not as fast.
 fn pass_mark_fast_var_length_paths(query: &mut CypherQuery, _ctx: &PassCtx) {
     mark_fast_var_length_paths(query)
 }
@@ -484,10 +531,25 @@ fn pass_mark_skip_target_type_check(query: &mut CypherQuery, ctx: &PassCtx) {
 /// Mark variable-length edges that don't need path tracking.
 ///
 /// When a MATCH clause has no path assignments (`p = ...`) and the edge
-/// has no named variable (`[r:T*1..N]`), the full path vector is never
-/// read downstream.  Setting `needs_path_info = false` lets the pattern
-/// executor use a fast BFS with global dedup instead of tracking every path.
+/// has no named variable (`[r:T*1..N]`), AND the query's downstream
+/// projection is provably indifferent to row multiplicity, the executor
+/// can use a fast BFS with global target-node dedup instead of tracking
+/// every distinct path.
+///
+/// The "indifferent to row multiplicity" check is critical: row count
+/// is itself an implicit count of paths in Cypher's semantics, so
+/// dedup-by-target silently drops rows when the user wrote a plain
+/// per-path projection like `RETURN q.name`. The fast path is only
+/// safe when the downstream is `DISTINCT`, or every projection is an
+/// aggregate (multiplicity collapses inside the aggregate).
+///
+/// Caught by `tests/test_cypher_differential.py::var_length_no_var`,
+/// which previously xfail'd because the un-gated fast path returned
+/// 2 rows where Neo4j semantics demand 3.
 fn mark_fast_var_length_paths(query: &mut CypherQuery) {
+    if !downstream_is_dedup_safe(query) {
+        return;
+    }
     for clause in &mut query.clauses {
         let mc = match clause {
             Clause::Match(mc) | Clause::OptionalMatch(mc) => mc,
@@ -509,6 +571,76 @@ fn mark_fast_var_length_paths(query: &mut CypherQuery) {
             }
         }
     }
+}
+
+/// Returns true iff the query's first downstream projection collapses
+/// row multiplicity. The fast var-length BFS dedups by target node;
+/// that's only correct when the surrounding query doesn't depend on
+/// per-path row counts.
+///
+/// Two safe cases:
+/// - `RETURN/WITH DISTINCT` — row tuples are deduped at projection
+///   anyway, so a fast-path target-dedup is consistent.
+/// - `RETURN/WITH` whose every item is an aggregate — multiplicity is
+///   collapsed by the aggregate. (`count(*)` over the matches: paths
+///   would count differently than targets, so we don't allow `count(*)`
+///   here unless it's `count(DISTINCT target)` — but the simpler check
+///   "every item is an aggregate" handles `count(DISTINCT target)`,
+///   `sum(target.x)`, etc. uniformly. Plain `count(*)` over var-length
+///   matches is a real semantic question; we conservatively reject
+///   non-DISTINCT `count(*)` by requiring DISTINCT-aware aggregates.)
+///
+/// Conservative anywhere else: we'd rather skip the optimization than
+/// silently drop rows.
+fn downstream_is_dedup_safe(query: &CypherQuery) -> bool {
+    for clause in &query.clauses {
+        match clause {
+            Clause::Return(r) => {
+                if r.distinct {
+                    return true;
+                }
+                let all_agg_distinct = !r.items.is_empty()
+                    && r.items
+                        .iter()
+                        .all(|item| is_distinct_safe_aggregate(&item.expression));
+                return all_agg_distinct;
+            }
+            Clause::With(w) => {
+                if w.distinct {
+                    return true;
+                }
+                let all_agg_distinct = !w.items.is_empty()
+                    && w.items
+                        .iter()
+                        .all(|item| is_distinct_safe_aggregate(&item.expression));
+                return all_agg_distinct;
+            }
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// True when an expression is an aggregate that's invariant to row
+/// multiplicity: `count(DISTINCT _)`, `min/max(_)`, `collect(DISTINCT _)`.
+/// Plain `count(_)` and `sum(_)` would shift with row count, so they
+/// don't qualify.
+fn is_distinct_safe_aggregate(expr: &Expression) -> bool {
+    if let Expression::FunctionCall {
+        name,
+        args: _,
+        distinct,
+    } = expr
+    {
+        let nm = name.to_lowercase();
+        if matches!(nm.as_str(), "min" | "max") {
+            return true;
+        }
+        if *distinct && matches!(nm.as_str(), "count" | "collect") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Skip node type checks when the connection type metadata guarantees the target type.

@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Cypher planner
 
+- **Fixed `mark_fast_var_length_paths` per-target row drop** — closes
+  the lone open xfail in the differential harness. The pass set
+  `needs_path_info=false` on any unnamed variable-length edge, which
+  triggered a target-node-deduping BFS that returned fewer rows than
+  Cypher's per-path semantic (e.g., 2 rows where Neo4j returns 3).
+  The fix gates the pass on `downstream_is_dedup_safe` — the next
+  RETURN/WITH must be `DISTINCT` or its projections must be entirely
+  dedup-safe aggregates (`min/max/count(DISTINCT)/collect(DISTINCT)`).
+  Plain `RETURN q.name` over var-length now uses the slow per-path
+  BFS (correct); users who want the fast path opt in via `RETURN
+  DISTINCT q.name` or `count(DISTINCT q)`.
+- **Differential harness corpus extended to ~95 query shapes** plus 9
+  mutations + 26 per-pass bisection tests. Probed three additional
+  rounds (CALL/list-comp/path-ops/multi-WITH/HAVING/coalesce/CASE-in-
+  agg/expr-filter/etc.) and surfaced no further divergences after
+  fixing the var-length pass. The corpus also now includes
+  `var_length_no_var_per_path`, `var_length_no_var_distinct`, and
+  `var_length_no_var_count_distinct` as permanent regression tests
+  for the fix.
+- **Performance cleanups in the new code paths.** `optimize()` now
+  returns a process-lifetime empty `HashSet<String>` via `OnceLock`
+  instead of allocating a fresh `HashSet::new()` on every call; the
+  PyAPI's `cypher()` short-circuits the disabled-passes set
+  construction when both `disable_optimizer=False` and
+  `disabled_passes=None` (the default), bypassing the validation
+  loop entirely on the hot path.
+- **Third debug-mode IR invariant**: literal `LIMIT` and `SKIP`
+  values must be non-negative. Catches passes that synthesize a
+  literal limit hint (e.g. fusion top-K) and forget to clamp at
+  zero. Zero release cost (`#[cfg(debug_assertions)]`-gated).
+- **Makefile bench targets force `maturin develop --release`.**
+  Saved baselines are release-built; running `make bench-compare`
+  against a dev build previously showed false ~15× regressions
+  across every benchmark. New baseline `0007_post_robustness_pass`
+  saved with all the planner refactor + bug fixes in place.
 - **Optimizer is now a registry of named passes (`kglite.cypher_pass_names()`).**
   The 25-pass orchestrator at `src/graph/languages/cypher/planner/mod.rs`
   has been refactored from a 40-line inline body into a single

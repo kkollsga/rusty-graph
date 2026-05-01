@@ -1289,19 +1289,26 @@ impl KnowledgeGraph {
             }
         }
 
-        // Build the disabled-passes set: the `disable_optimizer=True`
-        // shortcut expands to "all passes". Validate every name against
-        // the registry so a typo doesn't silently disable nothing.
-        let disabled_set = build_disabled_passes(disable_optimizer, disabled_passes)?;
-
-        // Optimize (predicate pushdown, etc.) — needs shared borrow of graph
+        // Optimize (predicate pushdown, etc.) — needs shared borrow of graph.
+        // Hot path: when both kwargs are at defaults (the overwhelmingly
+        // common case), use the static empty-set reference and skip the
+        // HashSet allocation that build_disabled_passes would do.
+        let disabled_owned: Option<std::collections::HashSet<String>> =
+            if disable_optimizer || disabled_passes.is_some() {
+                Some(build_disabled_passes(disable_optimizer, disabled_passes)?)
+            } else {
+                None
+            };
         {
             let this = slf.borrow();
+            let disabled_ref: &std::collections::HashSet<String> = disabled_owned
+                .as_ref()
+                .unwrap_or_else(|| cypher::planner::empty_disabled_set());
             cypher::planner::optimize_with_disabled(
                 &mut parsed,
                 &this.inner,
                 &param_map,
-                &disabled_set,
+                disabled_ref,
             );
         }
         // Top-level-only lazy annotation. Must run AFTER optimize() (so the

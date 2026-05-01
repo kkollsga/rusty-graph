@@ -183,10 +183,34 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     # ── mark_fast_var_length_paths ──
-    # NOTE: `var_length_no_var` is in TestKnownDivergences below — the
-    # fast-path BFS dedups by target node, the naive path keeps one row
-    # per distinct path. Pure design tension (path-counting semantics);
-    # not a strict correctness bug but worth flagging.
+    # The unguarded fast path used to dedup target nodes during BFS,
+    # silently returning fewer rows than per-path Cypher semantics
+    # demand. The pass is now gated to fire only when downstream
+    # collapses row multiplicity (DISTINCT or distinct-safe aggregate).
+    (
+        "var_length_no_var_per_path",
+        "small_graph",
+        # No DISTINCT, no aggregate → slow per-path BFS (3 rows in
+        # small_graph: 1→2, 1→3, 1→2→3).
+        "MATCH (p:Person {person_id: 1})-[:KNOWS*1..3]->(q:Person) RETURN q.name AS n",
+        None,
+    ),
+    (
+        "var_length_no_var_distinct",
+        "small_graph",
+        # DISTINCT → fast path is safe to fire (2 rows: Bob, Charlie).
+        # Both modes dedup at projection so they match either way.
+        "MATCH (p:Person {person_id: 1})-[:KNOWS*1..3]->(q:Person) RETURN DISTINCT q.name AS n",
+        None,
+    ),
+    (
+        "var_length_no_var_count_distinct",
+        "small_graph",
+        # count(DISTINCT _) is dedup-safe — the aggregate collapses
+        # multiplicities so the fast path's per-target dedup matches.
+        "MATCH (p:Person {person_id: 1})-[:KNOWS*1..3]->(q:Person) RETURN count(DISTINCT q) AS n",
+        None,
+    ),
     (
         "var_length_with_var",
         "small_graph",
@@ -376,6 +400,192 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     # ── WITH * project everything ──
     ("with_star", "social_graph", "MATCH (p:Person) WITH * WHERE p.age > 35 RETURN p.name AS n ORDER BY n", None),
+    # ── count{...} subquery + ORDER BY + LIMIT ──
+    (
+        "count_subquery_top_k",
+        "social_graph",
+        "MATCH (p:Person) WITH p, count{(p)-[:KNOWS]->()} AS deg "
+        "WHERE deg > 0 RETURN p.name AS n, deg ORDER BY deg DESC, n LIMIT 5",
+        None,
+    ),
+    # ── List comprehension after collect aggregate ──
+    (
+        "list_comp_after_collect",
+        "social_graph",
+        "MATCH (p:Person) WITH collect(p.age) AS ages RETURN [a IN ages WHERE a > 30 | a + 1] AS bumped",
+        None,
+    ),
+    # ── Path operations (length / nodes / relationships) ──
+    (
+        "shortest_with_length",
+        "social_graph",
+        "MATCH p = shortestPath((a:Person {person_id:1})-[:KNOWS*..5]-(b:Person {person_id:10})) "
+        "RETURN length(p) AS L, size(nodes(p)) AS hops",
+        None,
+    ),
+    # ── Parameterized list in IN ──
+    (
+        "list_param_in",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.city IN $cities RETURN p.name AS n ORDER BY n",
+        {"cities": ["Oslo", "Bergen"]},
+    ),
+    # ── Parameterized scalar with arithmetic ──
+    (
+        "param_arithmetic",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > $threshold + 5 RETURN count(p) AS n",
+        {"threshold": 25},
+    ),
+    # ── Multi-WITH chain (catches multi-pass WITH folding) ──
+    (
+        "multi_with_chain",
+        "social_graph",
+        "MATCH (p:Person) WITH p WHERE p.age > 25 WITH p, p.salary AS s "
+        "WHERE s > 80000 WITH p, s ORDER BY s DESC RETURN p.name AS n, s LIMIT 5",
+        None,
+    ),
+    # ── DISTINCT + ORDER BY same expression ──
+    (
+        "distinct_order_same_expr",
+        "social_graph",
+        "MATCH (p:Person) RETURN DISTINCT p.city AS c ORDER BY p.city",
+        None,
+    ),
+    # ── OPTIONAL MATCH + count(*) + GROUP BY ──
+    (
+        "optional_count_star_group",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c:Company) "
+        "WITH p.city AS city, count(c) AS jobs RETURN city, jobs ORDER BY city",
+        None,
+    ),
+    # ── HAVING expression with multi-key GROUP ──
+    (
+        "having_multi_key",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS]->(q:Person) "
+        "WITH p.city AS pc, q.city AS qc, count(*) AS edges "
+        "WHERE edges > 0 RETURN pc, qc, edges ORDER BY pc, qc",
+        None,
+    ),
+    # ── ORDER BY computed expression on alias (regression for fuse_node_scan_top_k) ──
+    (
+        "order_by_alias_arithmetic",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.age * 2 AS bumped ORDER BY bumped DESC LIMIT 5",
+        None,
+    ),
+    # ── COUNT(*) with multi-MATCH ──
+    (
+        "multi_match_count_star",
+        "social_graph",
+        "MATCH (p:Person) MATCH (q:Person) WHERE p.person_id < q.person_id AND p.city = q.city RETURN count(*) AS n",
+        None,
+    ),
+    # ── String operations + WHERE + ORDER BY ──
+    (
+        "string_op_filter_order",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_' RETURN p.name AS n ORDER BY size(p.name) DESC, n LIMIT 5",
+        None,
+    ),
+    # ── coalesce / IS NOT NULL filter ──
+    (
+        "coalesce_email",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, coalesce(p.email, 'none') AS e ORDER BY n LIMIT 5",
+        None,
+    ),
+    # ── ORDER BY aggregate alias with secondary sort (regression for tie-break) ──
+    (
+        "order_by_agg_alias_stable",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS city, count(*) AS n RETURN city, n ORDER BY n DESC, city LIMIT 3",
+        None,
+    ),
+    # ── CASE inside aggregate ──
+    (
+        "case_in_agg",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS c, sum(CASE WHEN p.age > 30 THEN 1 ELSE 0 END) AS olders ORDER BY c",
+        None,
+    ),
+    # ── nested function calls ──
+    (
+        "nested_func_calls",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, toUpper(p.city) AS c ORDER BY n LIMIT 5",
+        None,
+    ),
+    # ── NOT predicate ──
+    (
+        "not_predicate",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT p.city = 'Oslo' RETURN count(p) AS n",
+        None,
+    ),
+    # ── WHERE with edge property AND node property ──
+    (
+        "where_edge_node_mix",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE r.since > 2017 AND q.age > 25 RETURN count(*) AS n",
+        None,
+    ),
+    # ── count{} subquery in WHERE ──
+    (
+        "count_subq_in_where",
+        "social_graph",
+        "MATCH (p:Person) WHERE count{(p)-[:KNOWS]->()} > 2 RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    # ── arithmetic expression in WHERE ──
+    (
+        "expr_filter",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.salary / p.age > 2000 RETURN p.name AS n ORDER BY n LIMIT 5",
+        None,
+    ),
+    # ── WITH expression alias as filter then sort ──
+    (
+        "with_expr_filter_sort",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.salary - p.age * 1000 AS net "
+        "WHERE net > 50000 RETURN p.name AS n, net ORDER BY net DESC, n LIMIT 5",
+        None,
+    ),
+    # ── multi-OPTIONAL with HAVING-style filter ──
+    (
+        "multi_optional_having",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f) "
+        "OPTIONAL MATCH (p)-[:WORKS_AT]->(c) "
+        "WITH p, count(DISTINCT f) AS friends, count(DISTINCT c) AS jobs "
+        "WHERE friends > 0 RETURN p.name AS n, friends, jobs ORDER BY n LIMIT 5",
+        None,
+    ),
+    # ── WITH chain with re-entered MATCH (cohort then expansion) ──
+    (
+        "cohort_then_match",
+        "social_graph",
+        "MATCH (p:Person) WITH p ORDER BY p.salary DESC LIMIT 5 "
+        "MATCH (p)-[:WORKS_AT]->(c:Company) RETURN p.name AS n, c.name AS c ORDER BY n",
+        None,
+    ),
+    # ── multi-MATCH cartesian + count(*) (regression for desugar fix) ──
+    (
+        "multi_match_count_star",
+        "social_graph",
+        "MATCH (p:Person) MATCH (q:Person) WHERE p.person_id < q.person_id AND p.city = q.city RETURN count(*) AS n",
+        None,
+    ),
+    # ── String op + ORDER BY ──
+    (
+        "string_op_filter_order",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_' RETURN p.name AS n ORDER BY size(p.name) DESC, n LIMIT 5",
+        None,
+    ),
 ]
 
 
@@ -460,31 +670,11 @@ def test_optimized_matches_naive(
 # pass and the test starts protecting the fix.
 
 KNOWN_DIVERGENT: list[tuple[str, str, str, str]] = [
-    (
-        "var_length_no_var",
-        "small_graph",
-        # Variable-length edge `[:KNOWS*1..3]` with no path variable:
-        # Neo4j semantics return one row per distinct path (3 rows for
-        # the small_graph fixture: 1→2, 1→3 direct, 1→2→3).
-        # KGLite's `mark_fast_var_length_paths` optimization dedups
-        # target nodes via global-visited BFS, returning 2 rows.
-        # Disabling the optimization (naive path) restores per-path
-        # row count, so the divergence is real and user-observable.
-        #
-        # This is a design question, not a quick fix:
-        # - Option A: tighten the gate so the fast-path BFS only fires
-        #   when downstream is DISTINCT or a path-count-invariant
-        #   aggregate. Preserves Neo4j semantics; loses the perf win
-        #   for plain `RETURN q.name`.
-        # - Option B: declare per-target reachability the documented
-        #   semantic for bare-edge variable-length MATCH; align the
-        #   naive path to dedup too. Faster, but a Neo4j-incompatible
-        #   semantic users should know about.
-        # Tracked here until the call is made; the harness will catch
-        # any future regression in either direction.
-        "MATCH (p:Person {person_id: 1})-[:KNOWS*1..3]->(q:Person) RETURN q.name AS n",
-        "var-length per-target vs. per-path semantics — pending design call",
-    ),
+    # Empty: every divergence the harness has surfaced is now fixed and
+    # tracked as a regular passing entry above. Future bugs the harness
+    # finds land here when the fix needs design discussion or is
+    # blocked; otherwise they go straight to DIFFERENTIAL_QUERIES with
+    # the fix in the same commit.
 ]
 
 
