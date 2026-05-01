@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.38] — 2026-05-01
+
+### code_tree
+
+- **Re-add `_build` to the ignored-dirs list.** Caught while
+  perf-testing 0.8.37 against the kglite repo itself: Sphinx
+  `docs/_build/_static/*.js` was getting indexed (26 JS files), even
+  though the build artifacts aren't user source. The leading-
+  underscore convention is a strong signal of "tool-generated build
+  output" (Sphinx, mkdocs, mdBook), distinct from the more ambiguous
+  `build` / `dist` / `out` (which stay off the list because
+  `dist/bundle.js` may be the user's webpack output they want
+  flagged-as-too-large). Verified against `code_tree.build()` on
+  the kglite repo: 337 files → 310 files, matching the 0.8.34
+  baseline exactly. Build time 0.21s.
+
 ## [0.8.37] — 2026-05-01
 
 ### code_tree

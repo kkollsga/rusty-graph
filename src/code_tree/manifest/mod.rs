@@ -496,19 +496,30 @@ fn discover_supplemental_roots(project_root: &Path, info: &ProjectInfo) -> Vec<S
 /// `subprojects/` as a supplemental root and then index every Python
 /// file in the .venv. The filter now applies at every depth.
 ///
-/// **Not on the list**: `build`, `dist`, `out`, `_build`. Those names
-/// are language-and-tooling-dependent — e.g. `dist/bundle.js` may be
-/// the user's webpack-output they want flagged as too-large rather
-/// than excluded outright. If a specific repo wants to skip them,
-/// `max_loc_per_file` handles oversized files cleanly without name-
-/// based filtering.
+/// `_build` is on the list because the leading-underscore convention
+/// is unambiguously "tool-generated build output" (Sphinx, mkdocs,
+/// mdBook, etc.) — e.g. `docs/_build/_static/*.js` is Sphinx tooling,
+/// not source the user wrote.
+///
+/// **Not on the list**: `build`, `dist`, `out`. Those names are more
+/// ambiguous — `dist/bundle.js` may be the user's webpack output they
+/// want flagged as too-large rather than excluded outright (see
+/// `tests/test_code_tree_skip.py::test_single_huge_line_skipped`).
+/// `max_loc_per_file` handles oversized build artifacts without
+/// name-based filtering.
 pub(crate) fn is_ignored_dir_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
     matches!(
         name,
-        "node_modules" | "target" | "__pycache__" | "venv" | "env" | "site-packages"
+        "node_modules"
+            | "target"
+            | "_build"
+            | "__pycache__"
+            | "venv"
+            | "env"
+            | "site-packages"
     )
 }
 
