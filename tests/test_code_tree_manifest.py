@@ -273,6 +273,41 @@ class TestSourceRootDiscovery:
         assert any(p.endswith("src/big2.c") for p in files), files
         assert any(p.endswith("include/big.h") for p in files), files
 
+    def test_safety_net_does_not_descend_into_venv(self, tmp_path):
+        # Regression: 0.8.36 indexed .venv site-packages because the
+        # safety net's recursive walk didn't filter ignored subdirs at
+        # depth. A single .c file in `subprojects/.venv/site-packages/`
+        # caused `subprojects/` to be added as a supplemental root, then
+        # parse_directory walked the whole .venv. Reported by an MCP
+        # consumer (graph ballooned 7,620 → 70,605 nodes on upgrade).
+        # Fix: `walk_filter` skips ignored dir names at every depth.
+        _write(
+            tmp_path,
+            {
+                "pyproject.toml": """
+                [project]
+                name = "main_pkg"
+                version = "0.1.0"
+
+                [build-system]
+                build-backend = "setuptools.build_meta"
+                """,
+                "main_pkg/__init__.py": "",
+                "main_pkg/core.py": "def f(): pass\n",
+                # .venv with C extension source nested inside `subprojects/`
+                "subprojects/.venv/site-packages/numpy/_multiarray.c": "int f(){return 0;}\n",
+                "subprojects/.venv/site-packages/pkg_a.py": "def a(): pass\n",
+                "subprojects/.venv/site-packages/pkg_b.py": "def b(): pass\n",
+            },
+        )
+        g = build(str(tmp_path))
+        files = [r["path"] for r in g.cypher("MATCH (f:File) RETURN f.path AS path").to_list()]
+
+        # Only the legitimate package files should be indexed.
+        venv_leaks = [p for p in files if ".venv" in p]
+        assert venv_leaks == [], f"venv content leaked into graph: {venv_leaks}"
+        assert any(p.endswith("main_pkg/core.py") for p in files), files
+
 
 class TestPathCollision:
     """Regression: every parser computes rel_path against its per-root walk

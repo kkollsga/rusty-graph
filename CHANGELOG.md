@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.37] — 2026-05-01
+
+### code_tree
+
+- **Fixed `code_tree.build()` over-indexing on projects with nested
+  `.venv` / `node_modules` / `target` / etc.** Reported by an MCP
+  consumer whose codebase graph ballooned 7,620 → 70,605 nodes after
+  upgrading to 0.8.36. Root cause: the mixed-language safety net
+  added in 0.8.36 walked first-level subdirs recursively to detect
+  undeclared languages — but the walk filter for ignored directory
+  names (`.venv`, `node_modules`, `target`, `__pycache__`,
+  `site-packages`, `venv`, `env`, plus all `.dot` dirs) only applied
+  at the top level. A single C-extension source inside a nested
+  `.venv` (e.g. numpy in a subprojects venv) attracted the parent
+  dir as a supplemental source root and then `parse_directory`
+  walked the full venv. The filter is now applied at every depth in
+  both the safety-net detection walk and the actual parser walk.
+- **Conservative trim of the ignored-names list.** `build`, `dist`,
+  `out`, `_build` removed — those names are tooling-dependent (e.g.
+  `dist/bundle.js` is sometimes the user's webpack output they want
+  indexed-and-flagged as too-large rather than excluded outright).
+  Use `max_loc_per_file` to handle oversized build artifacts.
+
 ## [0.8.36] — 2026-05-01
 
 ### Cypher planner

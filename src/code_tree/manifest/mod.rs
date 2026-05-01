@@ -459,7 +459,7 @@ fn discover_supplemental_roots(project_root: &Path, info: &ProjectInfo) -> Vec<S
         else {
             continue;
         };
-        if is_ignored_top_level_dir(&name) {
+        if is_ignored_dir_name(&name) {
             continue;
         }
         let covered = declared_paths
@@ -482,30 +482,57 @@ fn discover_supplemental_roots(project_root: &Path, info: &ProjectInfo) -> Vec<S
 }
 
 /// First-level directories that should never be auto-supplemented:
-/// VCS dirs, virtualenvs, build outputs, package manager caches, etc.
-fn is_ignored_top_level_dir(name: &str) -> bool {
+/// Names of directories the source-tree walker should never descend
+/// into at *any* depth: VCS dirs, virtualenvs, dependency caches,
+/// language-bytecode caches, and the universal Rust build output.
+/// Hidden-by-prefix (`.git`, `.venv`, `.tox`, `.pytest_cache`,
+/// `.mypy_cache`, `.ruff_cache`, `.cargo`, `.idea`, `.vscode`,
+/// `.next`, `.nuxt`, `.benchmarks`, `.gradle`) are caught by the
+/// leading-dot check.
+///
+/// Used by both the supplemental-root detector and the parser walk —
+/// 0.8.36 had this filter only at the top level, so a project with a
+/// `subprojects/.venv/` containing a C extension would attract
+/// `subprojects/` as a supplemental root and then index every Python
+/// file in the .venv. The filter now applies at every depth.
+///
+/// **Not on the list**: `build`, `dist`, `out`, `_build`. Those names
+/// are language-and-tooling-dependent — e.g. `dist/bundle.js` may be
+/// the user's webpack-output they want flagged as too-large rather
+/// than excluded outright. If a specific repo wants to skip them,
+/// `max_loc_per_file` handles oversized files cleanly without name-
+/// based filtering.
+pub(crate) fn is_ignored_dir_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
     matches!(
         name,
-        "node_modules"
-            | "target"
-            | "build"
-            | "dist"
-            | "out"
-            | "_build"
-            | "__pycache__"
-            | "venv"
-            | "env"
-            | "site-packages"
+        "node_modules" | "target" | "__pycache__" | "venv" | "env" | "site-packages"
     )
+}
+
+/// `WalkDir` filter predicate: skip directories whose name appears in
+/// `is_ignored_dir_name`. Files always pass through (filtering files
+/// here would prune them entirely; we want to walk them and let the
+/// parser layer decide).
+pub(crate) fn walk_filter(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return true;
+    }
+    let Some(name) = entry.file_name().to_str() else {
+        return true;
+    };
+    !is_ignored_dir_name(name)
 }
 
 /// Walk `dir` looking for the first source file whose language is NOT in
 /// `declared`. Returns as soon as one is found. Used to keep the safety
 /// net cheap on dirs with no parseable code (docs/, assets/) or with only
-/// already-covered languages.
+/// already-covered languages. Skips ignored subdirs (`.venv`, `target`,
+/// `node_modules`, …) at any depth — without this filter, a single C
+/// extension source inside a venv attracts the parent dir as a
+/// supplemental root and floods the graph with site-packages content.
 fn directory_contains_undeclared_language(
     dir: &Path,
     declared: &std::collections::HashSet<String>,
@@ -514,6 +541,7 @@ fn directory_contains_undeclared_language(
     for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
+        .filter_entry(walk_filter)
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() {

@@ -146,7 +146,15 @@ fn parse_directory(
     // ~1–2s off the parse phase before any per-file work begins.
     let t_walk = std::time::Instant::now();
     let mut by_lang: BTreeMap<&'static str, Vec<PathBuf>> = BTreeMap::new();
-    for entry in WalkDir::new(walk_dir).into_iter().filter_map(Result::ok) {
+    // Skip VCS / build-output / virtualenv / package-cache subdirs at
+    // any depth (`.venv`, `target`, `node_modules`, `__pycache__`, …).
+    // Without this, a supplemental source root pointing to a directory
+    // with a nested venv would index every site-package's Python source.
+    for entry in WalkDir::new(walk_dir)
+        .into_iter()
+        .filter_entry(crate::code_tree::manifest::walk_filter)
+        .filter_map(Result::ok)
+    {
         if !entry.file_type().is_file() {
             continue;
         }
