@@ -420,6 +420,25 @@ pub trait GraphWrite: GraphRead {
     /// they have already assigned `PropertyStorage::Columnar { row_id }`
     /// to the node's `NodeData`; otherwise disk reads will drift.
     fn update_row_id(&mut self, _node_idx: NodeIndex, _row_id: u32) {}
+
+    /// Flush any pending mutation state into the steady-state stores so
+    /// subsequent `&self` reads observe the writes.
+    ///
+    /// Memory/mapped backends mutate their `StableDiGraph` in place via
+    /// `node_weight_mut` / `edge_weight_mut`, so reads see writes
+    /// immediately — default no-op.
+    ///
+    /// Disk stages `node_weight_mut` / `edge_weight_mut` writes in
+    /// `node_mut_cache` / `edge_mut_cache` to dodge `Arc<ColumnStore>`
+    /// share-clone storms; those caches are otherwise drained lazily on
+    /// the next `&mut self` op (e.g. on save). Without an explicit
+    /// flush at end of a mutation query, a subsequent read goes through
+    /// `node_weight` which reads `column_stores` directly and misses
+    /// the staged writes — Cypher SET appears to silently no-op until
+    /// the next `add_node`/`save`. Override on disk routes through
+    /// `clear_arenas` (which already does the clone-apply-replace
+    /// flush + arena reset).
+    fn flush_pending_writes(&mut self) {}
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -1001,4 +1001,13 @@ impl GraphWrite for DiskGraph {
     fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
         DiskGraph::update_row_id(self, node_idx, row_id);
     }
+
+    #[inline]
+    fn flush_pending_writes(&mut self) {
+        // Drains node_mut_cache + edge_mut_cache into column_stores /
+        // edge_properties (the steady-state read sources) and resets
+        // the materialization arenas. Idempotent — safe to call when
+        // the caches are empty.
+        DiskGraph::clear_arenas(self);
+    }
 }

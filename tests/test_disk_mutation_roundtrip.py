@@ -333,25 +333,33 @@ def test_cypher_set_persists_through_save_reload(tmp_path):
     assert [r["n.age"] for r in post] == [120, 121, 122, 23, 24]
 
 
-@pytest.mark.parametrize("mode", ["memory", "mapped"])
+@pytest.mark.parametrize("mode", STORAGE_MODES)
 def test_cypher_set_new_property_persists_through_save_reload(mode, tmp_path):
     """Cypher SET that introduces a *brand-new* property name must
     register the key in the graph's StringInterner so that save() can
-    resolve it back to a string at serialize time.
+    resolve it back to a string at serialize time, AND must be visible
+    to subsequent reads in the same session.
 
-    Regression for the 0.8.39/0.8.40 in-memory master-path bug: the
-    Bug-8 fix routed Columnar SET writes through the graph-level
-    `column_stores` master to dodge the per-node Arc-clone storm, but
-    the master path computed `InternedKey::from_str(property)` without
-    registering the string with `graph.interner`. Symptom on Sodir-scale
-    graphs: every SET-introduced property survived in-memory but
-    vanished after save+reload, accompanied by
-    `BUG: InternedKey N not found in StringInterner` on stderr.
+    Regression for two bugs:
 
-    Disk mode is excluded — it has a separate, pre-existing bug for
-    new-property persistence on save (the master-path bypass gates on
-    `is_in_memory`, so disk never hit the bug this test targets but has
-    its own issue down the disk-save segment serializer).
+    - 0.8.39/0.8.40 in-memory master-path bug: the Bug-8 fix routed
+      Columnar SET writes through the graph-level `column_stores`
+      master to dodge the per-node Arc-clone storm, but the master path
+      computed `InternedKey::from_str(property)` without registering
+      the string with `graph.interner`. Symptom on Sodir-scale graphs:
+      every SET-introduced property survived in-memory but vanished
+      after save+reload, accompanied by
+      `BUG: InternedKey N not found in StringInterner` on stderr.
+
+    - Disk-mode in-memory-read regression: SET on a disk-backed graph
+      stages writes in `node_mut_cache`, which `node_weight` (the read
+      path) ignores. Subsequent reads silently returned the pre-SET
+      values until the next `&mut self` op (e.g. save) drained the
+      cache. Save+reload happened to recover the data because
+      `clear_arenas` runs as part of save, but in-session reads went
+      stale. Fixed by flushing pending writes after every mutation
+      clause via `GraphWrite::flush_pending_writes`, which dispatches
+      to `clear_arenas` on the disk backend.
     """
     graph_path = str(tmp_path / f"g_{mode}")
     save_path = str(tmp_path / f"saved_{mode}") if mode != "disk" else graph_path

@@ -91,15 +91,29 @@ pub fn execute_mutable(
             }
             Clause::Set(set) => {
                 execute_set(graph, set, &result_set, &params, &mut stats)?;
+                // Flush staged writes so any subsequent clause's reads
+                // (including a trailing RETURN's property projection)
+                // observe the SET. SET routes through node_weight_mut →
+                // node_mut_cache on disk; without this flush, the next
+                // `node_weight` reads through `column_stores` and
+                // returns the pre-SET values.
+                GraphWrite::flush_pending_writes(&mut graph.graph);
             }
             Clause::Delete(del) => {
                 execute_delete(graph, del, &result_set, &mut stats)?;
             }
             Clause::Remove(rem) => {
                 execute_remove(graph, rem, &result_set, &mut stats)?;
+                // Same rationale as SET — REMOVE goes through
+                // node_weight_mut on disk.
+                GraphWrite::flush_pending_writes(&mut graph.graph);
             }
             Clause::Merge(merge) => {
                 result_set = execute_merge(graph, merge, result_set, &params, &mut stats)?;
+                // MERGE may invoke ON MATCH SET / ON CREATE SET via
+                // `execute_set`; flush so any following clause sees the
+                // mutations.
+                GraphWrite::flush_pending_writes(&mut graph.graph);
             }
             // Read clauses: create temporary immutable executor
             _ => {
@@ -117,6 +131,18 @@ pub fn execute_mutable(
             });
         }
     }
+
+    // Flush any pending mutation state into the steady-state stores so
+    // (a) the trailing RETURN's reads observe the writes from this same
+    // query, and (b) any subsequent read-only query started by the user
+    // sees them too. No-op on memory/mapped (writes land in
+    // `StableDiGraph` directly); on disk, drains
+    // `node_mut_cache`/`edge_mut_cache` into `column_stores` /
+    // `edge_properties` via the same clone-apply-replace path
+    // `clear_arenas` runs lazily before the next `&mut self` op.
+    // Without this, Cypher SET on a disk-backed graph appeared to no-op
+    // until the next mutation/save flushed the cache — see CHANGELOG.
+    GraphWrite::flush_pending_writes(&mut graph.graph);
 
     // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));

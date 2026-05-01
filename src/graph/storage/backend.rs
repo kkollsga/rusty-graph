@@ -853,4 +853,14 @@ impl GraphWrite for GraphBackend {
             _ => {}
         }
     }
+
+    #[inline]
+    fn flush_pending_writes(&mut self) {
+        match self {
+            Self::Memory(g) => GraphWrite::flush_pending_writes(g),
+            Self::Mapped(g) => GraphWrite::flush_pending_writes(g),
+            Self::Disk(g) => GraphWrite::flush_pending_writes(g.as_mut()),
+            Self::Recording(rg) => GraphWrite::flush_pending_writes(rg.as_mut()),
+        }
+    }
 }

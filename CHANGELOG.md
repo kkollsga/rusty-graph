@@ -29,8 +29,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string") at write time, not at load time on the user's machine. Zero
   release-build cost.
 - **Regression**: `tests/test_disk_mutation_roundtrip.py::test_cypher_set_new_property_persists_through_save_reload`
-  parameterised over `memory` + `mapped`. Disk mode excluded — has its
-  own separate pre-existing bug for new-property persistence on save.
+  parameterised over `memory` + `mapped` + `disk` (all three modes
+  now covered after the disk-side fix below).
+
+### Cypher executor — disk SET visibility
+
+- **Fix: Cypher SET on a disk-backed graph appeared to no-op on
+  in-session reads** until the next `&mut self` op (e.g. `save()`)
+  flushed the staged writes. Disk's `node_weight_mut` stages writes in
+  `node_mut_cache` to dodge the `Arc<ColumnStore>` share-clone storm
+  per row; `node_weight` (the read path) reads `column_stores`
+  directly and ignored the cache. Save+reload happened to recover the
+  data because `clear_arenas` runs as part of save, but every
+  in-session read between SET and save returned the pre-SET value —
+  silently corrupting any analysis that read SET-staged columns
+  back. Affects both new-property SET (`SET n.value_score = …`) and
+  existing-property SET (`SET n.age = n.age + 100`). Same query
+  shape: `MATCH … SET … RETURN n.prop` returned NULLs for the just-
+  written column.
+- **Fix shape**: new `GraphWrite::flush_pending_writes(&mut self)`
+  trait method, default no-op, overridden on the disk backend to
+  call its existing `clear_arenas` (which already does the
+  clone-apply-replace flush of `node_mut_cache` /
+  `edge_mut_cache` into `column_stores` / `edge_properties`).
+  `execute_mutable` calls it after every write clause (SET / REMOVE /
+  MERGE) and once at end-of-query so any trailing RETURN's property
+  projection — and any next-query read — sees the writes. Memory
+  and mapped backends are unaffected (their `node_weight_mut`
+  mutates `StableDiGraph` in place, so reads see writes
+  immediately).
+- **Doesn't affect Sodir** — the prospect graph runs in-memory — but
+  unblocks the disk-mode "SET as cached column" pattern for any
+  future workstream that uses storage="disk".
 
 ## [0.8.40] — 2026-05-01
 

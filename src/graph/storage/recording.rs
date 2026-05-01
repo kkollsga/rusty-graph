@@ -471,6 +471,11 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
         self.inner.update_row_id(node_idx, row_id);
     }
+
+    #[inline]
+    fn flush_pending_writes(&mut self) {
+        self.inner.flush_pending_writes();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────

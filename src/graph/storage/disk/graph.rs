@@ -1462,7 +1462,7 @@ impl DiskGraph {
 
     /// Clear all materialization arenas. Called before any &mut self operation.
     #[inline]
-    pub(super) fn clear_arenas(&mut self) {
+    pub(crate) fn clear_arenas(&mut self) {
         // Flush modified edge properties from edge_weight_mut cache
         for (edge_idx, edge_data) in self.edge_mut_cache.drain() {
             if edge_data.properties.is_empty() {
