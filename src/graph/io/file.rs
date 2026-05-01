@@ -923,11 +923,46 @@ fn bincode_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
         .map_err(|e| io::Error::other(format!("bincode deserialization failed: {}", e)))
 }
 
+/// Debug-only: verify every InternedKey in `graph.column_stores`'s schemas
+/// resolves to a string in `graph.interner`. Catches the class of bug where
+/// a writer synthesizes a key via `InternedKey::from_str()` (just hashing)
+/// and mutates a ColumnStore without first calling `interner.get_or_intern()`
+/// — `save()` would then serialize the unregistered key and `load()` would
+/// see "<unknown>" property names, silently corrupting the data.
+///
+/// Surfaced by the 0.8.39 SET master-path bug (now fixed). Locked in here
+/// so any future regression of the same shape (in this or any other write
+/// path) panics loudly in debug builds rather than landing as silent data
+/// loss in release.
+#[cfg(debug_assertions)]
+fn debug_assert_column_keys_registered(graph: &DirGraph) {
+    for (type_name, store) in &graph.column_stores {
+        let schema = store.schema();
+        for (_slot, key) in schema.iter() {
+            assert!(
+                graph.interner.try_resolve(key).is_some(),
+                "kglite invariant violation: ColumnStore for type '{}' contains \
+                 InternedKey {} but the source string is not registered in \
+                 graph.interner. A writer synthesized the key via \
+                 `InternedKey::from_str()` without first calling \
+                 `interner.get_or_intern(...)`. save() would silently corrupt \
+                 the data — failing fast here so the offending writer is \
+                 caught at write time, not at load time on the user's machine.",
+                type_name,
+                key.as_u64()
+            );
+        }
+    }
+}
+
 /// Serialize, compress, and write graph data to v3 file. Heavy I/O, safe to run without GIL.
 ///
 /// The graph MUST have columnar storage enabled before calling this function.
 /// The caller (Python `save()`) handles auto-enable/disable.
 pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    debug_assert_column_keys_registered(graph);
+
     // 1. Serialize topology with properties stripped (v3: node props are in column sections)
     let topology_raw = {
         let _strip = StripPropertiesGuard::new();

@@ -331,3 +331,66 @@ def test_cypher_set_persists_through_save_reload(tmp_path):
     # P_0, P_1, P_2 match the WHERE clause and get +100; P_3, P_4 keep
     # their original ages.
     assert [r["n.age"] for r in post] == [120, 121, 122, 23, 24]
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped"])
+def test_cypher_set_new_property_persists_through_save_reload(mode, tmp_path):
+    """Cypher SET that introduces a *brand-new* property name must
+    register the key in the graph's StringInterner so that save() can
+    resolve it back to a string at serialize time.
+
+    Regression for the 0.8.39/0.8.40 in-memory master-path bug: the
+    Bug-8 fix routed Columnar SET writes through the graph-level
+    `column_stores` master to dodge the per-node Arc-clone storm, but
+    the master path computed `InternedKey::from_str(property)` without
+    registering the string with `graph.interner`. Symptom on Sodir-scale
+    graphs: every SET-introduced property survived in-memory but
+    vanished after save+reload, accompanied by
+    `BUG: InternedKey N not found in StringInterner` on stderr.
+
+    Disk mode is excluded — it has a separate, pre-existing bug for
+    new-property persistence on save (the master-path bypass gates on
+    `is_in_memory`, so disk never hit the bug this test targets but has
+    its own issue down the disk-save segment serializer).
+    """
+    graph_path = str(tmp_path / f"g_{mode}")
+    save_path = str(tmp_path / f"saved_{mode}") if mode != "disk" else graph_path
+    kg = _new_kg(mode, path=graph_path if mode == "disk" else None)
+
+    kg.add_nodes(
+        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}", "age": 20 + i} for i in range(5)]),
+        "Person",
+        "id",
+        "title",
+    )
+    # value_score is a NEW property (not in the columns at add_nodes
+    # time). The master-path Bug-8 fix path is the trigger.
+    kg.cypher(
+        "MATCH (n:Person) WHERE n.age >= 22 SET n.value_score = n.age * 10",
+        timeout_ms=10_000,
+    )
+    # Sanity: in-memory read works.
+    pre = _rows(
+        kg.cypher(
+            "MATCH (n:Person) WHERE n.value_score IS NOT NULL RETURN n.id, n.value_score ORDER BY n.id",
+            timeout_ms=10_000,
+        )
+    )
+    assert [(r["n.id"], r["n.value_score"]) for r in pre] == [
+        ("P_2", 220),
+        ("P_3", 230),
+        ("P_4", 240),
+    ]
+
+    reloaded = _save_and_reload(kg, save_path, mode)
+    post = _rows(
+        reloaded.cypher(
+            "MATCH (n:Person) WHERE n.value_score IS NOT NULL RETURN n.id, n.value_score ORDER BY n.id",
+            timeout_ms=10_000,
+        )
+    )
+    assert [(r["n.id"], r["n.value_score"]) for r in post] == [
+        ("P_2", 220),
+        ("P_3", 230),
+        ("P_4", 240),
+    ], f"value_score lost on save+reload in {mode} mode"

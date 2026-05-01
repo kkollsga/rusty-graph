@@ -528,8 +528,20 @@ fn execute_set(
                     let is_in_memory = !graph.graph.is_disk();
                     if is_in_memory && property != "title" && property != "name" {
                         if let Some(row_id) = columnar_row_id {
+                            // Register the property name in the graph's
+                            // StringInterner BEFORE borrowing column_stores.
+                            // The non-master path does this via
+                            // `node.set_property(..., &mut graph.interner)`;
+                            // the master path used `InternedKey::from_str()`
+                            // which only hashes — leaving `save()` unable
+                            // to resolve the key back to a string at
+                            // serialize time. Symptom: every Cypher-SET
+                            // property on a 0.8.39 in-memory Sodir-scale
+                            // graph survived in-memory but vanished after
+                            // save+load, accompanied by
+                            // `BUG: InternedKey N not found in StringInterner`.
+                            let key = graph.interner.get_or_intern(property);
                             if let Some(master) = graph.column_stores.get_mut(&node_type_str) {
-                                let key = InternedKey::from_str(property);
                                 Arc::make_mut(master).set(row_id, key, &value, None);
                                 touched_columnar_types.insert(node_type_str.clone());
                                 stats.properties_set += 1;

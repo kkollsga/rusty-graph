@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Cypher executor — Bug 8 followup
+
+- **Fix: SET on an in-memory graph dropped new properties on save.**
+  The 0.8.39 master-path fix that routed Columnar SET writes through
+  `graph.column_stores` to dodge the per-node Arc-clone storm computed
+  the property's `InternedKey` via `from_str()` (just hashing) without
+  registering the source string in `graph.interner`. As a result,
+  Cypher SET that introduced a *new* property name on an in-memory or
+  mapped graph survived in-memory queries but vanished on save+reload,
+  printing `BUG: InternedKey N not found in StringInterner` to stderr
+  and silently corrupting the saved file. Now registers via
+  `graph.interner.get_or_intern(property)` before borrowing
+  `column_stores`. Disk mode is unaffected (gated path, separate
+  pre-existing bug for that backend).
+- **Defense in depth: debug-only invariant in `write_graph_v3`.** Walks
+  every `column_store`'s schema before serialization and panics with a
+  clear, actionable message if any `InternedKey` doesn't resolve in
+  `graph.interner`. Catches the entire class of bug ("writer
+  synthesizes an InternedKey without first registering the source
+  string") at write time, not at load time on the user's machine. Zero
+  release-build cost.
+- **Regression**: `tests/test_disk_mutation_roundtrip.py::test_cypher_set_new_property_persists_through_save_reload`
+  parameterised over `memory` + `mapped`. Disk mode excluded — has its
+  own separate pre-existing bug for new-property persistence on save.
+
 ## [0.8.40] — 2026-05-01
 
 ### Cypher planner
