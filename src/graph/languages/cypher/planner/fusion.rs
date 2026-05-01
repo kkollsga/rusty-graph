@@ -2567,22 +2567,29 @@ pub(super) fn fuse_order_by_top_k(query: &mut CypherQuery) {
 ///
 /// Does NOT match: `NOT contains(...)`, `contains(a, point(…))` (constant point),
 /// disjunctions, or any non-variable first/second arg.
-fn extract_spatial_join_contains(pred: &Predicate) -> Option<(String, String, Option<Predicate>)> {
+fn extract_spatial_join_contains(
+    pred: &Predicate,
+) -> Option<(
+    String,
+    String,
+    super::super::ast::SpatialProbeKind,
+    Option<Predicate>,
+)> {
     match pred {
         Predicate::Comparison {
             left,
             operator: ComparisonOp::NotEquals,
             right: Expression::Literal(Value::Boolean(false)),
         } => {
-            let (c, p) = extract_contains_call_vars(left)?;
-            Some((c, p, None))
+            let (c, p, k) = extract_contains_call_vars(left)?;
+            Some((c, p, k, None))
         }
         Predicate::And(l, r) => {
-            if let Some((c, p, None)) = extract_spatial_join_contains(l) {
-                return Some((c, p, Some((**r).clone())));
+            if let Some((c, p, k, None)) = extract_spatial_join_contains(l) {
+                return Some((c, p, k, Some((**r).clone())));
             }
-            if let Some((c, p, None)) = extract_spatial_join_contains(r) {
-                return Some((c, p, Some((**l).clone())));
+            if let Some((c, p, k, None)) = extract_spatial_join_contains(r) {
+                return Some((c, p, k, Some((**l).clone())));
             }
             None
         }
@@ -2590,8 +2597,13 @@ fn extract_spatial_join_contains(pred: &Predicate) -> Option<(String, String, Op
     }
 }
 
-/// Match a `contains(Variable, Variable)` function call expression.
-fn extract_contains_call_vars(expr: &Expression) -> Option<(String, String)> {
+/// Match a `contains(Variable, ProbeExpr)` function call where ProbeExpr is
+/// either a bare `Variable` (Location-style probe) or `centroid(Variable)`
+/// (Centroid-style probe). Returns `(container_var, probe_var, probe_kind)`.
+fn extract_contains_call_vars(
+    expr: &Expression,
+) -> Option<(String, String, super::super::ast::SpatialProbeKind)> {
+    use super::super::ast::SpatialProbeKind;
     if let Expression::FunctionCall { name, args, .. } = expr {
         if name != "contains" || args.len() != 2 {
             return None;
@@ -2600,137 +2612,310 @@ fn extract_contains_call_vars(expr: &Expression) -> Option<(String, String)> {
             Expression::Variable(n) => n.clone(),
             _ => return None,
         };
-        let p = match &args[1] {
-            Expression::Variable(n) => n.clone(),
+        let (p, kind) = match &args[1] {
+            Expression::Variable(n) => (n.clone(), SpatialProbeKind::Location),
+            // `centroid(probe_var)` — probe by computing the probe geometry's
+            // centroid. Lets the fast path fire on the common
+            // point-in-polygon-via-centroid pipeline.
+            Expression::FunctionCall {
+                name: inner_name,
+                args: inner_args,
+                ..
+            } if inner_name == "centroid" && inner_args.len() == 1 => match &inner_args[0] {
+                Expression::Variable(n) => (n.clone(), SpatialProbeKind::Centroid),
+                _ => return None,
+            },
             _ => return None,
         };
         if c == p {
             return None;
         }
-        Some((c, p))
+        Some((c, p, kind))
     } else {
         None
     }
 }
 
-/// Rewrite `MATCH (s:A), (w:B) WHERE contains(s, w) [AND rest]` into
-/// `Clause::SpatialJoin { ..., remainder: rest }`.
+/// Rewrite spatial-join shapes into `Clause::SpatialJoin`.
 ///
-/// Preconditions (all must hold or the rewrite is skipped):
-/// - Adjacent `Match` + `Where` clauses with no intervening skipped fusion.
-/// - Two disjoint single-node patterns, each with `variable` and `node_type`,
-///   no edges, no path assignments, no limit/distinct hints.
-/// - WHERE predicate matches `contains(var, var) <> false` (parser's truthy
-///   wrapper), possibly ANDed with a remainder. No NOT, no OR, no constant point.
-/// - The two contains() variables bind to the two MATCH patterns (in either order).
-/// - Container type has `SpatialConfig::geometry`; probe type has
-///   `SpatialConfig::location`.
+/// Two shapes are recognized:
+///
+/// 1. **Single-MATCH** (the original `MATCH (a:T1), (b:T2) WHERE
+///    contains(a, b) [AND rest]` form). Probe via location config.
+///
+/// 2. **Multi-MATCH** (`MATCH (p:T1) [WHERE pre1] MATCH (s:T2) WHERE
+///    contains(s, centroid(p)) [AND rest]`). Probe via centroid of
+///    the probe-side geometry. Common in point-in-polygon enrichment
+///    pipelines (Sodir prospect → structural-element classification,
+///    well → license area, …) which previously fell off the fast
+///    path because the planner's old gate required a single MATCH.
+///
+/// Preconditions for the SpatialJoin rewrite (any miss → no rewrite):
+/// - Two single-node patterns, each with `variable` and `node_type`.
+/// - WHERE matches `contains(c, p) <> false` or `contains(c, centroid(p))
+///   <> false` (parser's truthy wrapper), possibly ANDed with a residual.
+/// - Container type has `SpatialConfig::geometry`. Probe type has
+///   `SpatialConfig::location` (Location probe) or
+///   `SpatialConfig::geometry` (Centroid probe).
+/// - The two contains() variables bind to the two patterns (either order).
+/// - For the multi-MATCH form, an optional WHERE between the two MATCH
+///   clauses is folded into the SpatialJoin's residual `remainder` so
+///   per-probe filters (e.g. `p.wkt_geometry IS NOT NULL`) survive.
 pub(super) fn fuse_spatial_join(query: &mut CypherQuery, graph: &DirGraph) {
     let mut i = 0;
-    while i + 1 < query.clauses.len() {
-        let eligible = matches!(
-            (&query.clauses[i], &query.clauses[i + 1]),
-            (Clause::Match(_), Clause::Where(_))
-        );
-        if !eligible {
-            i += 1;
-            continue;
+    while i < query.clauses.len() {
+        if try_fuse_spatial_single_match(query, graph, i)
+            || try_fuse_spatial_multi_match(query, graph, i)
+        {
+            // Cursor stays put — the rewritten SpatialJoin sits at i.
         }
-
-        let (p0_var, p0_type, p1_var, p1_type) = {
-            let mc = match &query.clauses[i] {
-                Clause::Match(m) => m,
-                _ => unreachable!(),
-            };
-            if mc.patterns.len() != 2
-                || !mc.path_assignments.is_empty()
-                || mc.limit_hint.is_some()
-                || mc.distinct_node_hint.is_some()
-            {
-                i += 1;
-                continue;
-            }
-            let extract = |pat: &crate::graph::core::pattern_matching::Pattern| {
-                if pat.elements.len() != 1 {
-                    return None;
-                }
-                match &pat.elements[0] {
-                    PatternElement::Node(np) => {
-                        // Require a variable and a typed label. Properties are
-                        // allowed (planner still lets us prune per-type); other
-                        // fields must be defaults.
-                        let v = np.variable.as_ref()?.clone();
-                        let t = np.node_type.as_ref()?.clone();
-                        Some((v, t))
-                    }
-                    _ => None,
-                }
-            };
-            let (v0, t0) = match extract(&mc.patterns[0]) {
-                Some(x) => x,
-                None => {
-                    i += 1;
-                    continue;
-                }
-            };
-            let (v1, t1) = match extract(&mc.patterns[1]) {
-                Some(x) => x,
-                None => {
-                    i += 1;
-                    continue;
-                }
-            };
-            (v0, t0, v1, t1)
-        };
-
-        let (container_var, probe_var, remainder) = {
-            let w = match &query.clauses[i + 1] {
-                Clause::Where(w) => w,
-                _ => unreachable!(),
-            };
-            match extract_spatial_join_contains(&w.predicate) {
-                Some(x) => x,
-                None => {
-                    i += 1;
-                    continue;
-                }
-            }
-        };
-
-        // Resolve which MATCH pattern each variable came from, and the types.
-        let (container_type, probe_type) = if container_var == p0_var && probe_var == p1_var {
-            (p0_type.clone(), p1_type.clone())
-        } else if container_var == p1_var && probe_var == p0_var {
-            (p1_type.clone(), p0_type.clone())
-        } else {
-            i += 1;
-            continue;
-        };
-
-        // Schema gate: container needs geometry, probe needs location.
-        let container_ok = graph
-            .get_spatial_config(&container_type)
-            .is_some_and(|c| c.geometry.is_some());
-        let probe_ok = graph
-            .get_spatial_config(&probe_type)
-            .is_some_and(|c| c.location.is_some());
-        if !(container_ok && probe_ok) {
-            i += 1;
-            continue;
-        }
-
-        // Commit rewrite: replace Match+Where with a single SpatialJoin clause.
-        query.clauses.remove(i + 1);
-        query.clauses[i] = Clause::SpatialJoin {
-            container_var,
-            probe_var,
-            container_type,
-            probe_type,
-            remainder,
-        };
-
         i += 1;
     }
+}
+
+/// Single-MATCH form: `MATCH (a:T1), (b:T2) WHERE contains(a, b) [AND rest]`.
+/// Returns true iff a rewrite was committed at `i`.
+fn try_fuse_spatial_single_match(query: &mut CypherQuery, graph: &DirGraph, i: usize) -> bool {
+    if i + 1 >= query.clauses.len() {
+        return false;
+    }
+    let eligible = matches!(
+        (&query.clauses[i], &query.clauses[i + 1]),
+        (Clause::Match(_), Clause::Where(_))
+    );
+    if !eligible {
+        return false;
+    }
+
+    let (p0_var, p0_type, p1_var, p1_type) = {
+        let mc = match &query.clauses[i] {
+            Clause::Match(m) => m,
+            _ => return false,
+        };
+        if mc.patterns.len() != 2
+            || !mc.path_assignments.is_empty()
+            || mc.limit_hint.is_some()
+            || mc.distinct_node_hint.is_some()
+        {
+            return false;
+        }
+        let (v0, t0) = match extract_single_typed_node(&mc.patterns[0]) {
+            Some(x) => x,
+            None => return false,
+        };
+        let (v1, t1) = match extract_single_typed_node(&mc.patterns[1]) {
+            Some(x) => x,
+            None => return false,
+        };
+        (v0, t0, v1, t1)
+    };
+
+    let (container_var, probe_var, probe_kind, remainder) = {
+        let w = match &query.clauses[i + 1] {
+            Clause::Where(w) => w,
+            _ => return false,
+        };
+        match extract_spatial_join_contains(&w.predicate) {
+            Some(x) => x,
+            None => return false,
+        }
+    };
+
+    let (container_type, probe_type) = if container_var == p0_var && probe_var == p1_var {
+        (p0_type.clone(), p1_type.clone())
+    } else if container_var == p1_var && probe_var == p0_var {
+        (p1_type.clone(), p0_type.clone())
+    } else {
+        return false;
+    };
+
+    if !spatial_schema_ok(graph, &container_type, &probe_type, probe_kind) {
+        return false;
+    }
+
+    query.clauses.remove(i + 1);
+    query.clauses[i] = Clause::SpatialJoin {
+        container_var,
+        probe_var,
+        container_type,
+        probe_type,
+        probe_kind,
+        remainder,
+    };
+    true
+}
+
+/// Multi-MATCH form: `MATCH (p:T1) [WHERE pre1] MATCH (s:T2) WHERE
+/// contains(s, centroid(p)) [AND rest]`. Returns true iff a rewrite was
+/// committed at `i`.
+fn try_fuse_spatial_multi_match(query: &mut CypherQuery, graph: &DirGraph, i: usize) -> bool {
+    use super::super::ast::SpatialProbeKind;
+
+    // Window: Match[i] [Where[i+1]] Match[i+ofs] Where[i+ofs+1].
+    if i + 2 >= query.clauses.len() {
+        return false;
+    }
+    let probe_pre_where_idx: Option<usize> = match (
+        matches!(query.clauses.get(i + 1), Some(Clause::Where(_))),
+        matches!(query.clauses.get(i + 2), Some(Clause::Match(_))),
+    ) {
+        (true, true) => Some(i + 1),
+        (false, _) => None,
+        _ => return false,
+    };
+    let m1_idx = probe_pre_where_idx.map_or(i + 1, |_| i + 2);
+    let w_idx = m1_idx + 1;
+    if !matches!(query.clauses.get(m1_idx), Some(Clause::Match(_))) {
+        return false;
+    }
+    if !matches!(query.clauses.get(w_idx), Some(Clause::Where(_))) {
+        return false;
+    }
+
+    // Both MATCH clauses must be single-pattern, single-node, no edges,
+    // no path assignments, no hints.
+    let extract_single = |c: &Clause| -> Option<(String, String)> {
+        let mc = match c {
+            Clause::Match(m) => m,
+            _ => return None,
+        };
+        if mc.patterns.len() != 1
+            || !mc.path_assignments.is_empty()
+            || mc.limit_hint.is_some()
+            || mc.distinct_node_hint.is_some()
+        {
+            return None;
+        }
+        extract_single_typed_node(&mc.patterns[0])
+    };
+    let (m0_var, m0_type) = match extract_single(&query.clauses[i]) {
+        Some(x) => x,
+        None => return false,
+    };
+    let (m1_var, m1_type) = match extract_single(&query.clauses[m1_idx]) {
+        Some(x) => x,
+        None => return false,
+    };
+    if m0_var == m1_var {
+        return false;
+    }
+
+    // The trailing WHERE must hold a contains(c, centroid(p)) call (or
+    // equivalent). Centroid probe is the only mode that makes sense
+    // here — Location probe uses a single MATCH cartesian and is
+    // already handled by `try_fuse_spatial_single_match`.
+    let (container_var, probe_var, probe_kind, remainder) = {
+        let w = match &query.clauses[w_idx] {
+            Clause::Where(w) => w,
+            _ => return false,
+        };
+        match extract_spatial_join_contains(&w.predicate) {
+            Some(x) => x,
+            None => return false,
+        }
+    };
+    if probe_kind != SpatialProbeKind::Centroid {
+        return false;
+    }
+
+    // Either MATCH may carry the container or the probe — the contains
+    // call decides, not pattern position. Fail fast if the call vars
+    // don't map cleanly onto the two MATCHes.
+    let (cont_pat_type, probe_pat_type, probe_pat_is_first) =
+        if container_var == m0_var && probe_var == m1_var {
+            (m0_type.clone(), m1_type.clone(), false)
+        } else if container_var == m1_var && probe_var == m0_var {
+            (m1_type.clone(), m0_type.clone(), true)
+        } else {
+            return false;
+        };
+    // The pre-WHERE (if any) sits between the two MATCHes and references
+    // the probe in the canonical Sodir shape. If the probe is the first
+    // MATCH, the pre-WHERE references the container instead — still
+    // valid; we fold it into the residual either way.
+    let _ = probe_pat_is_first;
+
+    if !spatial_schema_ok(graph, &cont_pat_type, &probe_pat_type, probe_kind) {
+        return false;
+    }
+
+    // Fold the optional pre-WHERE between the two MATCHes into the
+    // SpatialJoin's residual predicate so per-pattern filters
+    // (e.g. `p.wkt_geometry IS NOT NULL`) still apply. The R-tree probe
+    // naturally drops probes without geometry, but a user predicate may
+    // filter more.
+    let merged_remainder = match (probe_pre_where_idx, remainder) {
+        (None, r) => r,
+        (Some(idx), r) => {
+            let pre = match &query.clauses[idx] {
+                Clause::Where(w) => w.predicate.clone(),
+                _ => return false,
+            };
+            Some(match r {
+                Some(rest) => Predicate::And(Box::new(pre), Box::new(rest)),
+                None => pre,
+            })
+        }
+    };
+
+    // Commit: remove the trailing WHERE, the second MATCH, and the
+    // optional pre-WHERE; replace the first MATCH with the SpatialJoin.
+    query.clauses.remove(w_idx);
+    query.clauses.remove(m1_idx);
+    if let Some(pre_idx) = probe_pre_where_idx {
+        query.clauses.remove(pre_idx);
+    }
+    query.clauses[i] = Clause::SpatialJoin {
+        container_var,
+        probe_var,
+        container_type: cont_pat_type,
+        probe_type: probe_pat_type,
+        probe_kind,
+        remainder: merged_remainder,
+    };
+    true
+}
+
+/// Extract `(variable, node_type)` from a 1-element Node pattern.
+fn extract_single_typed_node(
+    pat: &crate::graph::core::pattern_matching::Pattern,
+) -> Option<(String, String)> {
+    if pat.elements.len() != 1 {
+        return None;
+    }
+    match &pat.elements[0] {
+        PatternElement::Node(np) => {
+            let v = np.variable.as_ref()?.clone();
+            let t = np.node_type.as_ref()?.clone();
+            Some((v, t))
+        }
+        _ => None,
+    }
+}
+
+/// Schema gate per probe-kind:
+/// - Container always needs `SpatialConfig::geometry`.
+/// - Location probe needs `SpatialConfig::location`.
+/// - Centroid probe needs `SpatialConfig::geometry` (so we can compute centroid).
+fn spatial_schema_ok(
+    graph: &DirGraph,
+    container_type: &str,
+    probe_type: &str,
+    probe_kind: super::super::ast::SpatialProbeKind,
+) -> bool {
+    use super::super::ast::SpatialProbeKind;
+    let container_ok = graph
+        .get_spatial_config(container_type)
+        .is_some_and(|c| c.geometry.is_some());
+    let probe_ok = match probe_kind {
+        SpatialProbeKind::Location => graph
+            .get_spatial_config(probe_type)
+            .is_some_and(|c| c.location.is_some()),
+        SpatialProbeKind::Centroid => graph
+            .get_spatial_config(probe_type)
+            .is_some_and(|c| c.geometry.is_some()),
+    };
+    container_ok && probe_ok
 }
 
 #[cfg(test)]

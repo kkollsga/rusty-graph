@@ -422,6 +422,35 @@ class TestSpatialJoin:
         rows = g.cypher("MATCH (a:Area), (c:City) WHERE contains(a, c) RETURN a.title").to_list()
         assert rows == []
 
+    def test_multi_match_with_centroid_probe(self, spatial_join_graph):
+        """Multi-MATCH form: `MATCH (a:Area) MATCH (b:Area) WHERE contains(a, centroid(b))`.
+        Sodir's IN_STRUCTURAL_ELEMENT shape — fusion must wire `centroid()`
+        through `SpatialProbeKind::Centroid` and produce the same pairs as
+        the brute-force two-pattern path."""
+        fused = spatial_join_graph.cypher(
+            "MATCH (outer:Area) MATCH (inner:Area) "
+            "WHERE contains(outer, centroid(inner)) "
+            "RETURN outer.title AS o, inner.title AS i ORDER BY o, i"
+        ).to_list()
+        fused_pairs = {(r["o"], r["i"]) for r in fused}
+        reference = spatial_join_graph.cypher(
+            "MATCH (outer:Area), (inner:Area) "
+            "WHERE contains(outer.geometry, centroid(inner.geometry)) "
+            "RETURN outer.title AS o, inner.title AS i ORDER BY o, i"
+        ).to_list()
+        ref_pairs = {(r["o"], r["i"]) for r in reference}
+        assert fused_pairs == ref_pairs
+        assert ("SouthNorway", "SmallBox") in fused_pairs  # SmallBox ⊂ SouthNorway
+        assert ("SmallBox", "SmallBox") in fused_pairs  # self-containment
+
+    def test_multi_match_centroid_fires_fusion(self, spatial_join_graph):
+        """EXPLAIN must show SpatialJoin for the multi-MATCH centroid shape
+        so the planner's `try_fuse_spatial_multi_match` extension is exercised."""
+        explain = spatial_join_graph.cypher(
+            "EXPLAIN MATCH (outer:Area) MATCH (inner:Area) WHERE contains(outer, centroid(inner)) RETURN outer.title"
+        ).to_list()
+        assert "SpatialJoin" in "\n".join(str(r) for r in explain)
+
 
 # ── 0.8.20: Geometry primitives + KNN ──────────────────────────
 

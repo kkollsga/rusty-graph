@@ -196,13 +196,32 @@ pub enum Clause {
     /// Builds an R-tree on container bboxes and probes points against it, avoiding the
     /// full cartesian product. `remainder` is the ANDed residual predicate (or None) left
     /// after `try_extract_contains_filter` removed the contains() call.
+    ///
+    /// `probe_kind` selects how the probe-side point is sourced:
+    /// - `Location` (default, single-MATCH `contains(s, w)`): use the probe's
+    ///   spatial-config `location` (lat/lon properties) → Point.
+    /// - `Centroid` (multi-MATCH `contains(s, centroid(p))`): compute the
+    ///   centroid of the probe's geometry → Point. Lets fusion fire on the
+    ///   common `MATCH (p) ... MATCH (s) WHERE contains(s, centroid(p))`
+    ///   shape used by point-in-polygon enrichment pipelines.
     SpatialJoin {
         container_var: String,
         probe_var: String,
         container_type: String,
         probe_type: String,
+        probe_kind: SpatialProbeKind,
         remainder: Option<Predicate>,
     },
+}
+
+/// How the spatial-join executor should source the probe-side point.
+/// See `Clause::SpatialJoin` for context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialProbeKind {
+    /// Probe's spatial-config `location` (lat/lon properties) → Point.
+    Location,
+    /// Centroid of the probe's geometry → Point.
+    Centroid,
 }
 
 /// Top-K hint absorbed by `FusedMatchWithAggregate` from a downstream

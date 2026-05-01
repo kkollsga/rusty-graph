@@ -5,7 +5,7 @@
 //! bboxes, and emits only matching pairs. Replaces the 2-pattern cartesian
 //! + WHERE contains() pipeline with O((N+M) log N + K) work.
 
-use super::super::ast::Predicate;
+use super::super::ast::{Predicate, SpatialProbeKind};
 use super::*;
 use petgraph::graph::NodeIndex;
 use rstar::{RTree, RTreeObject, AABB};
@@ -40,6 +40,7 @@ impl<'a> CypherExecutor<'a> {
         probe_var: &str,
         container_type: &str,
         probe_type: &str,
+        probe_kind: SpatialProbeKind,
         remainder: Option<&Predicate>,
     ) -> Result<ResultSet, String> {
         // Fall back to a regular two-pattern MATCH + WHERE if either type has
@@ -82,15 +83,26 @@ impl<'a> CypherExecutor<'a> {
 
         for (probe_i, probe_idx) in probe_indices.iter().enumerate() {
             self.ensure_node_spatial_cached(probe_idx);
-            let (lat, lon) = {
+            let probe_point: Option<(f64, f64)> = {
                 let cache = self.spatial_node_cache.read().unwrap();
                 match cache.get(&probe_idx.index()) {
-                    Some(Some(data)) => match data.location {
-                        Some(pt) => pt,
-                        None => continue,
+                    Some(Some(data)) => match probe_kind {
+                        SpatialProbeKind::Location => data.location,
+                        // Probe via the geometry centroid. Drops probes
+                        // whose geometry is missing or whose centroid
+                        // computation fails (degenerate WKT).
+                        SpatialProbeKind::Centroid => {
+                            data.geometry.as_ref().and_then(|(geom, _bbox)| {
+                                crate::graph::features::spatial::geometry_centroid(geom).ok()
+                            })
+                        }
                     },
-                    _ => continue,
+                    _ => None,
                 }
+            };
+            let (lat, lon) = match probe_point {
+                Some(pt) => pt,
+                None => continue,
             };
 
             // R-tree bbox probe: only containers whose bbox contains this point.

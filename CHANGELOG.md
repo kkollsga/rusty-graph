@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.40] — 2026-05-01
+
+### Cypher planner
+
+- **Spatial-join fusion: multi-MATCH + `centroid()` probe.** Extends
+  `fuse_spatial_join` to recognise the
+  `MATCH (a:T1) MATCH (b:T2) WHERE contains(b, centroid(a))` shape (or
+  the inverse `contains(a, centroid(b))` — the call decides which MATCH
+  is container vs. probe, not pattern position). Previously only the
+  single-MATCH cartesian form fired; the multi-MATCH form fell back to
+  cross-product + post-filter. Sodir's `IN_STRUCTURAL_ELEMENT` enrichment
+  (Prospect → StructuralElement via centroid) drops from ~2 s to ~0.6 s
+  on a 6,775-prospect graph; any project doing point-in-polygon
+  enrichment via `centroid()` benefits.
+- New `Clause::SpatialJoin::probe_kind: SpatialProbeKind` carries
+  whether the probe-side point comes from the spatial-config `location`
+  (single-MATCH cartesian) or the centroid of the probe's geometry
+  (multi-MATCH centroid). The spatial-join executor honours the kind
+  when sourcing the per-probe point.
+- An optional pre-WHERE between the two MATCHes (e.g.
+  `MATCH (p:Prospect) WHERE p.wkt_geometry IS NOT NULL MATCH (s:StructuralElement) ...`)
+  is folded into the SpatialJoin's residual predicate so per-pattern
+  filters still apply after fusion.
+- Regression coverage: `tests/test_cypher_spatial.py::TestSpatialJoin`
+  picks up `test_multi_match_with_centroid_probe` (correctness vs. the
+  brute-force two-pattern path) and `test_multi_match_centroid_fires_fusion`
+  (EXPLAIN must show `SpatialJoin`).
+
 ## [0.8.39] — 2026-05-01
 
 ### Cypher executor
