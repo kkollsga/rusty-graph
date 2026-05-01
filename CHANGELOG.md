@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.41] — 2026-05-02
+
 ### Cypher executor — Bug 8 followup
 
 - **Fix: SET on an in-memory graph dropped new properties on save.**
