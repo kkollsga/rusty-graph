@@ -315,6 +315,29 @@ def load(path: str) -> KnowledgeGraph:
     """
     ...
 
+def cypher_pass_names() -> list[str]:
+    """Names of every Cypher optimizer pass, in execution order.
+
+    Pass names are stable identifiers for the diagnostic
+    ``KnowledgeGraph.cypher(disabled_passes=[...])`` kwarg and for
+    bisection scripts. Use this list as the source of truth — names not
+    in it will be rejected by ``cypher(...)``.
+
+    Returns:
+        List of pass names in pipeline order.
+
+    Example::
+
+        passes = kglite.cypher_pass_names()
+        # Bisect: disable each pass in turn, find the divergence.
+        for name in passes:
+            naive = g.cypher(query, disabled_passes=[name]).to_list()
+            if naive != optimized:
+                print(f"Divergence introduced by `{name}`")
+                break
+    """
+    ...
+
 def from_blueprint(
     blueprint_path: Union[str, Path],
     *,
@@ -2980,6 +3003,8 @@ class KnowledgeGraph:
         timeout_ms: Optional[int] = None,
         max_rows: Optional[int] = None,
         streaming: bool = True,
+        disable_optimizer: bool = False,
+        disabled_passes: Optional[list[str]] = None,
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 
@@ -3030,6 +3055,18 @@ class KnowledgeGraph:
                 to force the materialized executor — useful for
                 debugging parity issues; behaviour should otherwise be
                 identical.
+            disable_optimizer: When ``True``, run the query with **all**
+                optimizer passes skipped — schema validation still
+                applies, but no predicate pushdown, fusion, reordering,
+                or LIMIT-pushdown happens. Diagnostic / testing knob;
+                normal use should leave this ``False``. Used by the
+                differential test harness to assert optimized and naive
+                executions produce identical results.
+            disabled_passes: Skip a specific subset of optimizer passes
+                by name. Names must come from
+                :func:`kglite.cypher_pass_names()` — typos raise
+                ``ValueError``. Useful for bisecting which pass
+                introduces a divergence.
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,

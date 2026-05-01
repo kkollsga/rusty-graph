@@ -715,7 +715,7 @@ impl TextScoreCollector {
 }
 
 /// Rewrite `Match-Match-Return(group, aggregate) [OrderBy] [Limit]` into
-/// `Match-Match-With(group_var, aggregate)-Return(project) [OrderBy] [Limit]`.
+/// `Match-Match-With(group_keys, aggregate)-Return(project) [OrderBy] [Limit]`.
 ///
 /// The `RETURN` form is what users naturally write for a cohort top-K
 /// query:
@@ -726,9 +726,19 @@ impl TextScoreCollector {
 /// Without this rewrite, `fuse_match_return_aggregate` only handles a
 /// **single** MATCH and `fuse_match_with_aggregate` only fires on the
 /// `WITH(aggregate)` shape. The query falls off the fused-top-K path
-/// and runs ~14× slower than the equivalent `WITH p, count(r) AS d
-/// RETURN p.title, d` form. After the rewrite, the existing fusion
-/// pipeline picks it up and the query collapses into a streaming heap.
+/// and runs ~14× slower than the equivalent
+/// `WITH p.title AS t, count(r) AS d RETURN t, d` form. After the
+/// rewrite, the existing fusion pipeline picks it up and the query
+/// collapses into a streaming heap.
+///
+/// **Important**: the WITH groups by *each non-aggregate RETURN
+/// expression*, not by the source variable. `RETURN p.city,
+/// count(c)` groups per city (the user-written expression), not per
+/// p (the variable). The earlier shape — `WITH p, count(c)` —
+/// over-finely grouped (one row per p) and produced silently wrong
+/// counts when the property had duplicates across p instances. The
+/// harness in `tests/test_cypher_differential.py` caught this for
+/// `MATCH (p) MATCH (c) RETURN p.city, count(c)`.
 ///
 /// Conditions (any miss → no rewrite):
 /// - Exactly two consecutive Match clauses (no OPTIONAL, no path
@@ -736,7 +746,9 @@ impl TextScoreCollector {
 /// - The Return has at least one aggregate item AND at least one
 ///   non-aggregate item.
 /// - Every non-aggregate item is `Variable(v)` or `PropertyAccess
-///   { variable: v, … }` for the same single variable `v`.
+///   { variable: v, … }` for the same single variable `v`. (Lets the
+///   downstream `fuse_match_with_aggregate` planner reason about the
+///   group keys against the join graph.)
 /// - Every aggregate item has a user-supplied alias (so the rewritten
 ///   Return can refer to it by name, and ORDER BY targets remain
 ///   stable).
@@ -780,8 +792,8 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
         return;
     }
 
-    // Partition into aggregate vs non-aggregate items, picking off the
-    // single common group variable from the non-aggregates.
+    // Partition into aggregate vs non-aggregate items, ensuring all
+    // non-aggregates project off the same single source variable.
     let mut group_var: Option<String> = None;
     let mut all_aggs_aliased = true;
     let mut has_agg = false;
@@ -809,39 +821,54 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
     if !has_agg || !has_non_agg || !all_aggs_aliased {
         return;
     }
-    let group_var = match group_var {
-        Some(v) => v,
-        None => return,
-    };
-
-    // Build the WITH (group var + aggregates with their aliases).
-    let mut with_items: Vec<ReturnItem> = Vec::with_capacity(orig_items.len());
-    with_items.push(ReturnItem {
-        expression: Expression::Variable(group_var.clone()),
-        alias: None,
-    });
-    for item in &orig_items {
-        if is_aggregate_expression(&item.expression) {
-            with_items.push(item.clone());
-        }
+    if group_var.is_none() {
+        return;
     }
 
-    // Build the new RETURN: keep originals, but each aggregate becomes
-    // a Variable reference to its alias.
-    let new_return_items: Vec<ReturnItem> = orig_items
-        .iter()
-        .map(|item| {
-            if is_aggregate_expression(&item.expression) {
-                let alias = item.alias.clone().expect("aliased above");
-                ReturnItem {
-                    expression: Expression::Variable(alias.clone()),
-                    alias: Some(alias),
-                }
-            } else {
-                item.clone()
-            }
-        })
-        .collect();
+    // Synthesize internal aliases for non-aggregate items so the WITH
+    // can introduce them by name into the downstream scope, and the
+    // RETURN can reference them as bare Variables (which preserves the
+    // user's original column display name via the alias slot).
+    //
+    // Why do we need this layer at all? Cypher's GROUP BY semantics is
+    // "the set of non-aggregate expressions in the projection list"
+    // (the rewrite must preserve that). Pushing only the source
+    // variable into WITH groups too finely (one row per p instead of
+    // one row per p.city). Pushing the property expressions into WITH
+    // groups correctly, but then the variable goes out of scope, so
+    // the new RETURN must reference WITH outputs by alias.
+    let mut with_items: Vec<ReturnItem> = Vec::with_capacity(orig_items.len());
+    let mut new_return_items: Vec<ReturnItem> = Vec::with_capacity(orig_items.len());
+    for (idx, item) in orig_items.iter().enumerate() {
+        if is_aggregate_expression(&item.expression) {
+            // Aggregate: stays in WITH with the user's alias; RETURN
+            // references it by alias.
+            let alias = item.alias.clone().expect("aliased above");
+            with_items.push(item.clone());
+            new_return_items.push(ReturnItem {
+                expression: Expression::Variable(alias.clone()),
+                alias: Some(alias),
+            });
+        } else {
+            // Non-aggregate: push the user expression into WITH under a
+            // synthetic internal alias; RETURN references it as a
+            // bare Variable but with the original display name (alias
+            // if user wrote one, expression text otherwise).
+            let internal = format!("__dgr_grp_{idx}");
+            with_items.push(ReturnItem {
+                expression: item.expression.clone(),
+                alias: Some(internal.clone()),
+            });
+            new_return_items.push(ReturnItem {
+                expression: Expression::Variable(internal),
+                alias: item.alias.clone().or_else(|| {
+                    // No user alias — preserve the column name the
+                    // unfused path would have produced.
+                    Some(default_column_name(&item.expression))
+                }),
+            });
+        }
+    }
 
     // Splice in: replace Return at r_idx with [With, Return].
     let new_with = Clause::With(WithClause {
@@ -857,6 +884,19 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
     });
     query.clauses[r_idx] = new_with;
     query.clauses.insert(r_idx + 1, new_return);
+}
+
+/// The display name an unaliased RETURN item would surface as. Used by
+/// `desugar_multi_match_return_aggregate` to preserve column naming
+/// when it has to introduce a synthetic internal alias.
+fn default_column_name(expr: &Expression) -> String {
+    match expr {
+        Expression::Variable(v) => v.clone(),
+        Expression::PropertyAccess { variable, property } => format!("{variable}.{property}"),
+        // Fall back to a debug rendering for shapes that don't appear
+        // in the desugar's accepted items (the caller bails on those).
+        other => format!("{other:?}"),
+    }
 }
 
 /// Strip a `WITH x [, y, ...]` clause that's a pure projection and is a

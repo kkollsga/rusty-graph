@@ -46,6 +46,31 @@ we work, not just bigger.
 - Don't add a parameter, branch, or flag without checking whether the
   existing structure should be reshaped to absorb it cleanly.
 
+### Cypher planner: when adding or changing a pass
+
+The optimizer pipeline lives at `src/graph/languages/cypher/planner/mod.rs`
+as a `const PASSES: &[(&str, PassFn)]` registry — one source of truth
+for ordering, naming, and what runs in what order. When adding or
+changing a pass:
+
+1. **Implement** the pass in its appropriate sub-module (`fusion.rs`,
+   `simplification.rs`, etc.) or a new file if it's a fresh concern.
+2. **Register** it in `PASSES` with a unique stable name (the name is
+   user-facing via `disabled_passes=[...]`).
+3. **Doc-comment** the wrapper fn with: precondition, pattern matched,
+   rewrite, why-bail. The doc-comments next to the existing wrappers
+   are the format to follow.
+4. **Add at least one query** to
+   `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` that
+   exercises the pass's trigger shape. The differential harness is the
+   regression mechanism — passes not in the corpus aren't trusted.
+5. **Bisect any divergence** the harness reports with
+   `scripts/cypher_pass_bisect.py` before assuming a query is wrong.
+
+The differential corpus is *the* mechanism to prevent silent
+correctness regressions. Every fix to an optimizer bug lands its
+triggering query into the corpus as part of the fix commit.
+
 ## Performance Work Protocol
 
 Before starting any performance-related code changes:

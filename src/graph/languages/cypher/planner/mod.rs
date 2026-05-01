@@ -11,7 +11,7 @@ use super::ast::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::schema::DirGraph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub mod cost_model;
 pub mod fusion;
@@ -35,6 +35,105 @@ use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
     push_distinct_into_match, push_limit_into_match,
 };
+
+/// Carries the per-call inputs every pass might need. Passing this once
+/// through the registry loop is cheaper than threading three positional
+/// arguments through 25+ wrapper fns, and adding a new dependency means
+/// extending this struct rather than every wrapper signature.
+pub struct PassCtx<'a> {
+    pub graph: &'a DirGraph,
+    pub params: &'a HashMap<String, Value>,
+    pub disabled: &'a HashSet<String>,
+}
+
+type PassFn = fn(&mut CypherQuery, &PassCtx);
+
+/// The optimizer pipeline as a single source of truth. Order is
+/// load-bearing — comments on individual entries call out cross-pass
+/// dependencies. Adding a new pass: write the impl, write a `pass_*`
+/// wrapper, register here with a unique name, doc-comment the wrapper,
+/// add at least one query to `tests/test_cypher_differential.py`.
+pub const PASSES: &[(&str, PassFn)] = &[
+    ("optimize_nested_queries", pass_optimize_nested_queries),
+    ("push_where_into_match.1", pass_push_where_into_match),
+    ("fold_or_to_in", pass_fold_or_to_in),
+    // second push_where pass: catches IN predicates created by fold_or_to_in
+    ("push_where_into_match.2", pass_push_where_into_match),
+    (
+        "extract_pushable_rel_predicates",
+        pass_extract_pushable_rel_predicates,
+    ),
+    // strip pass-through WITH BEFORE cross-clause MATCH reorder so the
+    // latter sees a contiguous Match-Match span when a `WITH p` sat between.
+    ("fold_pass_through_with", pass_fold_pass_through_with),
+    // rewrites Match-Match-Return(group, agg) so the aggregate-fusion +
+    // top-K pipeline can pick it up.
+    (
+        "desugar_multi_match_return_aggregate",
+        pass_desugar_multi_match_return_aggregate,
+    ),
+    ("fuse_spatial_join", pass_fuse_spatial_join),
+    // O(1) cost-proxy reorder. Runs BEFORE pattern_start_node so reversal
+    // sees the post-reorder clause sequence and tracks bound_vars correctly.
+    ("reorder_match_clauses", pass_reorder_match_clauses),
+    (
+        "optimize_pattern_start_node",
+        pass_optimize_pattern_start_node,
+    ),
+    ("reorder_match_patterns", pass_reorder_match_patterns),
+    ("push_limit_into_match", pass_push_limit_into_match),
+    ("push_distinct_into_match", pass_push_distinct_into_match),
+    ("fuse_anchored_edge_count", pass_fuse_anchored_edge_count),
+    ("fuse_count_short_circuits", pass_fuse_count_short_circuits),
+    (
+        "fuse_optional_match_aggregate",
+        pass_fuse_optional_match_aggregate,
+    ),
+    (
+        "fuse_match_return_aggregate",
+        pass_fuse_match_return_aggregate,
+    ),
+    ("fuse_match_with_aggregate", pass_fuse_match_with_aggregate),
+    // top-K absorption AFTER fuse_match_with_aggregate (which produces
+    // FusedMatchWithAggregate) but BEFORE fuse_order_by_top_k (which would
+    // otherwise consume the downstream RETURN+ORDER BY+LIMIT).
+    (
+        "fuse_match_with_aggregate_top_k",
+        pass_fuse_match_with_aggregate_top_k,
+    ),
+    ("fuse_node_scan_aggregate", pass_fuse_node_scan_aggregate),
+    ("fuse_node_scan_top_k", pass_fuse_node_scan_top_k),
+    (
+        "fuse_vector_score_order_limit",
+        pass_fuse_vector_score_order_limit,
+    ),
+    ("fuse_order_by_top_k", pass_fuse_order_by_top_k),
+    (
+        "reorder_predicates_by_cost",
+        pass_reorder_predicates_by_cost,
+    ),
+    (
+        "mark_fast_var_length_paths",
+        pass_mark_fast_var_length_paths,
+    ),
+    (
+        "mark_skip_target_type_check",
+        pass_mark_skip_target_type_check,
+    ),
+];
+
+/// Returns true iff `name` is a registered pass name. PyAPI uses this to
+/// reject typos in the `disabled_passes` kwarg before they silently
+/// suppress nothing.
+pub fn is_known_pass(name: &str) -> bool {
+    PASSES.iter().any(|(n, _)| *n == name)
+}
+
+/// Returns every registered pass name. Used by the PyAPI's
+/// `disable_optimizer=True` shortcut, which expands to "disable everything".
+pub fn all_pass_names() -> Vec<String> {
+    PASSES.iter().map(|(n, _)| n.to_string()).collect()
+}
 
 /// Annotate the top-level query's terminal RETURN with `lazy_eligible`
 /// when no downstream operator forces row materialisation. Called once
@@ -65,64 +164,321 @@ pub fn mark_lazy_eligibility(query: &mut CypherQuery) {
     mark_return_lazy_eligible(query);
 }
 
+/// Run the optimizer pipeline. Equivalent to `optimize_with_disabled`
+/// with no passes disabled. Kept as the primary entry point so most
+/// callers (executor, transactions, mutations) don't need to think about
+/// the disable knob.
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
-    // Recursively optimize nested queries (e.g., UNION right-arm)
-    optimize_nested_queries(query, graph, params);
-    push_where_into_match(query, params);
-    fold_or_to_in(query);
-    push_where_into_match(query, params); // second pass: push newly-created IN predicates
-                                          // Inline edge predicates (`type(r) = 'X'`, `r.prop OP lit`,
-                                          // `startNode(r) = peer`) that the post-expansion WHERE would
-                                          // otherwise evaluate row-by-row. The matcher applies them during
-                                          // expansion, before per-edge bindings are allocated.
-    extract_pushable_rel_predicates(query);
-    // Strip pass-through WITH clauses that block downstream fusion. Runs
-    // before the cross-clause MATCH reorder so the latter sees a
-    // contiguous Match-Match span when a `WITH p` sat between them.
-    fold_pass_through_with(query);
-    // Rewrite `Match-Match-Return(group, agg)` into `Match-Match-With
-    // (group, agg)-Return(project)` so the existing aggregate-fusion +
-    // top-K pipeline picks it up.
-    desugar_multi_match_return_aggregate(query);
-    fuse_spatial_join(query, graph);
-    // Cross-clause MATCH ordering uses connection-type total counts as an
-    // O(1) cost proxy. Runs before pattern_start_node so reversal sees
-    // the post-reorder clause sequence and tracks `bound_vars` correctly.
-    reorder_match_clauses(query, graph);
-    optimize_pattern_start_node(query, graph);
-    reorder_match_patterns(query, graph);
-    push_limit_into_match(query, graph);
-    push_distinct_into_match(query);
-    fuse_anchored_edge_count(query, graph);
-    fuse_count_short_circuits(query);
-    fuse_optional_match_aggregate(query);
-    fuse_match_return_aggregate(query);
-    fuse_match_with_aggregate(query);
-    // Run top-K absorption AFTER fuse_match_with_aggregate (which produces
-    // FusedMatchWithAggregate) but BEFORE fuse_order_by_top_k (which would
-    // otherwise consume the downstream RETURN+ORDER BY+LIMIT into a
-    // FusedOrderByTopK that no longer matches our pattern).
-    fuse_match_with_aggregate_top_k(query);
-    fuse_node_scan_aggregate(query);
-    fuse_node_scan_top_k(query);
-    fuse_vector_score_order_limit(query);
-    fuse_order_by_top_k(query);
-    reorder_predicates_by_cost(query);
-    mark_fast_var_length_paths(query);
-    mark_skip_target_type_check(query, graph);
+    let empty: HashSet<String> = HashSet::new();
+    optimize_with_disabled(query, graph, params, &empty);
 }
 
-/// Recursively optimize queries nested inside UNION clauses.
-fn optimize_nested_queries(
+/// Run the optimizer pipeline, skipping any pass whose name is in
+/// `disabled`. Diagnostic hook for the differential test harness and
+/// `cypher(..., disabled_passes=[...])` kwarg — production callers should
+/// use the no-knob `optimize()` wrapper.
+pub fn optimize_with_disabled(
     query: &mut CypherQuery,
     graph: &DirGraph,
     params: &HashMap<String, Value>,
+    disabled: &HashSet<String>,
 ) {
-    for clause in &mut query.clauses {
-        if let Clause::Union(ref mut u) = clause {
-            optimize(&mut u.query, graph, params);
+    let ctx = PassCtx {
+        graph,
+        params,
+        disabled,
+    };
+    for (name, pass_fn) in PASSES {
+        if disabled.contains(*name) {
+            continue;
+        }
+        pass_fn(query, &ctx);
+        #[cfg(debug_assertions)]
+        debug_check_invariants(query, name);
+    }
+}
+
+/// Sanity checks on the post-pass IR. Debug-only — release builds pay
+/// nothing. Catches the class of bug where pass X corrupts the IR and a
+/// downstream pass or the executor crashes 200 lines later with a
+/// confusing error. Each check is permissive (only catches definitely-
+/// invalid shapes); we'd rather miss a subtle bug than panic on a valid
+/// query the writer of an invariant didn't anticipate.
+#[cfg(debug_assertions)]
+fn debug_check_invariants(query: &CypherQuery, after_pass_name: &str) {
+    if let Err(msg) = check_match_patterns_non_empty(query) {
+        panic!("Pass `{after_pass_name}` produced invalid IR: {msg}");
+    }
+    if let Err(msg) = check_return_with_items_non_empty(query) {
+        panic!("Pass `{after_pass_name}` produced invalid IR: {msg}");
+    }
+}
+
+/// Every Match / OptionalMatch must have at least one pattern, and each
+/// pattern at least one element. Catches passes that delete the last
+/// pattern but leave the clause shell.
+#[cfg(debug_assertions)]
+fn check_match_patterns_non_empty(query: &CypherQuery) -> Result<(), String> {
+    for (idx, clause) in query.clauses.iter().enumerate() {
+        let mc = match clause {
+            Clause::Match(m) | Clause::OptionalMatch(m) => m,
+            _ => continue,
+        };
+        if mc.patterns.is_empty() {
+            return Err(format!("Match clause at index {idx} has no patterns"));
+        }
+        for (pi, p) in mc.patterns.iter().enumerate() {
+            if p.elements.is_empty() {
+                return Err(format!(
+                    "Match clause at index {idx}, pattern {pi} has no elements"
+                ));
+            }
         }
     }
+    Ok(())
+}
+
+/// Return / With must project at least one item. Catches passes that
+/// leave a stub Return after consuming its only item into a fused clause.
+#[cfg(debug_assertions)]
+fn check_return_with_items_non_empty(query: &CypherQuery) -> Result<(), String> {
+    for (idx, clause) in query.clauses.iter().enumerate() {
+        match clause {
+            Clause::Return(r) if r.items.is_empty() => {
+                return Err(format!("Return clause at index {idx} has no items"));
+            }
+            Clause::With(w) if w.items.is_empty() => {
+                return Err(format!("With clause at index {idx} has no items"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// Note: a `check_terminal_return_position` invariant was prototyped here
+// and removed — the parser legitimately produces `RETURN ... WHERE ...`
+// for queries where the WHERE syntactically trails the RETURN (test:
+// test_edge_properties.py). Without a clear oracle for "what's a valid
+// post-RETURN clause", a position check creates false positives. The
+// non-empty-patterns and non-empty-items checks above stay because they
+// have unambiguous oracles.
+
+// ── Pass wrappers ──────────────────────────────────────────────────
+// Each wrapper is the registry-facing entry point for one optimizer
+// pass. Adding a new pass: write the impl in the appropriate
+// sub-module, add a wrapper here with a doc-comment in the standard
+// shape, register it in `PASSES`, add at least one query to
+// `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES`.
+
+/// **Pass:** `optimize_nested_queries` — Recurse the optimizer into
+/// every nested query (UNION right-arms today; subqueries when added).
+/// Inherits the parent's `disabled` set so diagnostic toggles propagate
+/// to the inner planner pipeline.
+fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
+    for clause in &mut query.clauses {
+        if let Clause::Union(ref mut u) = clause {
+            optimize_with_disabled(&mut u.query, ctx.graph, ctx.params, ctx.disabled);
+        }
+    }
+}
+
+/// **Pass:** `push_where_into_match` — Move comparison predicates from
+/// a trailing `WHERE` clause into the preceding `MATCH`'s
+/// `PropertyMatcher`. The matcher applies them during pattern expansion
+/// instead of evaluating them per row, pruning the search early. Runs
+/// twice in the pipeline (before and after `fold_or_to_in`) so IN
+/// predicates synthesized by the OR fold also get pushed.
+fn pass_push_where_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
+    push_where_into_match(query, ctx.params)
+}
+
+/// **Pass:** `fold_or_to_in` — Rewrite `(a.x = v1 OR a.x = v2 OR ...)`
+/// chains into `a.x IN [v1, v2, ...]`. Lets the second
+/// `push_where_into_match` push the synthesized IN as a single
+/// equality-set matcher.
+fn pass_fold_or_to_in(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fold_or_to_in(query)
+}
+
+/// **Pass:** `extract_pushable_rel_predicates` — Inline edge-side
+/// predicates (`type(r) = 'X'`, `r.prop OP literal`, `startNode(r) =
+/// peer`) from a trailing WHERE into the edge's `rel_predicate`. The
+/// matcher applies them during expansion, before per-edge bindings are
+/// allocated. WHY-BAIL: predicates referencing unbound vars stay in WHERE.
+fn pass_extract_pushable_rel_predicates(query: &mut CypherQuery, _ctx: &PassCtx) {
+    extract_pushable_rel_predicates(query)
+}
+
+/// **Pass:** `fold_pass_through_with` — Strip `WITH x AS x` /
+/// pass-through `WITH *` clauses that don't reshape the row stream.
+/// Removing them lets `reorder_match_clauses` see contiguous Match
+/// spans for cross-clause reorder; otherwise the WITH would block.
+fn pass_fold_pass_through_with(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fold_pass_through_with(query)
+}
+
+/// **Pass:** `desugar_multi_match_return_aggregate` — Rewrite
+/// `MATCH ... MATCH ... RETURN <group>, <agg>` into the equivalent
+/// `MATCH ... MATCH ... WITH <group>, <agg> RETURN <project>` so the
+/// aggregate-fusion + top-K pipeline can pick it up. The WITH groups
+/// by the user-specified RETURN expressions (per-property), not by the
+/// source variable (which would over-finely group when the property
+/// has duplicates across instances).
+fn pass_desugar_multi_match_return_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
+    desugar_multi_match_return_aggregate(query)
+}
+
+/// **Pass:** `fuse_spatial_join` — Specialize `MATCH ... WHERE
+/// contains(geom_a, geom_b)` into a spatial-join iterator that uses
+/// the spatial index instead of a cartesian product + per-pair filter.
+fn pass_fuse_spatial_join(query: &mut CypherQuery, ctx: &PassCtx) {
+    fuse_spatial_join(query, ctx.graph)
+}
+
+/// **Pass:** `reorder_match_clauses` — Reorder adjacent `MATCH` clauses
+/// by connection-type total counts (O(1) cost proxy) so the smaller
+/// driver runs first. Runs BEFORE `optimize_pattern_start_node` so the
+/// reversal sees the post-reorder sequence and tracks `bound_vars`
+/// correctly.
+fn pass_reorder_match_clauses(query: &mut CypherQuery, ctx: &PassCtx) {
+    reorder_match_clauses(query, ctx.graph)
+}
+
+/// **Pass:** `optimize_pattern_start_node` — For 3+-element patterns,
+/// reverse the pattern so iteration starts from the most-selective node
+/// (typically id-anchored or smallest-cardinality type). Reduces the
+/// front of the join from O(N) to O(1) when one end is anchored.
+fn pass_optimize_pattern_start_node(query: &mut CypherQuery, ctx: &PassCtx) {
+    optimize_pattern_start_node(query, ctx.graph)
+}
+
+/// **Pass:** `reorder_match_patterns` — Reorder multiple comma-
+/// separated patterns within one `MATCH` clause by size/type
+/// selectivity. Sibling of `reorder_match_clauses` but operates within
+/// a single MATCH.
+fn pass_reorder_match_patterns(query: &mut CypherQuery, ctx: &PassCtx) {
+    reorder_match_patterns(query, ctx.graph)
+}
+
+/// **Pass:** `push_limit_into_match` — Mark the trailing `LIMIT N` as
+/// an early-stop hint on the preceding `MATCH` so the executor can
+/// short-circuit pattern expansion. WHY-BAIL: requires single-MATCH
+/// queries (multi-MATCH + WHERE on late-bound var produced silent row
+/// drops in 0.8.27 — see CHANGELOG).
+fn pass_push_limit_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
+    push_limit_into_match(query, ctx.graph)
+}
+
+/// **Pass:** `push_distinct_into_match` — Mark `RETURN DISTINCT` /
+/// `WITH DISTINCT` as a hint on the preceding MATCH so the executor
+/// can dedup during expansion instead of materializing all rows first.
+fn pass_push_distinct_into_match(query: &mut CypherQuery, _ctx: &PassCtx) {
+    push_distinct_into_match(query)
+}
+
+/// **Pass:** `fuse_anchored_edge_count` — Specialize
+/// `MATCH (id:VAL)-[r:T]->(v) RETURN count(*)` into an O(1) anchored
+/// edge lookup using the connection type's edge count metadata.
+fn pass_fuse_anchored_edge_count(query: &mut CypherQuery, ctx: &PassCtx) {
+    fuse_anchored_edge_count(query, ctx.graph)
+}
+
+/// **Pass:** `fuse_count_short_circuits` — Merge `RETURN count(DISTINCT *)`
+/// with the preceding COUNT/GROUP BY when both can be evaluated in the
+/// same pass.
+fn pass_fuse_count_short_circuits(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_count_short_circuits(query)
+}
+
+/// **Pass:** `fuse_optional_match_aggregate` — Fuse
+/// `OPTIONAL MATCH ... RETURN <agg>` into a single
+/// `FusedOptionalMatchAggregate` clause that counts matches per input
+/// row without materializing intermediate per-row expansions. WHY-BAIL:
+/// gate growing — most recently extended in 0.8.31 to recognize edge
+/// vars (`count(r)`) as local-to-OPT.
+fn pass_fuse_optional_match_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_optional_match_aggregate(query)
+}
+
+/// **Pass:** `fuse_match_return_aggregate` — Fuse
+/// `MATCH ... RETURN <group_keys>, <agg>` into
+/// `FusedMatchReturnAggregate`, building the GROUP-BY hash map inline
+/// during pattern expansion.
+fn pass_fuse_match_return_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_match_return_aggregate(query)
+}
+
+/// **Pass:** `fuse_match_with_aggregate` — Like
+/// `fuse_match_return_aggregate`, but for `MATCH ... WITH <group>,
+/// <agg>` (pipeline continues after WITH). Emits
+/// `FusedMatchWithAggregate`.
+fn pass_fuse_match_with_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_match_with_aggregate(query)
+}
+
+/// **Pass:** `fuse_match_with_aggregate_top_k` — Absorb a downstream
+/// `ORDER BY <agg> LIMIT k` into a preceding
+/// `FusedMatchWithAggregate`, replacing full sort with heap-pruned
+/// top-K (O(n log k) instead of O(n log n)). Must run AFTER
+/// `fuse_match_with_aggregate` and BEFORE `fuse_order_by_top_k`.
+fn pass_fuse_match_with_aggregate_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_match_with_aggregate_top_k(query)
+}
+
+/// **Pass:** `fuse_node_scan_aggregate` — Untyped `MATCH (n) RETURN
+/// <agg>` → specialized scan-only aggregate that walks the node store
+/// once without producing intermediate row tuples.
+fn pass_fuse_node_scan_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_node_scan_aggregate(query)
+}
+
+/// **Pass:** `fuse_node_scan_top_k` — `MATCH (n:Type) RETURN n LIMIT k`
+/// → specialized scan that returns the first k nodes of the type
+/// without going through the pattern executor.
+fn pass_fuse_node_scan_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_node_scan_top_k(query)
+}
+
+/// **Pass:** `fuse_vector_score_order_limit` — `MATCH ...
+/// vector_score(...) ORDER BY score LIMIT k` → top-K via a vector-
+/// score min-heap. Projects RETURN expressions only for the k surviving
+/// rows.
+fn pass_fuse_vector_score_order_limit(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_vector_score_order_limit(query)
+}
+
+/// **Pass:** `fuse_order_by_top_k` — Generic ORDER BY + LIMIT fusion
+/// for any preceding clause that didn't already absorb top-K. Heap-
+/// pruned top-K replaces full sort + truncate.
+fn pass_fuse_order_by_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_order_by_top_k(query)
+}
+
+/// **Pass:** `reorder_predicates_by_cost` — Within a WHERE clause,
+/// reorder predicates by estimated evaluation cost so cheap predicates
+/// short-circuit AND/OR chains before expensive ones run.
+fn pass_reorder_predicates_by_cost(query: &mut CypherQuery, _ctx: &PassCtx) {
+    reorder_predicates_by_cost(query)
+}
+
+/// **Pass:** `mark_fast_var_length_paths` — When a variable-length
+/// edge `[r:T*1..N]` has no path assignment and no edge variable,
+/// mark `needs_path_info=false` so the executor uses a fast BFS with
+/// global dedup. KNOWN DIVERGENCE: this dedups by target node, while
+/// the slow path keeps one row per distinct path — see
+/// `tests/test_cypher_differential.py::KNOWN_DIVERGENT`.
+fn pass_mark_fast_var_length_paths(query: &mut CypherQuery, _ctx: &PassCtx) {
+    mark_fast_var_length_paths(query)
+}
+
+/// **Pass:** `mark_skip_target_type_check` — When connection-type
+/// metadata guarantees an edge's target node type, mark the edge as
+/// `skip_target_type_check=true` so the executor doesn't redundantly
+/// re-verify the type during BFS. Saves one slab dereference per
+/// visited node.
+fn pass_mark_skip_target_type_check(query: &mut CypherQuery, ctx: &PassCtx) {
+    mark_skip_target_type_check(query, ctx.graph)
 }
 
 /// Mark variable-length edges that don't need path tracking.

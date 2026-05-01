@@ -1179,7 +1179,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None))]
     #[allow(clippy::too_many_arguments)]
     fn cypher(
         slf: &Bound<'_, Self>,
@@ -1190,6 +1190,8 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
         max_rows: Option<usize>,
         streaming: bool,
+        disable_optimizer: bool,
+        disabled_passes: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
         let self_ref = slf.borrow();
         let effective_timeout = timeout_ms
@@ -1287,10 +1289,20 @@ impl KnowledgeGraph {
             }
         }
 
+        // Build the disabled-passes set: the `disable_optimizer=True`
+        // shortcut expands to "all passes". Validate every name against
+        // the registry so a typo doesn't silently disable nothing.
+        let disabled_set = build_disabled_passes(disable_optimizer, disabled_passes)?;
+
         // Optimize (predicate pushdown, etc.) — needs shared borrow of graph
         {
             let this = slf.borrow();
-            cypher::optimize(&mut parsed, &this.inner, &param_map);
+            cypher::planner::optimize_with_disabled(
+                &mut parsed,
+                &this.inner,
+                &param_map,
+                &disabled_set,
+            );
         }
         // Top-level-only lazy annotation. Must run AFTER optimize() (so the
         // clause shape is final) and OUTSIDE the recursive nested-query
@@ -1595,6 +1607,33 @@ impl KnowledgeGraph {
             deadline,
         })
     }
+}
+
+/// Resolve the `disable_optimizer` / `disabled_passes` kwargs into the
+/// set passed to `optimize_with_disabled`. `disable_optimizer=True`
+/// expands to all registered pass names; `disabled_passes` adds named
+/// passes on top, validated against the registry so typos surface as a
+/// `ValueError` instead of a silent no-op.
+fn build_disabled_passes(
+    disable_optimizer: bool,
+    disabled_passes: Option<Vec<String>>,
+) -> PyResult<std::collections::HashSet<String>> {
+    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if disable_optimizer {
+        set.extend(cypher::planner::all_pass_names());
+    }
+    if let Some(names) = disabled_passes {
+        for name in names {
+            if !cypher::planner::is_known_pass(&name) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown optimizer pass: {:?}. See `kglite.cypher_pass_names()` for valid names.",
+                    name
+                )));
+            }
+            set.insert(name);
+        }
+    }
+    Ok(set)
 }
 
 /// Backend-aware default Cypher timeout (milliseconds).

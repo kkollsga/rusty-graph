@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Cypher planner
+
+- **Optimizer is now a registry of named passes (`kglite.cypher_pass_names()`).**
+  The 25-pass orchestrator at `src/graph/languages/cypher/planner/mod.rs`
+  has been refactored from a 40-line inline body into a single
+  `const PASSES: &[(&str, PassFn)]` source of truth. Each pass has a
+  stable name and a doc-comment with precondition / pattern / rewrite
+  / why-bail. Adding a new pass is now: write the impl, write a
+  one-line wrapper, register it in `PASSES`, add a corpus entry — no
+  hidden ordering dependencies.
+- **New `cypher(disable_optimizer=True, disabled_passes=[...])` kwargs.**
+  Diagnostic / testing knob: skip every optimizer pass, or skip a
+  specific subset by name. Validated against the registry — typos
+  raise `ValueError`. Used by the new differential test harness and
+  the bisection script.
+- **Fixed `desugar_multi_match_return_aggregate` over-grouping bug**
+  surfaced by the new differential harness on first run.
+  `MATCH (p:Person) MATCH (c:Company) RETURN p.city, count(c)` was
+  producing 20 rows of `(city, n=5)` instead of 4 rows of
+  `(city, n=25)`: the rewrite introduced a `WITH p, count(c)` (group
+  by source variable) when the user's RETURN was grouping by
+  `p.city`. The rewrite now generates `WITH p.city AS <internal>,
+  count(c) AS n` so GROUP BY matches Cypher's standard semantic
+  (the set of non-aggregate RETURN expressions).
+- **New differential test harness `tests/test_cypher_differential.py`.**
+  Every query in a curated corpus runs twice (optimized vs.
+  optimizer-off) and asserts identical rows. Found 2 divergences on
+  first run: the `desugar_multi_match_return_aggregate` bug above
+  (now fixed; permanent regression test) and a remaining design
+  question on `mark_fast_var_length_paths` semantics (per-target vs.
+  per-path) tracked as the lone `KNOWN_DIVERGENT` entry.
+- **New `scripts/cypher_pass_bisect.py`.** Given a query that diverges,
+  runs each pass disabled in isolation and reports which pass's
+  absence resolves the divergence. Works against `.kgl` files or
+  `tests/conftest.py` fixtures.
+- **Debug-mode IR invariant checks** run after every pass in debug
+  builds. Catches passes that produce empty MATCH patterns, empty
+  RETURN/WITH item lists, or splice clauses after a terminal RETURN.
+  Zero cost in release.
+
 ### code_tree
 
 - **Manifest discovery: declared-package strategies and mixed-language

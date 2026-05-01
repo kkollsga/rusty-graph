@@ -8,6 +8,7 @@ from .kglite import (  # explicit re-exports for type checkers
     ResultView,
     Transaction,
     __version__,
+    cypher_pass_names,
     load,
 )
 
@@ -141,6 +142,7 @@ __all__ = [
     "ResultView",
     "ResultIter",
     "load",
+    "cypher_pass_names",
     "from_blueprint",
     "repo_tree",
     "to_neo4j",
