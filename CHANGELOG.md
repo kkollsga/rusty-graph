@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### code_tree
+
+- **Manifest discovery: declared-package strategies and mixed-language
+  safety net.** `read_pyproject` was previously the only Python source-root
+  finder, and it only matched the `<name>/__init__.py` / `src/<name>/__init__.py`
+  conventions. Several common configurations silently parsed only a slice
+  of the repo:
+  - **Workspace path collisions:** Cargo workspaces with two crates each
+    containing `src/lib.rs` collapsed to a single `File` node because every
+    parser stripped `rel_path` against its per-root walk directory. Paths
+    are now project-root-relative (any two source roots that share a
+    same-named file at matching depth survive as distinct nodes).
+  - **Explicit `[tool.poetry].packages` declarations** with a custom `from`
+    directory (e.g. `from = "lib"`) are now respected. Previously these
+    only worked by accident when the project also lacked a conventionally-
+    placed package — adding a stub `<name>/__init__.py` would silently
+    suppress the lib/ packages.
+  - **`[tool.setuptools].packages = [...]`** explicit lists, including
+    dotted names resolved against `[tool.setuptools].package_dir`.
+  - **`[tool.setuptools.packages.find].where = [...]`** is honoured —
+    each `where` directory becomes a source root.
+  - **`[tool.hatch.build.targets.wheel].packages = [...]`** is honoured.
+  - **`[tool.poetry].name`** is now a valid name source. Pure-poetry
+    pyprojects without a `[project]` table previously left `name` as the
+    parent directory, breaking name-keyed package discovery.
+  - **Mixed-language safety net:** when a pyproject finds a Python package
+    next to first-level directories that contain code in a language NOT
+    declared by the manifest (e.g. tooling pyproject + huge `src/*.c`),
+    those directories are auto-supplemented as source roots labelled
+    `auto:<dirname>`. The "undeclared language" gate keeps it surgical:
+    sibling `.py` directories are not pulled in for pure-Python repos.
+
+  The manifest module was also refactored into a list of small named
+  strategy fns (one per declaration shape) instead of one 150-line
+  function — adding a new build backend is now one fn, not a new branch.
+
 ## [0.8.35] — 2026-05-01
 
 ### Ingestion

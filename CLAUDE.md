@@ -28,6 +28,24 @@ KGLite has three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-b
 - Large graphs (Wikidata): 100M+ nodes, disk-backed, full scans are catastrophic. Safeguards needed but must be gated behind storage mode or graph-size thresholds.
 - Cypher query planner/executor is shared across all modes. Any changes to `core/pattern_matching.rs` or `languages/cypher/executor.rs` affect everyone — benchmark on small graphs before merging.
 
+## Code health — incremental compartmentalization
+
+Each pass through a file should leave it more robust, more compartmentalized,
+and easier to extend than you found it. The codebase should get **better** as
+we work, not just bigger.
+
+- When a function grows past ~80 lines or starts handling 3+ unrelated
+  concerns, factor it before adding more. Prefer a list of small named
+  strategy fns dispatched by the caller over one long if/else chain — adding
+  a new case becomes one new fn, not a new branch in a god function.
+- When fixing a bug, scan for the *class* of bug — same root cause in nearby
+  code paths. The reported symptom is rarely the only one. Probe with scratch
+  fixtures before declaring scope.
+- A new feature/fix is a chance to extract a helper that's been wanted
+  elsewhere. Don't over-design, but don't pass up the opportunity either.
+- Don't add a parameter, branch, or flag without checking whether the
+  existing structure should be reshaped to absorb it cleanly.
+
 ## Performance Work Protocol
 
 Before starting any performance-related code changes:

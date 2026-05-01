@@ -100,7 +100,7 @@ pub fn run_with_options(
                 if !root.path.is_dir() {
                     continue;
                 }
-                let result = parse_directory(&root.path, verbose, max_loc_per_file);
+                let result = parse_directory(&root.path, &project_root, verbose, max_loc_per_file);
                 combined.merge(result);
                 parsed_any = true;
             }
@@ -118,7 +118,7 @@ pub fn run_with_options(
             )));
         }
         let t_parse = std::time::Instant::now();
-        let result = parse_directory(&project_root, verbose, max_loc_per_file);
+        let result = parse_directory(&project_root, &project_root, verbose, max_loc_per_file);
         combined.merge(result);
         if verbose {
             eprintln!("[timing] parse: {:.3}s", t_parse.elapsed().as_secs_f64());
@@ -128,7 +128,17 @@ pub fn run_with_options(
     finalize_and_load(combined, project_info, verbose, save_to)
 }
 
-fn parse_directory(dir: &Path, verbose: bool, max_loc_per_file: Option<usize>) -> ParseResult {
+/// Walk `walk_dir` for source files and parse them; resulting File-node
+/// paths are computed relative to `project_root`, not `walk_dir`. This
+/// matters when multiple source roots share a common file name at matching
+/// depths (e.g. Cargo workspace crates each with `src/lib.rs`) — keying
+/// dedup on a `walk_dir`-relative `rel_path` would collapse them.
+fn parse_directory(
+    walk_dir: &Path,
+    project_root: &Path,
+    verbose: bool,
+    max_loc_per_file: Option<usize>,
+) -> ParseResult {
     // One walk, partition by language. The previous implementation walked
     // `dir` once for `detect_languages` and again per-language inside each
     // parser's `parse_directory` — N+1 traversals of the same tree. On
@@ -136,7 +146,7 @@ fn parse_directory(dir: &Path, verbose: bool, max_loc_per_file: Option<usize>) -
     // ~1–2s off the parse phase before any per-file work begins.
     let t_walk = std::time::Instant::now();
     let mut by_lang: BTreeMap<&'static str, Vec<PathBuf>> = BTreeMap::new();
-    for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(walk_dir).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -149,7 +159,11 @@ fn parse_directory(dir: &Path, verbose: bool, max_loc_per_file: Option<usize>) -
     }
     if verbose {
         let langs: Vec<&'static str> = by_lang.keys().copied().collect();
-        eprintln!("  Detected languages in {}: {:?}", dir.display(), langs);
+        eprintln!(
+            "  Detected languages in {}: {:?}",
+            walk_dir.display(),
+            langs
+        );
         for lang in &langs {
             eprintln!("  Found {} {} files", by_lang[lang].len(), lang);
         }
@@ -165,7 +179,7 @@ fn parse_directory(dir: &Path, verbose: bool, max_loc_per_file: Option<usize>) -
         // `max_loc_per_file` into a "skipped" pile that's recorded as
         // FileInfo without invoking the parser.
         let (to_parse, skipped) = match max_loc_per_file {
-            Some(threshold) => prefilter_oversized(&files, threshold, dir, lang),
+            Some(threshold) => prefilter_oversized(&files, threshold, project_root, lang),
             None => (files.clone(), Vec::new()),
         };
         if verbose && !skipped.is_empty() {
@@ -177,7 +191,7 @@ fn parse_directory(dir: &Path, verbose: bool, max_loc_per_file: Option<usize>) -
             );
         }
         let t_lang = std::time::Instant::now();
-        let mut result = parser.parse_files(&to_parse, dir);
+        let mut result = parser.parse_files(&to_parse, project_root);
         result.files.extend(skipped);
         if verbose {
             eprintln!(
