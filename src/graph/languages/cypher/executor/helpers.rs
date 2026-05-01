@@ -514,6 +514,22 @@ pub(super) fn extract_map_field(s: &str, key: &str) -> Option<Value> {
     None
 }
 
+/// Pull a named field out of a `Value::Point { lat, lon }` produced by
+/// `centroid()`, `point()`, etc. Accepts the canonical Cypher names
+/// (`latitude`/`longitude`) plus their short aliases (`lat`/`lon`,
+/// `x`/`y`) that some users reach for. Returns `Value::Null` for
+/// unknown fields or non-Point inputs.
+pub(super) fn point_field(val: &Value, property: &str) -> Value {
+    if let Value::Point { lat, lon } = val {
+        return match property {
+            "latitude" | "lat" | "y" => Value::Float64(*lat),
+            "longitude" | "lon" | "lng" | "long" | "x" => Value::Float64(*lon),
+            _ => Value::Null,
+        };
+    }
+    Value::Null
+}
+
 /// Index of the first top-level `:` in a slice (zero brace/bracket/quote
 /// nesting). `None` if no such colon exists.
 fn first_top_level_colon(s: &str) -> Option<usize> {

@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.39] — 2026-05-01
+
+### Cypher executor
+
+- **Fixed scalar projection from spatial-function results
+  (`centroid(n).latitude` and `WITH centroid(n) AS c RETURN
+  c.latitude`).** Previously returned the entire `{latitude,
+  longitude}` dict — or `Null` on in-memory graphs — instead of the
+  float. Property access on `Value::Point` now extracts the named
+  field via a new `point_field()` helper, applied in both
+  `Expression::ExprPropertyAccess` and the `resolve_property`
+  projected fallback. Accepted aliases: `latitude`/`lat`/`y` and
+  `longitude`/`lon`/`lng`/`long`/`x`. The canonical
+  `point(centroid(n).lat, centroid(n).lon)` idiom now composes in a
+  single Cypher query.
+- **Fixed spatial-predicate failure on partial-coverage typed sets.**
+  When a typed node set has spatial config but only a fraction of
+  rows have geometry data populated (real-world example: 312 of 469
+  AfexAreas in the Sodir graph have `wkt_geometry IS NULL`),
+  `WHERE contains(a, point(lat, lon))` errored on the missing rows
+  instead of treating them as predicate-false. `contains()` now
+  NULL-propagates: row-level missing geometry returns
+  `Boolean(false)` so the predicate filters the row out cleanly.
+  Same NULL-propagation for `centroid()` / `area()` / `perimeter()`
+  (return `Value::Null`). `intersects()` retains the loud error for
+  the type-level "no spatial config anywhere" case (preserves
+  existing diagnostic test coverage).
+- **Fixed superlinear `SET` cost on typed nodes with shared
+  columnar storage; OOM at ~1k rows on the Sodir Prospect set.**
+  Per-node `Arc::make_mut(store).set(...)` cloned the entire shared
+  `ColumnStore` on every write — for 6,775 Prospect nodes sharing
+  one store, refcount=N+1 meant a full clone per row, giving
+  O(N²) work and ~11 GB transient allocations. SET now routes
+  Columnar writes through `graph.column_stores[type]` once per
+  batch, then refreshes per-node `Arc<ColumnStore>` handles in a
+  single end-of-statement sweep. Verified on the real Sodir graph:
+  100 → 4 ms (was 0.81 s, 200×), 500 → 4.4 ms (was 13.1 s,
+  3000×), 1000 / 2000 → 3 ms (were OOM). Linear scaling restored.
+  Disk-mode graphs use a separate write path and are gated out
+  via `graph.graph.is_disk()`.
+
+### Fluent API
+
+- **`create_connections()` now emits a `UserWarning` when called on
+  a chained graph view.** The fluent `g.select(...).traverse(...)
+  .create_connections(...)` pattern returns a NEW `KnowledgeGraph`
+  whose mutations live on a temporary clone (Arc COW); discarding
+  the return loses the writes. The warning fires when
+  `Arc::strong_count(self.inner) > 1` and points to the two
+  workarounds: capture the return (`g = g.select(...)
+  .create_connections(...)`) or use the equivalent
+  `add_connections(data=cypher_result, ...)`. Docstring also
+  updated. Proper structural fix (shared interior mutability)
+  deferred — would touch ~hundreds of read-path call sites.
+
 ## [0.8.38] — 2026-05-01
 
 ### code_tree

@@ -513,13 +513,7 @@ pub(crate) fn is_ignored_dir_name(name: &str) -> bool {
     }
     matches!(
         name,
-        "node_modules"
-            | "target"
-            | "_build"
-            | "__pycache__"
-            | "venv"
-            | "env"
-            | "site-packages"
+        "node_modules" | "target" | "_build" | "__pycache__" | "venv" | "env" | "site-packages"
     )
 }
 

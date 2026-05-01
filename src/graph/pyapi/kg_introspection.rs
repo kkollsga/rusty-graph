@@ -805,9 +805,38 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    /// Create derived edges from the selection chain into a new
+    /// connection type.
+    ///
+    /// **Important — fluent-chain mutation semantics:** The Cypher
+    /// engine (`g.cypher("CREATE ...")`) mutates the graph in place,
+    /// but `create_connections` follows the fluent pattern: each
+    /// chain step (`select`, `traverse`, ...) clones the graph's
+    /// `Arc<DirGraph>` handle, and `create_connections` writes to
+    /// that handle. Discarding the return value loses the writes.
+    /// Always **assign** the result back to keep mutations:
+    ///
+    /// ```python
+    /// # WRONG — discards the mutated graph:
+    /// g.select("Person").traverse("WORKS_AT").create_connections("PERSON_AT")
+    ///
+    /// # RIGHT — assign to retain mutations:
+    /// g = g.select("Person").traverse("WORKS_AT").create_connections("PERSON_AT")
+    /// ```
+    ///
+    /// Or for many cases, the simpler form is to use Cypher with
+    /// `add_connections(query=...)`:
+    ///
+    /// ```python
+    /// rows = g.cypher("MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+    ///                 "RETURN DISTINCT p.id AS pid, c.id AS cid").to_df()
+    /// g.add_connections(data=rows, connection_type="PERSON_AT", ...)
+    /// ```
     #[pyo3(signature = (connection_type, keep_selection=None, conflict_handling=None, properties=None, source_type=None, target_type=None))]
+    #[allow(clippy::too_many_arguments)]
     fn create_connections(
         &mut self,
+        py: Python<'_>,
         connection_type: String,
         keep_selection: Option<bool>,
         conflict_handling: Option<String>,
@@ -827,6 +856,34 @@ impl KnowledgeGraph {
         } else {
             None
         };
+
+        // Detect the "chain temp" case before we mutate. When the inner
+        // Arc is shared (refcount > 1), the upcoming `Arc::make_mut`
+        // will clone, and the mutation lands on the clone rather than
+        // any other handle. Users who don't capture the return value
+        // (`g.select(...).create_connections(...)` without assigning
+        // back) silently lose the mutation. Emit a Python `UserWarning`
+        // so the failure mode is at least visible in stderr.
+        if Arc::strong_count(&self.inner) > 1 {
+            let warning_module = py.import("warnings")?;
+            warning_module.call_method1(
+                "warn",
+                (
+                    format!(
+                        "create_connections('{}') was called on a chained graph view \
+                         (Arc refcount={}). The mutation lands on a temporary clone — \
+                         either capture the return value (`g = g.select(...).create_connections('{}')`) \
+                         or use the equivalent `add_connections(data=cypher_result, ...)` form. \
+                         The original graph variable will NOT see these edges.",
+                        connection_type,
+                        Arc::strong_count(&self.inner),
+                        connection_type,
+                    ),
+                    py.import("builtins")?.getattr("UserWarning")?,
+                    2u32, // stacklevel: blame the user's call site, not this fn
+                ),
+            )?;
+        }
 
         let graph = get_graph_mut(&mut self.inner);
 

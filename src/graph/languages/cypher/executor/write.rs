@@ -439,6 +439,16 @@ fn execute_set(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
 ) -> Result<(), String> {
+    // Track which Columnar node types we wrote into so we can refresh
+    // per-node Arc<ColumnStore> handles in one O(N-per-type) sweep at
+    // the end. Without this batching, every row's `set_property` calls
+    // `Arc::make_mut(store)` which clones the entire shared columnar
+    // store (one clone per row → O(N²) work, OOM on 1k rows of a
+    // type with 6.8k+ nodes — see CHANGELOG note for SET-on-Prospect
+    // regression on the loaded Sodir graph).
+    let mut touched_columnar_types: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for row in &result_set.rows {
         for item in &set.items {
             match item {
@@ -492,23 +502,65 @@ fn execute_set(
                     // Clone value before it may be consumed by the mutation
                     let value_for_index = value.clone();
 
-                    // Apply the mutation (split borrows: graph.graph + graph.interner)
-                    if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
-                        match property.as_str() {
-                            "title" => {
-                                node.title = value;
-                            }
-                            "name" => {
-                                // "name" maps to title in Cypher reads;
-                                // update both title and properties for consistency
-                                node.title = value.clone();
-                                node.set_property("name", value, &mut graph.interner);
-                            }
-                            _ => {
-                                node.set_property(property, value, &mut graph.interner);
+                    // Fast path for Columnar storage when the graph's master
+                    // `Arc<ColumnStore>` for this node-type is available:
+                    // route the write through the master once per batch
+                    // instead of through each node's Arc handle. The per-
+                    // node Arcs all point at the same allocation, so
+                    // `Arc::make_mut` on a node Arc clones the entire store
+                    // on every write — O(N²) total for batch SETs. The
+                    // master Arc has refcount=1 inside this batch (after
+                    // the initial clone, if any), so subsequent writes
+                    // mutate in place. We refresh the per-node Arcs in a
+                    // single sweep at end of batch (see below).
+                    let columnar_row_id =
+                        match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
+                            Some(crate::graph::schema::PropertyStorage::Columnar {
+                                row_id,
+                                ..
+                            }) => Some(*row_id),
+                            _ => None,
+                        };
+                    let mut wrote_via_master = false;
+                    // Disk-backed graphs use a separate write path; the
+                    // master `column_stores` Arc is for the in-memory
+                    // Columnar mode only.
+                    let is_in_memory = !graph.graph.is_disk();
+                    if is_in_memory && property != "title" && property != "name" {
+                        if let Some(row_id) = columnar_row_id {
+                            if let Some(master) = graph.column_stores.get_mut(&node_type_str) {
+                                let key = InternedKey::from_str(property);
+                                Arc::make_mut(master).set(row_id, key, &value, None);
+                                touched_columnar_types.insert(node_type_str.clone());
+                                stats.properties_set += 1;
+                                wrote_via_master = true;
                             }
                         }
-                        stats.properties_set += 1;
+                    }
+                    if !wrote_via_master {
+                        // Compact / Map storage, or title/name, or a Columnar
+                        // node whose type isn't registered in
+                        // `graph.column_stores` (e.g. disk-mode graphs that
+                        // wrap a different store): fall through to the
+                        // existing per-node setter.
+                        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx)
+                        {
+                            match property.as_str() {
+                                "title" => {
+                                    node.title = value;
+                                }
+                                "name" => {
+                                    // "name" maps to title in Cypher reads;
+                                    // update both title and properties for consistency
+                                    node.title = value.clone();
+                                    node.set_property("name", value, &mut graph.interner);
+                                }
+                                _ => {
+                                    node.set_property(property, value, &mut graph.interner);
+                                }
+                            }
+                            stats.properties_set += 1;
+                        }
                     }
 
                     // Ensure the DirGraph-level TypeSchema includes this property key
@@ -545,6 +597,33 @@ fn execute_set(
                         "SET label (SET {}:{}) is not yet supported",
                         variable, label
                     ));
+                }
+            }
+        }
+    }
+
+    // Refresh per-node `Arc<ColumnStore>` handles for every type we wrote
+    // into during this batch. Each node holds its own Arc clone for
+    // efficient property reads; after the batch wrote through the
+    // graph master, those per-node handles are stale and would surface
+    // pre-batch values. This sweep is O(N) per touched type and runs
+    // once per SET clause regardless of row count.
+    for node_type in touched_columnar_types {
+        let new_master = match graph.column_stores.get(&node_type) {
+            Some(m) => Arc::clone(m),
+            None => continue,
+        };
+        let indices: Vec<NodeIndex> = graph
+            .type_indices
+            .get(&node_type)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
+        for idx in indices {
+            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
+                if let crate::graph::schema::PropertyStorage::Columnar { store, .. } =
+                    &mut node.properties
+                {
+                    *store = Arc::clone(&new_master);
                 }
             }
         }

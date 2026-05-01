@@ -12,8 +12,10 @@ use crate::graph::storage::GraphRead;
 /// Shared error suffix when a spatial function arg can't be resolved to a
 /// geometry or point. Names the conventional property names that the
 /// fallback inference (in `build_node_spatial_data`) accepts so users have
-/// a quick fix.
-const SPATIAL_RESOLUTION_HELP: &str = "spatial argument did not resolve to a geometry or point. \
+/// a quick fix. Also surfaced from `resolve_spatial` when a node has no
+/// registered spatial config and no inferable conventional fields.
+pub(super) const SPATIAL_RESOLUTION_HELP: &str =
+    "spatial argument did not resolve to a geometry or point. \
 Either pass column_types={'<col>': 'geometry'} (or 'location.lat'/'location.lon') during \
 add_nodes(), or store the data under a conventional property name (wkt_geometry, geometry, \
 geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
@@ -800,20 +802,29 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("contains() requires 2 arguments".into());
                 }
-                // Arg 1: must be a geometry (the container)
-                let resolved1 = self.resolve_spatial(&args[0], row, true)?.ok_or(
-                    "contains(): first arg must resolve to a geometry (node, WKT string, or named shape)",
-                )?;
+                // Arg 1: must be a geometry (the container).
+                // When the arg is a node-bound variable but that specific
+                // node has no geometry (e.g. partial coverage in a typed
+                // set — real-world: 312/469 AfexAreas have no
+                // wkt_geometry), treat the predicate as false for this
+                // row instead of erroring out the whole query. Matches
+                // Cypher's NULL-propagation semantics: missing data ≠ true.
+                let resolved1 = match self.resolve_spatial(&args[0], row, true)? {
+                    Some(r) => r,
+                    None => return Ok(Value::Boolean(false)),
+                };
                 let (geom, bbox1) = match &resolved1 {
                     ResolvedSpatial::Geometry(g, bbox) => (g, bbox),
                     ResolvedSpatial::Point(_, _) => {
                         return Err("contains(): first arg must be a geometry, not a point".into());
                     }
                 };
-                // Arg 2: prefer point for the contained item (point-in-polygon)
-                let resolved2 = self
-                    .resolve_spatial(&args[1], row, false)?
-                    .ok_or("contains(): second arg must resolve to a point or geometry")?;
+                // Arg 2: prefer point for the contained item (point-in-polygon).
+                // Same NULL-propagation: missing target → predicate false.
+                let resolved2 = match self.resolve_spatial(&args[1], row, false)? {
+                    Some(r) => r,
+                    None => return Ok(Value::Boolean(false)),
+                };
 
                 match &resolved2 {
                     ResolvedSpatial::Point(lat, lon) => {
@@ -916,9 +927,13 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("centroid() requires 1 argument".into());
                 }
-                let resolved = self.resolve_spatial(&args[0], row, true)?.ok_or(
-                    "centroid(): arg must resolve to a geometry (node, WKT string, or named shape)",
-                )?;
+                // NULL-propagate: scalar functions on missing geometry
+                // return Value::Null so downstream WHERE/IS NOT NULL can
+                // filter cleanly without erroring the whole query.
+                let resolved = match self.resolve_spatial(&args[0], row, true)? {
+                    Some(r) => r,
+                    None => return Ok(Value::Null),
+                };
                 match &resolved {
                     ResolvedSpatial::Point(lat, lon) => Ok(Value::Point {
                         lat: *lat,
@@ -934,9 +949,10 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("area() requires 1 argument".into());
                 }
-                let resolved = self
-                    .resolve_spatial(&args[0], row, true)?
-                    .ok_or("area(): arg must resolve to a polygon geometry")?;
+                let resolved = match self.resolve_spatial(&args[0], row, true)? {
+                    Some(r) => r,
+                    None => return Ok(Value::Null),
+                };
                 match &resolved {
                     ResolvedSpatial::Geometry(g, _) => Ok(Value::Float64(
                         crate::graph::features::spatial::geometry_area_m2(g)?,
@@ -950,9 +966,10 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("perimeter() requires 1 argument".into());
                 }
-                let resolved = self
-                    .resolve_spatial(&args[0], row, true)?
-                    .ok_or("perimeter(): arg must resolve to a geometry")?;
+                let resolved = match self.resolve_spatial(&args[0], row, true)? {
+                    Some(r) => r,
+                    None => return Ok(Value::Null),
+                };
                 match &resolved {
                     ResolvedSpatial::Geometry(g, _) => Ok(Value::Float64(
                         crate::graph::features::spatial::geometry_perimeter_m(g)?,

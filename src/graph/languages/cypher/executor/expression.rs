@@ -494,6 +494,15 @@ impl<'a> CypherExecutor<'a> {
                                 _ => {}
                             }
                         }
+                        // Map-shaped string projection (`collect({...})` items
+                        // round-trip through Value::String). Try the same
+                        // extract path resolve_property uses below.
+                        let trimmed = s.trim_start();
+                        if trimmed.starts_with('{') {
+                            if let Some(field) = extract_map_field(s, property) {
+                                return Ok(field);
+                            }
+                        }
                         Ok(Value::Null)
                     }
                     Value::DateTime(date) => {
@@ -505,6 +514,7 @@ impl<'a> CypherExecutor<'a> {
                             _ => Ok(Value::Null),
                         }
                     }
+                    Value::Point { .. } => Ok(point_field(&val, property)),
                     _ => Ok(Value::Null),
                 }
             }
@@ -702,7 +712,16 @@ impl<'a> CypherExecutor<'a> {
         prefer_geometry: bool,
     ) -> Result<Option<ResolvedSpatial>, String> {
         match expr {
-            // Fast path: Variable bound to a node → resolve from per-node cache
+            // Fast path: Variable bound to a node → resolve from per-node cache.
+            // Returns Ok(None) when:
+            // - the node has spatial config but THIS row's geometry/
+            //   location is missing (row-level NULL); or
+            // - the node has no spatial config at all (no NodeSpatialData).
+            // Each calling spatial function picks its own NULL-propagation
+            // policy: distance/centroid/area/perimeter return Value::Null,
+            // contains returns Boolean(false) (silent predicate fail),
+            // intersects raises a helpful error pointing at conventional
+            // property names.
             Expression::Variable(name) => {
                 if let Some(&idx) = row.node_bindings.get(name) {
                     self.ensure_node_spatial_cached(idx);
@@ -1090,6 +1109,16 @@ impl<'a> CypherExecutor<'a> {
                     if let Some(field) = extract_map_field(s, property) {
                         return Ok(field);
                     }
+                }
+            }
+            // Point-shaped projection: `WITH centroid(n) AS c RETURN
+            // c.latitude` — c is bound to `Value::Point { lat, lon }`,
+            // so a property access for `latitude/longitude/lat/lon/x/y`
+            // pulls the scalar instead of the whole Point.
+            if let Value::Point { .. } = val {
+                let extracted = point_field(val, property);
+                if !matches!(extracted, Value::Null) {
+                    return Ok(extracted);
                 }
             }
             return Ok(val.clone());
