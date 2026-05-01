@@ -524,3 +524,98 @@ class TestKgKnn:
     def test_knn_missing_lat_errors(self, cities):
         with pytest.raises((ValueError, RuntimeError), match="missing required parameter"):
             list(cities.cypher("CALL kg_knn({lon: 5.3, target_type: 'City', k: 3}) YIELD node RETURN node"))
+
+
+# ============================================================================
+# Implicit spatial-config inference (P1)
+# ============================================================================
+
+
+class TestSpatialConfigInference:
+    """Spatial functions should accept nodes that store WKT or lat/lon under
+    conventional property names without an explicit `set_spatial` /
+    `column_types` registration. Explicit configs always take precedence."""
+
+    def test_intersects_uses_wkt_geometry_property(self):
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2],
+                "name": ["P1", "P2"],
+                "wkt_geometry": [
+                    "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+                    "POLYGON((0.5 0.5, 1.5 0.5, 1.5 1.5, 0.5 1.5, 0.5 0.5))",
+                ],
+            }
+        )
+        g.add_nodes(df, "Prospect", "id", "name")  # no spatial column_types
+        rows = list(
+            g.cypher("MATCH (a:Prospect), (b:Prospect) WHERE a.id = 1 AND b.id = 2 RETURN intersects(a, b) AS overlaps")
+        )
+        assert rows == [{"overlaps": True}]
+
+    def test_centroid_uses_geometry_property(self):
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1],
+                "name": ["P1"],
+                "geometry": ["POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))"],
+            }
+        )
+        g.add_nodes(df, "Block", "id", "name")
+        rows = list(g.cypher("MATCH (a:Block) RETURN centroid(a) AS c"))
+        assert abs(rows[0]["c"]["latitude"] - 1.0) < 1e-6
+        assert abs(rows[0]["c"]["longitude"] - 1.0) < 1e-6
+
+    def test_distance_uses_lat_lon_property(self):
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "name": ["A", "B"], "lat": [59.91, 60.39], "lon": [10.75, 5.32]})
+        g.add_nodes(df, "City", "id", "name")
+        rows = list(g.cypher("MATCH (a:City), (b:City) WHERE a.id = 1 AND b.id = 2 RETURN distance(a, b) AS d"))
+        # Oslo-Bergen ≈ 305 km
+        assert 290_000 < rows[0]["d"] < 320_000
+
+    def test_explicit_config_overrides_inference(self):
+        """If both wkt_geometry (conventional) and a registered field exist,
+        the explicit config wins — inference only fires when no config
+        is registered."""
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1],
+                "name": ["P1"],
+                "wkt_geometry": ["POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"],
+                "shape_a": ["POLYGON((10 10, 11 10, 11 11, 10 11, 10 10))"],
+            }
+        )
+        g.add_nodes(
+            df,
+            "Prospect",
+            "id",
+            "name",
+            column_types={"shape_a": "geometry"},
+        )
+        rows = list(g.cypher("MATCH (a:Prospect) RETURN centroid(a) AS c"))
+        # Explicit config picks shape_a (centered at 10.5, 10.5), not wkt_geometry (0.5, 0.5)
+        assert abs(rows[0]["c"]["latitude"] - 10.5) < 1e-6
+        assert abs(rows[0]["c"]["longitude"] - 10.5) < 1e-6
+
+    def test_no_spatial_data_still_errors_helpfully(self):
+        """A node with no geometry/lat-lon properties of any kind should
+        still produce the help-bearing error."""
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "name": ["P1"], "color": ["red"]})
+        g.add_nodes(df, "Item", "id", "name")
+        with pytest.raises(RuntimeError, match="conventional property name"):
+            list(g.cypher("MATCH (a:Item), (b:Item) RETURN intersects(a, b) AS x"))

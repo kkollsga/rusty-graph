@@ -284,6 +284,24 @@ pub fn pandas_to_dataframe(
     column_names: &[String],
     column_types: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DataFrame> {
+    pandas_to_dataframe_with_options(df, unique_id_fields, column_names, column_types, false)
+}
+
+/// Same as [`pandas_to_dataframe`] but with extra knobs.
+///
+/// `nullable_int_downcast`: when true, every Float64 column whose
+/// non-null values are all integer-valued (`v.fract() == 0.0` and within
+/// `i64` range) is downcast to Int64. Pandas auto-promotes nullable
+/// integer columns to float64 when nulls are present, which then
+/// surfaces in queries as `"2.0"` instead of `2`. Off by default — opt
+/// in via `add_nodes(nullable_int_downcast=True)`.
+pub fn pandas_to_dataframe_with_options(
+    df: &Bound<'_, PyAny>,
+    unique_id_fields: &[String],
+    column_names: &[String],
+    column_types: Option<&Bound<'_, PyDict>>,
+    nullable_int_downcast: bool,
+) -> PyResult<DataFrame> {
     // Reset index to ensure contiguous positional access.
     // Handles filtered/deduped DataFrames with non-contiguous indexes.
     let kwargs = pyo3::types::PyDict::new(df.py());
@@ -359,14 +377,51 @@ pub fn pandas_to_dataframe(
             };
 
             let data = convert_pandas_series(&series, col_type.clone())?;
+            // Optional: downcast Float64 columns whose non-null values are
+            // all integer-valued. Pandas turns nullable int columns into
+            // float64 when nulls are present; this restores the integer
+            // shape so downstream queries don't see "2.0" for what was
+            // originally `2`.
+            let (final_type, final_data) = if nullable_int_downcast {
+                try_downcast_float_to_int(col_type, data)
+            } else {
+                (col_type, data)
+            };
             df_out
-                .add_column(col_name.clone(), col_type, data)
+                .add_column(col_name.clone(), final_type, final_data)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         }
         Ok(())
     })?;
 
     Ok(df_out)
+}
+
+/// If `data` is `ColumnData::Float64` with all non-null values
+/// integer-valued and within `i64` range, return an `Int64` version.
+/// Otherwise pass through unchanged.
+fn try_downcast_float_to_int(col_type: ColumnType, data: ColumnData) -> (ColumnType, ColumnData) {
+    if !matches!(col_type, ColumnType::Float64) {
+        return (col_type, data);
+    }
+    let ColumnData::Float64(values) = data else {
+        return (col_type, data);
+    };
+    // Empty column: no signal — keep as float to be safe.
+    if values.iter().all(|v| v.is_none()) {
+        return (ColumnType::Float64, ColumnData::Float64(values));
+    }
+    let i64_min = i64::MIN as f64;
+    let i64_max = i64::MAX as f64;
+    let convertible = values.iter().all(|opt| match opt {
+        None => true,
+        Some(v) => v.is_finite() && v.fract() == 0.0 && *v >= i64_min && *v <= i64_max,
+    });
+    if !convertible {
+        return (ColumnType::Float64, ColumnData::Float64(values));
+    }
+    let int_values: Vec<Option<i64>> = values.iter().map(|opt| opt.map(|v| v as i64)).collect();
+    (ColumnType::Int64, ColumnData::Int64(int_values))
 }
 
 // Helper function to determine column type from pandas series

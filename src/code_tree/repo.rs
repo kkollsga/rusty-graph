@@ -14,6 +14,7 @@ pub fn clone_and_build(
     token: Option<&str>,
     verbose: bool,
     include_tests: bool,
+    max_loc_per_file: Option<usize>,
 ) -> PyResult<KnowledgeGraph> {
     if !repo.contains('/') || repo.matches('/').count() != 1 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -32,12 +33,19 @@ pub fn clone_and_build(
             verbose,
             include_tests,
             save_to,
+            max_loc_per_file,
         );
     }
 
     let tmp = tempfile::tempdir().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let repo_path = clone_repo(repo, tmp.path(), branch, token.as_deref(), verbose)?;
-    crate::code_tree::builder::run_with_options(&repo_path, verbose, include_tests, save_to)
+    crate::code_tree::builder::run_with_options(
+        &repo_path,
+        verbose,
+        include_tests,
+        save_to,
+        max_loc_per_file,
+    )
 }
 
 fn clone_repo(

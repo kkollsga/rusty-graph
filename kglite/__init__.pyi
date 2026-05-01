@@ -472,6 +472,7 @@ class KnowledgeGraph:
         skip_columns: Optional[list[str]] = None,
         column_types: Optional[dict[str, str]] = None,
         timeseries: Optional[dict[str, Any]] = None,
+        nullable_int_downcast: bool = False,
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
@@ -497,6 +498,10 @@ class KnowledgeGraph:
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.
+            nullable_int_downcast: When ``True``, Float64 columns whose non-null
+                values are all integer-valued (e.g. ``pd.NA``-bearing ints that
+                pandas auto-promoted to float64) are silently downcast to Int64.
+                Default ``False`` — explicit opt-in protects existing callers.
             timeseries: Inline timeseries configuration dict with keys:
 
                 - ``time`` (required): column name containing date strings

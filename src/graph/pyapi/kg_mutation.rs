@@ -87,11 +87,15 @@ impl KnowledgeGraph {
     ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
     ///     skip_columns: Columns to exclude from properties.
     ///     column_types: Override column type detection: {'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}.
+    ///     nullable_int_downcast: When True, Float64 columns whose non-null
+    ///         values are all integer-valued (e.g. `pd.NA`-bearing ints that
+    ///         pandas auto-promoted to float64) are silently downcast to Int64.
+    ///         Default False — explicit opt-in protects existing callers.
     ///
     /// Returns:
     ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -104,6 +108,7 @@ impl KnowledgeGraph {
         skip_columns: Option<&Bound<'_, PyList>>,
         column_types: Option<&Bound<'_, PyDict>>,
         timeseries: Option<&Bound<'_, PyDict>>,
+        nullable_int_downcast: bool,
     ) -> PyResult<Py<PyAny>> {
         // Parse inline timeseries config (if provided)
         let ts_config = timeseries.map(|d| parse_inline_timeseries(d)).transpose()?;
@@ -207,11 +212,12 @@ impl KnowledgeGraph {
             std::borrow::Cow::Borrowed(data)
         };
 
-        let df_result = py_in::pandas_to_dataframe(
+        let df_result = py_in::pandas_to_dataframe_with_options(
             &data_for_nodes,
             std::slice::from_ref(&unique_id_field),
             &column_list,
             effective_types.as_ref(),
+            nullable_int_downcast,
         )?;
 
         let graph = get_graph_mut(&mut self.inner);

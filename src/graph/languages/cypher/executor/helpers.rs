@@ -423,35 +423,122 @@ pub(super) fn parse_list_value(val: &Value) -> Vec<Value> {
             }
             // Split at top-level commas, respecting nesting
             let items = split_top_level_commas(inner);
-            items
-                .into_iter()
-                .map(|item| {
-                    let trimmed_item = item.trim();
-                    if let Ok(i) = trimmed_item.parse::<i64>() {
-                        Value::Int64(i)
-                    } else if let Ok(f) = trimmed_item.parse::<f64>() {
-                        Value::Float64(f)
-                    } else if trimmed_item == "true" {
-                        Value::Boolean(true)
-                    } else if trimmed_item == "false" {
-                        Value::Boolean(false)
-                    } else if trimmed_item == "null" {
-                        Value::Null
-                    } else {
-                        let unquoted = trimmed_item.trim_matches(|c| c == '"' || c == '\'');
-                        // Recognise serialised node references from collect()
-                        if let Some(idx_str) = unquoted.strip_prefix("__nref:") {
-                            if let Ok(idx) = idx_str.parse::<u32>() {
-                                return Value::NodeRef(idx);
-                            }
-                        }
-                        Value::String(unquoted.to_string())
-                    }
-                })
-                .collect()
+            items.into_iter().map(parse_value_token).collect()
         }
         _ => vec![],
     }
+}
+
+/// Parse a single value token (the same grammar as items inside a
+/// formatted list/map). Recognizes integers, floats, booleans, null, the
+/// `__nref:N` node-reference sentinel, and quoted strings with `\\`/`\"`
+/// escapes. Anything else is returned as a `Value::String` after
+/// stripping outer quotes. Mirrors the per-item logic that
+/// [`parse_list_value`] used to inline.
+pub(super) fn parse_value_token(s: &str) -> Value {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+    if let Ok(i) = trimmed.parse::<i64>() {
+        return Value::Int64(i);
+    }
+    if let Ok(f) = trimmed.parse::<f64>() {
+        return Value::Float64(f);
+    }
+    match trimmed {
+        "true" => return Value::Boolean(true),
+        "false" => return Value::Boolean(false),
+        "null" => return Value::Null,
+        _ => {}
+    }
+    // Quoted string: strip the quotes and unescape `\\`/`\"`.
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if let Some(idx_str) = inner.strip_prefix("__nref:") {
+            if let Ok(idx) = idx_str.parse::<u32>() {
+                return Value::NodeRef(idx);
+            }
+        }
+        // Unescape: `\\` → `\`, `\"` → `"`
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        return Value::String(out);
+    }
+    // Bare token (e.g. an unquoted identifier from format_value_compact).
+    Value::String(trimmed.to_string())
+}
+
+/// Extract the value of `key` from a map-shaped string of the form
+/// `{"k1": v1, "k2": v2, ...}` produced by [`format_value_json`] over a
+/// [`super::Expression::MapLiteral`]. Returns `None` if the input doesn't
+/// look like a map or the key isn't present. The grammar is
+/// closed (always emitted by the executor itself), so a small ad-hoc
+/// parser is enough — no `serde_json` dependency.
+pub(super) fn extract_map_field(s: &str, key: &str) -> Option<Value> {
+    let trimmed = s.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'{' || bytes[bytes.len() - 1] != b'}' {
+        return None;
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if inner.trim().is_empty() {
+        return None;
+    }
+    for entry in split_top_level_commas(inner) {
+        // Split at the FIRST top-level colon — strings inside the value
+        // may contain colons, so we have to respect quoting + nesting.
+        let colon_pos = first_top_level_colon(entry)?;
+        let raw_key = entry[..colon_pos].trim();
+        let raw_val = entry[colon_pos + 1..].trim();
+        // Keys are always quoted strings in the formatted output.
+        if let Value::String(parsed_key) = parse_value_token(raw_key) {
+            if parsed_key == key {
+                return Some(parse_value_token(raw_val));
+            }
+        }
+    }
+    None
+}
+
+/// Index of the first top-level `:` in a slice (zero brace/bracket/quote
+/// nesting). `None` if no such colon exists.
+fn first_top_level_colon(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+            }
+            c if in_quotes && c == quote_char => {
+                let bytes = s.as_bytes();
+                if i == 0 || bytes[i - 1] != b'\\' {
+                    in_quotes = false;
+                }
+            }
+            '{' | '[' | '(' if !in_quotes => depth += 1,
+            '}' | ']' | ')' if !in_quotes => depth -= 1,
+            ':' if !in_quotes && depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Split a string at commas that are not inside braces, brackets, or quotes.

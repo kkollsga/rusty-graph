@@ -10,13 +10,14 @@ use crate::graph::KnowledgeGraph;
 
 /// Parse a directory into a KnowledgeGraph.
 #[pyfunction]
-#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true))]
+#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None))]
 pub fn build(
     py: Python<'_>,
     src_dir: PathBuf,
     save_to: Option<PathBuf>,
     verbose: bool,
     include_tests: bool,
+    max_loc_per_file: Option<usize>,
 ) -> PyResult<KnowledgeGraph> {
     py.detach(|| {
         crate::code_tree::builder::run_with_options(
@@ -24,6 +25,7 @@ pub fn build(
             verbose,
             include_tests,
             save_to.as_deref(),
+            max_loc_per_file,
         )
     })
 }
@@ -72,7 +74,8 @@ pub fn read_manifest<'py>(
     branch=None,
     token=None,
     verbose=false,
-    include_tests=true
+    include_tests=true,
+    max_loc_per_file=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn repo_tree(
@@ -84,6 +87,7 @@ pub fn repo_tree(
     token: Option<String>,
     verbose: bool,
     include_tests: bool,
+    max_loc_per_file: Option<usize>,
 ) -> PyResult<KnowledgeGraph> {
     py.detach(|| {
         crate::code_tree::repo::clone_and_build(
@@ -94,6 +98,7 @@ pub fn repo_tree(
             token.as_deref(),
             verbose,
             include_tests,
+            max_loc_per_file,
         )
     })
 }

@@ -378,3 +378,47 @@ class TestBatchIngestion:
         df = pd.DataFrame({"id": [], "name": []})
         graph.add_nodes(df, "T", "id", "name")
         assert graph.select("T").len() == 0
+
+
+class TestNullableIntDowncast:
+    """Opt-in `nullable_int_downcast=True` recovers the original integer
+    shape when pandas auto-promoted a nullable int column to float64."""
+
+    def test_downcast_promoted_nullable_int(self, graph):
+        import numpy as np
+
+        df = pd.DataFrame({"id": [1, 2, 3], "name": ["A", "B", "C"], "block": [2.0, np.nan, 5.0]})
+        graph.add_nodes(df, "T", "id", "name", nullable_int_downcast=True)
+        rows = list(graph.cypher("MATCH (n:T) RETURN n.block AS b ORDER BY n.id"))
+        # Integer round-trip — not "2.0"
+        assert rows[0]["b"] == 2
+        assert rows[1]["b"] is None
+        assert rows[2]["b"] == 5
+        # And the type must be Int64, not Float64
+        assert isinstance(rows[0]["b"], int)
+
+    def test_default_keeps_float(self, graph):
+        import numpy as np
+
+        df = pd.DataFrame({"id": [1, 2, 3], "name": ["A", "B", "C"], "block": [2.0, np.nan, 5.0]})
+        graph.add_nodes(df, "T", "id", "name")  # default off
+        rows = list(graph.cypher("MATCH (n:T) RETURN n.block AS b ORDER BY n.id"))
+        assert rows[0]["b"] == 2.0
+        assert isinstance(rows[0]["b"], float)
+
+    def test_non_integer_floats_kept(self, graph):
+        df = pd.DataFrame({"id": [1, 2], "name": ["A", "B"], "val": [3.14, 2.71]})
+        graph.add_nodes(df, "T", "id", "name", nullable_int_downcast=True)
+        rows = list(graph.cypher("MATCH (n:T) RETURN n.val AS v ORDER BY n.id"))
+        assert isinstance(rows[0]["v"], float)
+        assert abs(rows[0]["v"] - 3.14) < 1e-9
+
+    def test_mixed_int_float_kept(self, graph):
+        """When at least one value isn't integer-valued, the column stays float."""
+        import numpy as np
+
+        df = pd.DataFrame({"id": [1, 2, 3], "name": ["A", "B", "C"], "v": [1.0, 2.5, np.nan]})
+        graph.add_nodes(df, "T", "id", "name", nullable_int_downcast=True)
+        rows = list(graph.cypher("MATCH (n:T) RETURN n.v AS v ORDER BY n.id"))
+        assert isinstance(rows[0]["v"], float)
+        assert rows[1]["v"] == 2.5

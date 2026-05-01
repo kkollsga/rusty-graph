@@ -794,68 +794,124 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Build the full spatial data for a node: geometry+bbox, location, named shapes/points.
-    /// Returns None if the node has no spatial config.
+    /// Returns None when no SpatialConfig is registered AND the node has no
+    /// conventionally-named spatial property (`wkt_geometry`/`geometry`/`geom`/`wkt`,
+    /// or `latitude`+`longitude` / `lat`+`lon`). Inference fires only as a fallback
+    /// — explicit configs always win.
     pub(super) fn build_node_spatial_data(&self, idx: NodeIndex) -> Option<NodeSpatialData> {
         let node = self.graph.graph.node_weight(idx)?;
-        let config = self
-            .graph
-            .get_spatial_config(node.node_type_str(&self.graph.interner))?;
+        let node_type = node.node_type_str(&self.graph.interner);
 
-        // Primary geometry + bounding box
-        let geometry = config.geometry.as_ref().and_then(|geom_f| {
-            if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
-                if let Ok(geom) = self.parse_wkt_cached(wkt) {
-                    let bbox = geom.bounding_rect();
-                    return Some((geom, bbox));
+        if let Some(config) = self.graph.get_spatial_config(node_type) {
+            // Primary geometry + bounding box
+            let geometry = config.geometry.as_ref().and_then(|geom_f| {
+                if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
+                    if let Ok(geom) = self.parse_wkt_cached(wkt) {
+                        let bbox = geom.bounding_rect();
+                        return Some((geom, bbox));
+                    }
+                }
+                None
+            });
+
+            // Primary location
+            let location = config.location.as_ref().and_then(|(lat_f, lon_f)| {
+                let lat = node
+                    .get_property(lat_f)
+                    .as_deref()
+                    .and_then(crate::graph::core::value_operations::value_to_f64)?;
+                let lon = node
+                    .get_property(lon_f)
+                    .as_deref()
+                    .and_then(crate::graph::core::value_operations::value_to_f64)?;
+                Some((lat, lon))
+            });
+
+            // Named shapes
+            let mut shapes = HashMap::new();
+            for (name, field) in &config.shapes {
+                if let Some(Value::String(wkt)) = node.get_property(field).as_deref() {
+                    if let Ok(geom) = self.parse_wkt_cached(wkt) {
+                        let bbox = geom.bounding_rect();
+                        shapes.insert(name.clone(), (geom, bbox));
+                    }
                 }
             }
-            None
-        });
 
-        // Primary location
-        let location = config.location.as_ref().and_then(|(lat_f, lon_f)| {
-            let lat = node
-                .get_property(lat_f)
-                .as_deref()
-                .and_then(crate::graph::core::value_operations::value_to_f64)?;
-            let lon = node
-                .get_property(lon_f)
-                .as_deref()
-                .and_then(crate::graph::core::value_operations::value_to_f64)?;
-            Some((lat, lon))
-        });
+            // Named points
+            let mut points = HashMap::new();
+            for (name, (lat_f, lon_f)) in &config.points {
+                if let (Some(lat), Some(lon)) = (
+                    node.get_property(lat_f)
+                        .as_deref()
+                        .and_then(crate::graph::core::value_operations::value_to_f64),
+                    node.get_property(lon_f)
+                        .as_deref()
+                        .and_then(crate::graph::core::value_operations::value_to_f64),
+                ) {
+                    points.insert(name.clone(), (lat, lon));
+                }
+            }
 
-        // Named shapes
-        let mut shapes = HashMap::new();
-        for (name, field) in &config.shapes {
+            return Some(NodeSpatialData {
+                geometry,
+                location,
+                shapes,
+                points,
+            });
+        }
+
+        // Fallback inference: no SpatialConfig registered for this type. Try
+        // conventional property names so a `wkt_geometry`-only node still
+        // works in `intersects()` / `contains()` / `centroid()` without the
+        // ingester having to declare `column_types={'wkt_geometry':'geometry'}`.
+        self.infer_spatial_data(node)
+    }
+
+    /// Per-query inference fallback: scan the node's properties for
+    /// conventionally-named spatial fields. Does NOT mutate
+    /// `graph.spatial_configs` — registration via the explicit API is still
+    /// the canonical surface; inference only avoids the unhelpful
+    /// "no spatial config" error when the data is sitting right there.
+    fn infer_spatial_data(&self, node: &crate::graph::schema::NodeData) -> Option<NodeSpatialData> {
+        const GEOMETRY_FIELDS: &[&str] = &["wkt_geometry", "geometry", "geom", "wkt"];
+        const LOCATION_FIELDS: &[(&str, &str)] = &[("latitude", "longitude"), ("lat", "lon")];
+
+        let mut geometry: Option<GeomWithBBox> = None;
+        for &field in GEOMETRY_FIELDS {
             if let Some(Value::String(wkt)) = node.get_property(field).as_deref() {
                 if let Ok(geom) = self.parse_wkt_cached(wkt) {
                     let bbox = geom.bounding_rect();
-                    shapes.insert(name.clone(), (geom, bbox));
+                    geometry = Some((geom, bbox));
+                    break;
                 }
             }
         }
 
-        // Named points
-        let mut points = HashMap::new();
-        for (name, (lat_f, lon_f)) in &config.points {
-            if let (Some(lat), Some(lon)) = (
-                node.get_property(lat_f)
-                    .as_deref()
-                    .and_then(crate::graph::core::value_operations::value_to_f64),
-                node.get_property(lon_f)
-                    .as_deref()
-                    .and_then(crate::graph::core::value_operations::value_to_f64),
-            ) {
-                points.insert(name.clone(), (lat, lon));
+        let mut location: Option<(f64, f64)> = None;
+        for &(lat_f, lon_f) in LOCATION_FIELDS {
+            let lat = node
+                .get_property(lat_f)
+                .as_deref()
+                .and_then(crate::graph::core::value_operations::value_to_f64);
+            let lon = node
+                .get_property(lon_f)
+                .as_deref()
+                .and_then(crate::graph::core::value_operations::value_to_f64);
+            if let (Some(la), Some(lo)) = (lat, lon) {
+                location = Some((la, lo));
+                break;
             }
         }
 
+        if geometry.is_none() && location.is_none() {
+            return None;
+        }
         Some(NodeSpatialData {
             geometry,
             location,
-            shapes,
-            points,
+            shapes: HashMap::new(),
+            points: HashMap::new(),
         })
     }
 
@@ -1023,6 +1079,18 @@ impl<'a> CypherExecutor<'a> {
                     "day" => Value::Int64(date.day() as i64),
                     _ => Value::Null,
                 });
+            }
+            // Map-shaped string projection: `collect({k: v, ...})` items
+            // round-trip through `Value::String("{...}")` because `Value`
+            // has no Map variant. Parse on demand so `m.k` works inside
+            // list comprehensions and downstream WITH clauses.
+            if let Value::String(s) = val {
+                let trimmed = s.trim_start();
+                if trimmed.starts_with('{') {
+                    if let Some(field) = extract_map_field(s, property) {
+                        return Ok(field);
+                    }
+                }
             }
             return Ok(val.clone());
         }

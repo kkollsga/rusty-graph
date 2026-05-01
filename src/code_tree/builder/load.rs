@@ -24,6 +24,13 @@ pub struct ModuleRecord {
 ///
 /// Each file's `module_path` defines a leaf module; every prefix of that path
 /// becomes an ancestor module (same shape as builder.py::_build_modules).
+///
+/// Skips path segments whose name is purely ASCII digits — they appear when
+/// a parser falls back to file-path-derived module names and the path
+/// contains numeric directories (dotnet/runtime's
+/// `tests/JIT/Regression/Runtime_<bug-id>/...` test layout in particular).
+/// A bare integer is never a meaningful module name, and emitting them
+/// pollutes the schema with thousands of `Module {title="125042"}` nodes.
 pub fn build_modules(files: &[FileInfo]) -> Vec<ModuleRecord> {
     let mut seen: BTreeMap<String, ModuleRecord> = BTreeMap::new();
     for f in files {
@@ -33,8 +40,12 @@ pub fn build_modules(files: &[FileInfo]) -> Vec<ModuleRecord> {
         let sep = pick_sep(&f.language);
         let parts: Vec<&str> = f.module_path.split(sep).collect();
         for end in 1..=parts.len() {
+            let leaf = parts[end - 1];
+            if is_numeric_segment(leaf) {
+                continue;
+            }
             let qname = parts[..end].join(sep);
-            let name = parts[end - 1].to_string();
+            let name = leaf.to_string();
             seen.entry(qname.clone()).or_insert(ModuleRecord {
                 qualified_name: qname,
                 name,
@@ -44,6 +55,78 @@ pub fn build_modules(files: &[FileInfo]) -> Vec<ModuleRecord> {
         }
     }
     seen.into_values().collect()
+}
+
+/// True when `s` is non-empty and made up entirely of ASCII digits.
+fn is_numeric_segment(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_tree::models::FileInfo;
+
+    fn file_with_module(language: &str, module_path: &str) -> FileInfo {
+        FileInfo {
+            path: format!("{}/dummy", module_path),
+            filename: "dummy".into(),
+            loc: 0,
+            module_path: module_path.into(),
+            language: language.into(),
+            submodule_declarations: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            annotations: None,
+            is_test: false,
+            skip_reason: None,
+        }
+    }
+
+    #[test]
+    fn build_modules_skips_numeric_leaf() {
+        // dotnet-style path with a numeric bug-id directory.
+        let files = vec![file_with_module("csharp", "tests.JIT.Regression.125042")];
+        let modules = build_modules(&files);
+        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["tests", "JIT", "Regression"]);
+        // The qualified ancestor "tests.JIT.Regression.125042" should NOT exist.
+        assert!(!modules
+            .iter()
+            .any(|m| m.qualified_name == "tests.JIT.Regression.125042"));
+    }
+
+    #[test]
+    fn build_modules_skips_numeric_intermediate() {
+        // A numeric mid-segment must drop only itself and any descendants
+        // whose deepest segment is also numeric. Non-numeric ancestors live.
+        let files = vec![file_with_module("csharp", "a.123.c")];
+        let modules = build_modules(&files);
+        let qnames: Vec<&str> = modules.iter().map(|m| m.qualified_name.as_str()).collect();
+        assert!(qnames.contains(&"a"));
+        assert!(qnames.contains(&"a.123.c")); // c is alphanumeric — kept
+        assert!(!qnames.contains(&"a.123")); // numeric leaf — dropped
+    }
+
+    #[test]
+    fn build_modules_keeps_alphanumeric() {
+        let files = vec![file_with_module("csharp", "Foo.Bar.V2")];
+        let modules = build_modules(&files);
+        let qnames: Vec<&str> = modules.iter().map(|m| m.qualified_name.as_str()).collect();
+        assert!(qnames.contains(&"Foo"));
+        assert!(qnames.contains(&"Foo.Bar"));
+        assert!(qnames.contains(&"Foo.Bar.V2"));
+    }
+
+    #[test]
+    fn is_numeric_segment_detection() {
+        assert!(is_numeric_segment("0"));
+        assert!(is_numeric_segment("125042"));
+        assert!(!is_numeric_segment(""));
+        assert!(!is_numeric_segment("v2"));
+        assert!(!is_numeric_segment("Runtime_125042"));
+        assert!(!is_numeric_segment("12.5")); // dot is not a digit
+    }
 }
 
 fn pick_sep(language: &str) -> &'static str {

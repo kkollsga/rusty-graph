@@ -9,6 +9,15 @@ use crate::datatypes::values::Value;
 use crate::graph::algorithms::vector as vs;
 use crate::graph::storage::GraphRead;
 
+/// Shared error suffix when a spatial function arg can't be resolved to a
+/// geometry or point. Names the conventional property names that the
+/// fallback inference (in `build_node_spatial_data`) accepts so users have
+/// a quick fix.
+const SPATIAL_RESOLUTION_HELP: &str = "spatial argument did not resolve to a geometry or point. \
+Either pass column_types={'<col>': 'geometry'} (or 'location.lat'/'location.lon') during \
+add_nodes(), or store the data under a conventional property name (wkt_geometry, geometry, \
+geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
+
 impl<'a> CypherExecutor<'a> {
     /// Evaluate scalar (non-aggregate) functions
     pub(super) fn evaluate_scalar_function(
@@ -846,12 +855,12 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("intersects() requires 2 arguments".into());
                 }
-                let r1 = self.resolve_spatial(&args[0], row, true)?.ok_or(
-                    "intersects(): args must resolve to geometries or nodes with spatial config",
-                )?;
-                let r2 = self.resolve_spatial(&args[1], row, true)?.ok_or(
-                    "intersects(): args must resolve to geometries or nodes with spatial config",
-                )?;
+                let r1 = self
+                    .resolve_spatial(&args[0], row, true)?
+                    .ok_or(SPATIAL_RESOLUTION_HELP)?;
+                let r2 = self
+                    .resolve_spatial(&args[1], row, true)?
+                    .ok_or(SPATIAL_RESOLUTION_HELP)?;
                 // Dispatch without cloning — use Arc references where possible
                 let result = match (&r1, &r2) {
                     (

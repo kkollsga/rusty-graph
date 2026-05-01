@@ -931,12 +931,46 @@ impl<'a> CypherExecutor<'a> {
             // Subsequent MATCH: expand each existing row with new patterns
             let mut new_rows = Vec::with_capacity(existing.rows.len());
 
+            // Build a query-local equality index per pattern when the
+            // shape qualifies (single typed-node + one EqualsVar/
+            // EqualsNodeProp matcher) and the outer-row count justifies
+            // the build cost. Avoids the per-row full-type scan that
+            // `PatternExecutor::execute` would otherwise do.
+            let transient_indexes: Vec<Option<transient_index::TransientEqIndex>> = clause
+                .patterns
+                .iter()
+                .map(|p| {
+                    transient_index::TransientEqIndex::try_build(self.graph, p, existing.rows.len())
+                })
+                .collect();
+
             for row in &existing.rows {
-                for pattern in &clause.patterns {
+                for (pi, pattern) in clause.patterns.iter().enumerate() {
                     let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
                     if remaining == Some(0) {
                         break;
                     }
+
+                    // Fast path: probe the transient index when one was
+                    // built and the bind-var isn't already constrained
+                    // by a prior binding (which would need full
+                    // pattern-execute compatibility checks).
+                    if let Some(idx) = &transient_indexes[pi] {
+                        if !row.node_bindings.contains_key(idx.bind_var.as_str()) {
+                            if let Some(probe) = idx.probe_value(row, self.graph) {
+                                for &node_idx in idx.lookup(&probe) {
+                                    let mut new_row = row.clone();
+                                    new_row.node_bindings.insert(idx.bind_var.clone(), node_idx);
+                                    new_rows.push(new_row);
+                                    if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                                        break;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
                     // Resolve EqualsVar references against current row
                     let resolved;
                     let pat = if Self::pattern_has_vars(pattern) {
@@ -1237,6 +1271,7 @@ pub mod spatial_join;
 pub mod stream;
 #[cfg(test)]
 pub mod tests;
+pub mod transient_index;
 pub mod where_clause;
 pub mod write;
 

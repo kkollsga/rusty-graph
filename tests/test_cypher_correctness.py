@@ -870,3 +870,192 @@ class TestPropertyAnchoredCountFusion:
             "MATCH (m:Creator {name: 'Munch'})<-[:P170]-(p) RETURN DISTINCT m.name AS who, count(DISTINCT p) AS works"
         )
         assert [(r["who"], r["works"]) for r in fused] == [(r["who"], r["works"]) for r in materializing]
+
+
+# =========================================================================
+# Cross-MATCH equality joins (P3 transient hash index path)
+# =========================================================================
+
+
+@pytest.fixture
+def shared_key_graph():
+    """Two node types joined by a non-id property — exercises the transient
+    equality-index path. 200 nodes of each type, joined 1:1 by `key`.
+    Sized above the TRANSIENT_INDEX_THRESHOLD (64) so the fast path fires."""
+    import pandas as pd
+
+    g = rg.KnowledgeGraph()
+    n = 200
+    left = pd.DataFrame(
+        {
+            "left_id": list(range(n)),
+            "name": [f"L{i}" for i in range(n)],
+            "key": [f"K{i:04d}" for i in range(n)],
+        }
+    )
+    right = pd.DataFrame(
+        {
+            "right_id": list(range(n)),
+            "name": [f"R{i}" for i in range(n)],
+            "key": [f"K{i:04d}" for i in range(n)],
+            "score": [i * 10 for i in range(n)],
+        }
+    )
+    g.add_nodes(left, "L", "left_id", "name")
+    g.add_nodes(right, "R", "right_id", "name")
+    return g
+
+
+class TestTransientEqualityIndex:
+    """Parity tests for the query-local equality hash index built in
+    execute_match when a cross-MATCH joins on a non-id property."""
+
+    def test_equals_var_join_matches_pre_built_index(self, shared_key_graph):
+        """Same query, run with and without a pre-built property index, must
+        produce identical results."""
+        without_index = list(
+            shared_key_graph.cypher(
+                "MATCH (l:L) WITH l, l.key AS k MATCH (r:R) "
+                "WHERE r.key = k RETURN l.name AS lname, r.name AS rname ORDER BY lname"
+            )
+        )
+        shared_key_graph.create_index("R", "key")
+        with_index = list(
+            shared_key_graph.cypher(
+                "MATCH (l:L) WITH l, l.key AS k MATCH (r:R) "
+                "WHERE r.key = k RETURN l.name AS lname, r.name AS rname ORDER BY lname"
+            )
+        )
+        assert len(without_index) == 200
+        assert without_index == with_index
+        # Spot-check the join semantics
+        first = without_index[0]
+        assert first["lname"][1:] == first["rname"][1:]
+
+    def test_equals_var_join_returns_no_match_for_unbound_key(self, shared_key_graph):
+        """Probe values that don't exist in the index should yield zero rows."""
+        result = list(
+            shared_key_graph.cypher(
+                "MATCH (l:L) WITH l, l.key AS k MATCH (r:R) WHERE r.key = 'KNONEXISTENT' RETURN l, r"
+            )
+        )
+        assert result == []
+
+    def test_equals_var_join_with_limit(self, shared_key_graph):
+        """LIMIT pushdown must still respect the pattern-row cap."""
+        result = list(
+            shared_key_graph.cypher(
+                "MATCH (l:L) WITH l, l.key AS k MATCH (r:R) WHERE r.key = k RETURN l.name AS lname LIMIT 5"
+            )
+        )
+        assert len(result) == 5
+
+    def test_equals_var_join_below_threshold_correct(self):
+        """Below the 64-row threshold, the slow path runs — must still match."""
+        import pandas as pd
+
+        g = rg.KnowledgeGraph()
+        left = pd.DataFrame(
+            {"id": list(range(10)), "name": [f"L{i}" for i in range(10)], "key": [f"K{i}" for i in range(10)]}
+        )
+        right = pd.DataFrame(
+            {"id": list(range(10)), "name": [f"R{i}" for i in range(10)], "key": [f"K{i}" for i in range(10)]}
+        )
+        g.add_nodes(left, "L", "id", "name")
+        g.add_nodes(right, "R", "id", "name")
+        result = list(
+            g.cypher(
+                "MATCH (l:L) WITH l, l.key AS k MATCH (r:R) "
+                "WHERE r.key = k RETURN l.name AS lname, r.name AS rname ORDER BY lname"
+            )
+        )
+        assert len(result) == 10
+        for row in result:
+            i = row["lname"][1:]
+            assert row["rname"] == f"R{i}"
+
+    def test_equals_var_join_with_aggregation(self, shared_key_graph):
+        """Aggregations downstream of the join must see all matched pairs."""
+        result = list(
+            shared_key_graph.cypher(
+                "MATCH (l:L) WITH l, l.key AS k MATCH (r:R) WHERE r.key = k RETURN sum(r.score) AS total"
+            )
+        )
+        assert len(result) == 1
+        assert result[0]["total"] == sum(i * 10 for i in range(200))
+
+
+# =========================================================================
+# Map-string field access (P2): collect({k: v, ...}) → list-comp filter
+# =========================================================================
+
+
+class TestMapStringFieldAccess:
+    """When `collect({k: v, ...})` produces a list-of-maps, the items
+    round-trip through string serialization (Value has no Map variant).
+    `m.k` access on those items must parse the map and return the field
+    value — not the whole serialized string."""
+
+    @pytest.fixture
+    def hub_graph(self):
+        g = rg.KnowledgeGraph()
+        g.cypher("CREATE (a:Hub {name: 'A', km: 10.5})")
+        g.cypher("CREATE (b:Hub {name: 'B', km: 20.5})")
+        g.cypher("CREATE (c:Hub {name: 'C', km: 5.5})")
+        return g
+
+    def test_argmin_via_collect_then_filter(self, hub_graph):
+        """The original sodir-prospect cohort pattern: collect maps,
+        filter the list by aggregated min, take the first."""
+        result = list(
+            hub_graph.cypher("""
+                MATCH (h:Hub)
+                WITH collect({h: h.name, k: h.km}) AS hubs, min(h.km) AS min_km
+                RETURN [x IN hubs WHERE x.k = min_km | x.h][0] AS nearest, min_km
+            """)
+        )
+        assert len(result) == 1
+        assert result[0]["nearest"] == "C"
+        assert result[0]["min_km"] == 5.5
+
+    def test_collect_map_property_lookup_in_list_comp(self, hub_graph):
+        """Map-typed list comprehension over collected maps."""
+        result = list(
+            hub_graph.cypher("""
+                MATCH (h:Hub)
+                WITH collect({h: h.name, k: h.km}) AS hubs
+                RETURN [x IN hubs | x.h] AS names, [x IN hubs | x.k] AS distances
+            """)
+        )
+        assert len(result) == 1
+        # Order of collect() preserves input row order
+        assert result[0]["names"] == ["A", "B", "C"]
+        assert result[0]["distances"] == [10.5, 20.5, 5.5]
+
+    def test_map_string_passthrough_when_property_missing(self, hub_graph):
+        """A property access that doesn't match any map key still falls
+        through to the projected value (does not crash)."""
+        result = list(
+            hub_graph.cypher("""
+                MATCH (h:Hub)
+                WITH {h: h.name, k: h.km} AS m
+                RETURN m.missing AS x ORDER BY h.name
+            """)
+        )
+        # Falls through: returns the whole map string when no match
+        assert len(result) == 3
+        assert all("h" in str(r["x"]) for r in result)
+
+    def test_map_string_handles_quoted_string_values(self):
+        g = rg.KnowledgeGraph()
+        g.cypher("CREATE (h:Hub {name: 'Anna, the great', code: 'X-1'})")
+        result = list(
+            g.cypher("""
+                MATCH (h:Hub)
+                WITH {n: h.name, c: h.code} AS m
+                RETURN m.n AS n, m.c AS c
+            """)
+        )
+        assert len(result) == 1
+        assert result[0]["n"] == "Anna, the great"
+        assert result[0]["c"] == "X-1"
