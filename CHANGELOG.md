@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.36] — 2026-05-01
+
 ### Cypher planner
 
 - **Fixed `mark_fast_var_length_paths` per-target row drop** — closes
