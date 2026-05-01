@@ -21,17 +21,19 @@ test-rust:
 test-py:
 	$(ACTIVATE) && pytest tests/ -v
 
-## Run performance benchmarks
+## Run performance benchmarks (forces release build — saved baselines
+## are release-built, so a dev-profile comparison shows ~15× false
+## regressions across every test).
 bench:
-	$(ACTIVATE) && pytest tests/benchmarks/ -v -m benchmark -s
+	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/ -v -m benchmark -s
 
-## Save benchmark baseline for comparison
+## Save benchmark baseline for comparison (release build).
 bench-save:
-	$(ACTIVATE) && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-save=baseline
+	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-save=baseline
 
-## Compare current performance against saved baseline
+## Compare current performance against saved baseline (release build).
 bench-compare:
-	$(ACTIVATE) && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare
+	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare
 
 ## Run bug-path performance benchmarks (pre/post bugfix baseline)
 bench-bugs:

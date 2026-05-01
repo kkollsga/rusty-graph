@@ -216,6 +216,194 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("empty_typed_match", "social_graph", "MATCH (n:NoSuchType) RETURN count(n) AS n", None),
     ("skip_and_limit", "social_graph", "MATCH (p:Person) RETURN p.name AS n ORDER BY p.person_id SKIP 5 LIMIT 3", None),
+    # ── UNION ALL ──
+    (
+        "union_all",
+        "small_graph",
+        "MATCH (p:Person) RETURN p.name AS n UNION ALL MATCH (p:Person) RETURN p.name AS n",
+        None,
+    ),
+    # ── expression shapes ──
+    (
+        "case_simple",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, CASE WHEN p.age > 30 THEN 'old' ELSE 'young' END AS bucket",
+        None,
+    ),
+    (
+        "case_chain",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, "
+        "CASE WHEN p.age < 25 THEN 'young' WHEN p.age < 35 THEN 'mid' ELSE 'old' END AS bucket",
+        None,
+    ),
+    ("starts_with", "social_graph", "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_1' RETURN p.name AS n", None),
+    ("contains", "social_graph", "MATCH (p:Person) WHERE p.name CONTAINS '_1' RETURN p.name AS n", None),
+    ("ends_with", "social_graph", "MATCH (p:Person) WHERE p.name ENDS WITH '_5' RETURN p.name AS n", None),
+    ("not_equal", "social_graph", "MATCH (p:Person) WHERE p.city <> 'Oslo' RETURN count(p) AS n", None),
+    (
+        "range_predicate",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age >= 25 AND p.age <= 35 RETURN count(p) AS n",
+        None,
+    ),
+    ("null_check", "social_graph", "MATCH (p:Person) WHERE p.email IS NOT NULL RETURN count(p) AS n", None),
+    ("in_list", "social_graph", "MATCH (p:Person) WHERE p.city IN ['Oslo', 'Bergen'] RETURN count(p) AS n", None),
+    (
+        "predicate_stack",
+        "social_graph",
+        "MATCH (p:Person) WHERE (p.age > 25 AND p.city = 'Oslo') "
+        "OR (p.age > 40 AND p.salary > 90000) RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    # ── ORDER BY referencing RETURN aliases (regression for fuse_node_scan_top_k bug) ──
+    # Before the fix, RETURN <expr> AS h ORDER BY h LIMIT k silently
+    # produced empty rows: fuse_node_scan_top_k's sort-key evaluator
+    # couldn't resolve RETURN aliases. Caught by the differential harness
+    # (probe of broader query shapes); bisected to fuse_node_scan_top_k.
+    (
+        "string_concat_order_alias",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name + '@' + p.city AS handle ORDER BY handle LIMIT 5",
+        None,
+    ),
+    ("order_by_return_alias", "social_graph", "MATCH (p:Person) RETURN p.name AS h ORDER BY h DESC LIMIT 5", None),
+    (
+        "order_by_expr",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.salary AS s ORDER BY p.salary - p.age * 1000 DESC LIMIT 5",
+        None,
+    ),
+    # ── EXISTS / NOT EXISTS subqueries ──
+    (
+        "exists_inline",
+        "social_graph",
+        "MATCH (p:Person) WHERE EXISTS { (p)-[:KNOWS]->() } RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    (
+        "exists_filter",
+        "social_graph",
+        "MATCH (p:Person) WHERE EXISTS { (p)-[:WORKS_AT]->(c:Company {industry: 'Tech'}) } "
+        "RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    (
+        "not_exists",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT EXISTS { (p)-[:KNOWS]->() } RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    # ── HAVING / multi-WITH ──
+    (
+        "having_basic",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS c, count(p) AS n WHERE n > 4 RETURN c, n ORDER BY c",
+        None,
+    ),
+    (
+        "aggregate_of_aggregate",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS c, count(p) AS n RETURN avg(n) AS avg_per_city, max(n) AS biggest",
+        None,
+    ),
+    (
+        "where_after_agg",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) WITH c, count(p) AS hires "
+        "WHERE hires >= 4 RETURN c.name AS n, hires ORDER BY n",
+        None,
+    ),
+    # ── multi-pattern within a single MATCH (regression for self-join + LIMIT bug) ──
+    # Before the fix, push_limit_into_match accepted single-MATCH queries
+    # but didn't check single-pattern, so multi-pattern + WHERE + LIMIT
+    # silently dropped rows. Bisects to push_limit_into_match +
+    # optimize_pattern_start_node before the fix. The ORDER BY makes the
+    # surfacing deterministic so the test compares row identity.
+    (
+        "self_join_limit",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS]->(q:Person), (p)-[:KNOWS]->(r:Person) "
+        "WHERE q <> r RETURN p.name AS n, q.name AS q, r.name AS r "
+        "ORDER BY p.name, q.name, r.name LIMIT 5",
+        None,
+    ),
+    # ── shortest path ──
+    (
+        "shortest_typed",
+        "social_graph",
+        "MATCH p = shortestPath((a:Person {person_id:1})-[:KNOWS*..5]-(b:Person {person_id:10})) RETURN length(p) AS L",
+        None,
+    ),
+    # ── multiple OPTIONAL MATCH ──
+    (
+        "two_optional_match",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) OPTIONAL MATCH (p)-[:KNOWS]->(f) "
+        "RETURN p.name AS n, count(DISTINCT c) AS Cs, count(DISTINCT f) AS Fs "
+        "ORDER BY n LIMIT 5",
+        None,
+    ),
+    # ── arithmetic + collect ──
+    (
+        "arithmetic_agg",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS c, avg(p.age) AS avg_age, max(p.age) - min(p.age) AS spread ORDER BY c",
+        None,
+    ),
+    (
+        "collect_size",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS c, collect(p.name) AS names RETURN c, size(names) AS n ORDER BY c",
+        None,
+    ),
+    # ── label check / id() function ──
+    ("label_check", "social_graph", "MATCH (n) WHERE n:Person RETURN count(n) AS n", None),
+    ("id_function", "social_graph", "MATCH (p:Person) WHERE id(p) IS NOT NULL RETURN count(p) AS n", None),
+    # ── inline pattern + WHERE ──
+    (
+        "inline_and_where",
+        "social_graph",
+        "MATCH (p:Person {city: 'Oslo'}) WHERE p.age > 25 RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    # ── 3-hop chain ──
+    (
+        "three_hop_count",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) RETURN count(*) AS n",
+        None,
+    ),
+    # ── WITH * project everything ──
+    ("with_star", "social_graph", "MATCH (p:Person) WITH * WHERE p.age > 35 RETURN p.name AS n ORDER BY n", None),
+]
+
+
+# Mutation queries: each test gets its own fresh fixture so state-bleed
+# between mutations is impossible. The harness's identity for mutations
+# is "optimized result on a fresh fixture == naive result on a fresh
+# fixture." Lives separate from DIFFERENTIAL_QUERIES because of the
+# fresh-fixture-per-test requirement.
+MUTATION_QUERIES: list[tuple[str, str]] = [
+    ("create_node", "CREATE (p:Person {person_id: 99, name: 'X', age: 50}) RETURN p.person_id AS pid"),
+    ("set_property", "MATCH (p:Person {person_id: 1}) SET p.age = 99 RETURN p.age AS age"),
+    ("set_with_filter", "MATCH (p:Person) WHERE p.age > 30 SET p.bucket = 'old' RETURN count(p) AS n"),
+    ("detach_delete", "MATCH (p:Person {person_id: 3}) DETACH DELETE p"),
+    ("remove_property", "MATCH (p:Person {person_id: 1}) REMOVE p.name RETURN p.person_id AS pid"),
+    (
+        "merge_create",
+        "MERGE (p:Person {person_id: 100}) ON CREATE SET p.age = 1 RETURN p.person_id AS pid, p.age AS age",
+    ),
+    ("merge_match", "MERGE (p:Person {person_id: 1}) ON MATCH SET p.touched = true RETURN p.touched AS t"),
+    (
+        "multi_create",
+        "CREATE (a:Person {person_id: 300, name: 'A', age: 10}), "
+        "(b:Person {person_id: 301, name: 'B', age: 20}) RETURN count(*) AS n",
+    ),
+    (
+        "match_create_edge",
+        "MATCH (a:Person {person_id: 1}), (b:Person {person_id: 2}) CREATE (a)-[:KNOWS_NEW]->(b) RETURN count(*) AS n",
+    ),
 ]
 
 
@@ -340,3 +528,71 @@ def test_disabling_single_pass_preserves_correctness(pass_name: str, social_grap
     assert actual == baseline, (
         f"Disabling pass `{pass_name}` produced different rows:\n  baseline: {baseline}\n  actual:   {actual}"
     )
+
+
+# ── Mutation differential ────────────────────────────────────────────
+#
+# Mutations write to graph state, so each mode needs its own freshly-
+# built graph (we can't reuse a pytest fixture — within one test
+# invocation it caches and returns the same instance on every call).
+# Building the graph inline is verbose but gives us isolation.
+
+
+def _build_mutation_graph() -> kglite.KnowledgeGraph:
+    """Fresh small_graph clone, built without going through a pytest
+    fixture so successive calls produce independent instances."""
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+                "age": [28, 35, 42],
+                "city": ["Oslo", "Bergen", "Oslo"],
+            }
+        ),
+        "Person",
+        "person_id",
+        "name",
+    )
+    g.add_connections(
+        pd.DataFrame(
+            {
+                "from_id": [1, 2, 1],
+                "to_id": [2, 3, 3],
+                "since": [2020, 2019, 2021],
+            }
+        ),
+        "KNOWS",
+        "Person",
+        "from_id",
+        "Person",
+        "to_id",
+        columns=["since"],
+    )
+    return g
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize("name,query", MUTATION_QUERIES, ids=[entry[0] for entry in MUTATION_QUERIES])
+def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
+    """For each mutation, build two independent graphs, run the query
+    on each (one optimized, one naive), and assert both the returned
+    rows AND the post-mutation graph state (node + edge counts) match.
+    Catches passes that mishandle mutation clauses by comparing the
+    side effect on graph state, not just the cypher return value."""
+    g_opt = _build_mutation_graph()
+    rows_opt = _normalize(g_opt.cypher(query).to_list())
+    nodes_opt = g_opt.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_opt = g_opt.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+    g_naive = _build_mutation_graph()
+    rows_naive = _normalize(g_naive.cypher(query, disable_optimizer=True).to_list())
+    nodes_naive = g_naive.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_naive = g_naive.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+    assert rows_opt == rows_naive, f"Mutation `{name}` rows: opt={rows_opt}, naive={rows_naive}"
+    assert nodes_opt == nodes_naive, f"Mutation `{name}` post-state node count: opt={nodes_opt}, naive={nodes_naive}"
+    assert edges_opt == edges_naive, f"Mutation `{name}` post-state edge count: opt={edges_opt}, naive={edges_naive}"

@@ -184,28 +184,40 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
         };
 
         // Only push the LIMIT hint into MATCH when this is the FIRST and ONLY
-        // MATCH clause in the query. Multi-MATCH queries route through
-        // `execute_match`'s subsequent-MATCH path, where the per-row pattern
-        // executor's `max_matches=remaining` interacts incorrectly with the
-        // outer row loop and produces fewer rows than the LIMIT requests
-        // (regression seen on 3-MATCH + WHERE on last-MATCH variable + LIMIT N
-        // queries — see `test_limit_pushdown_multi_match_safety`).
-        // For multi-MATCH, leave LIMIT as a separate clause.
+        // MATCH clause AND the MATCH has a single pattern. Two unsafe shapes:
+        //
+        // 1. Multi-MATCH (separate `MATCH ... MATCH` clauses): routes through
+        //    `execute_match`'s subsequent-MATCH path, where the per-row pattern
+        //    executor's `max_matches=remaining` interacts incorrectly with the
+        //    outer row loop and produces fewer rows than the LIMIT requests
+        //    (regression seen on 3-MATCH + WHERE on last-MATCH variable + LIMIT N
+        //    queries — see `test_limit_pushdown_multi_match_safety`).
+        // 2. Multi-pattern within ONE MATCH (comma-separated patterns:
+        //    `MATCH (p)-[:T]->(q), (p)-[:T]->(r)`): same row-loop interaction
+        //    surfaces because each pattern's expansion is separately bounded
+        //    by the limit_hint, so the cartesian's surviving cross-product
+        //    can fall short of LIMIT (regression seen on self-join + WHERE
+        //    + LIMIT — caught by the differential harness).
+        // For both shapes, leave LIMIT as a separate clause.
         let is_first_match = i == 0;
         let only_match = !query
             .clauses
             .iter()
             .skip(i + 1)
             .any(|c| matches!(c, Clause::Match(_) | Clause::OptionalMatch(_)));
-        if !is_first_match || !only_match {
+        let single_pattern = match &query.clauses[i] {
+            Clause::Match(m) => m.patterns.len() == 1,
+            _ => false,
+        };
+        if !is_first_match || !only_match || !single_pattern {
             i += 1;
             continue;
         }
 
-        // Safe to push: single MATCH clause. The executor inlines pushable
-        // WHERE predicates into the pattern (`push_where_into_match` runs
-        // earlier in the optimizer), so the hint is exact in both with-WHERE
-        // and without-WHERE cases for single-MATCH queries.
+        // Safe to push: single MATCH clause with a single pattern. The
+        // executor inlines pushable WHERE predicates into the pattern
+        // (`push_where_into_match` runs earlier in the optimizer), so the
+        // hint is exact in both with-WHERE and without-WHERE cases.
         if let Clause::Match(ref mut m) = query.clauses[i] {
             m.limit_hint = Some(limit);
         }

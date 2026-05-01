@@ -2194,7 +2194,13 @@ pub(super) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        // ORDER BY must have exactly 1 sort item
+        // ORDER BY must have exactly 1 sort item, and the sort key must
+        // be evaluable in the MATCH's variable scope (graph vars + their
+        // properties) — RETURN aliases aren't visible to the fused
+        // top-K's sort-key evaluator, which would silently emit zero
+        // rows for shapes like `RETURN <expr> AS h ORDER BY h LIMIT k`.
+        // Caught by the differential harness against `string_concat`
+        // and `order by alias` shapes.
         let sort_info = if let Clause::OrderBy(o) = &query.clauses[orderby_idx] {
             if o.items.len() == 1 {
                 Some((o.items[0].expression.clone(), !o.items[0].ascending))
@@ -2208,6 +2214,17 @@ pub(super) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
             i += 1;
             continue;
         };
+        if let Clause::Return(r) = &query.clauses[return_idx] {
+            let return_aliases: std::collections::HashSet<String> = r
+                .items
+                .iter()
+                .filter_map(|item| item.alias.clone())
+                .collect();
+            if expression_touches_vars(&sort_expr, &return_aliases) {
+                i += 1;
+                continue;
+            }
+        }
 
         // LIMIT must be positive literal integer
         let limit_val = if let Clause::Limit(l) = &query.clauses[limit_idx] {

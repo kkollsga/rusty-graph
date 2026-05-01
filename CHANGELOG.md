@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   specific subset by name. Validated against the registry — typos
   raise `ValueError`. Used by the new differential test harness and
   the bisection script.
+- **Fixed `push_limit_into_match` multi-pattern row drop.** A query
+  with a single MATCH containing multiple comma-separated patterns
+  plus WHERE plus LIMIT (e.g. self-joins:
+  `MATCH (p)-[:T]->(q), (p)-[:T]->(r) WHERE q <> r RETURN ... LIMIT 5`)
+  silently dropped rows. The 0.8.27 fix narrowed the pushdown to
+  single-MATCH but didn't check single-pattern; the pattern executor's
+  `max_matches` hint applied per-pattern and the cartesian
+  cross-product fell short of the requested LIMIT. The pass now also
+  bails when the MATCH has more than one pattern.
+- **Fixed `fuse_node_scan_top_k` empty-result on alias-sorted top-K.**
+  Queries of the form `MATCH (p:T) RETURN <expr> AS h ORDER BY h LIMIT k`
+  silently produced zero rows when the ORDER BY referenced a RETURN
+  alias — the fused executor's sort-key evaluator only knows graph
+  variables, not RETURN-alias bindings. The pass now bails when the
+  sort expression references any RETURN alias, falling back to the
+  materializing path which handles aliases correctly.
 - **Fixed `desugar_multi_match_return_aggregate` over-grouping bug**
   surfaced by the new differential harness on first run.
   `MATCH (p:Person) MATCH (c:Company) RETURN p.city, count(c)` was
@@ -33,11 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the set of non-aggregate RETURN expressions).
 - **New differential test harness `tests/test_cypher_differential.py`.**
   Every query in a curated corpus runs twice (optimized vs.
-  optimizer-off) and asserts identical rows. Found 2 divergences on
-  first run: the `desugar_multi_match_return_aggregate` bug above
-  (now fixed; permanent regression test) and a remaining design
-  question on `mark_fast_var_length_paths` semantics (per-target vs.
-  per-path) tracked as the lone `KNOWN_DIVERGENT` entry.
+  optimizer-off) and asserts identical rows. Includes 9 mutation
+  tests that compare the cypher result *and* the post-mutation graph
+  state (node + edge counts) across the two modes. Surfaced 4
+  divergences across two probing rounds, all now fixed and tracked as
+  permanent regression tests:
+    - `desugar_multi_match_return_aggregate` over-grouping
+      (fixed, see above)
+    - `push_limit_into_match` multi-pattern row drop (fixed)
+    - `fuse_node_scan_top_k` empty-result on alias-sorted top-K (fixed)
+    - `mark_fast_var_length_paths` per-target vs. per-path semantics
+      (lone `KNOWN_DIVERGENT` entry; pending design call).
 - **New `scripts/cypher_pass_bisect.py`.** Given a query that diverges,
   runs each pass disabled in isolation and reports which pass's
   absence resolves the divergence. Works against `.kgl` files or
