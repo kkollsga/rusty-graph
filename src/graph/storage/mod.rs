@@ -33,7 +33,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::Direction;
 use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -393,6 +393,26 @@ pub trait GraphWrite: GraphRead {
     /// Mutable borrow of the full NodeData. Escape hatch for property
     /// mutation — prefer higher-level helpers (`NodeData::set_property`,
     /// `NodeData::remove_property`) where available.
+    ///
+    /// **Disk backend staging contract (0.9.0 Cluster 6):** on disk,
+    /// `node_weight_mut` does NOT mutate the live store directly. It
+    /// stages writes in an internal `node_mut_cache` to dodge the
+    /// `Arc<ColumnStore>` share-clone storm; the cache is drained
+    /// into `column_stores` by the next call to
+    /// [`GraphWrite::flush_pending_writes`] (or any subsequent
+    /// `&mut self` op via `clear_arenas`).
+    ///
+    /// **Callers MUST call `flush_pending_writes()` before any
+    /// subsequent `&self` read of the same node**, or the read will
+    /// return the pre-write value from `column_stores`. The Cypher
+    /// executor (`execute_mutable`) does this automatically after
+    /// every SET/REMOVE/MERGE clause; new code paths that mutate
+    /// through this method must replicate that pattern. A debug-only
+    /// assertion in `DiskGraph::node_weight` warns if a staged write
+    /// is shadowed by a read.
+    ///
+    /// Memory + Mapped backends mutate `StableDiGraph` in place — no
+    /// flush needed.
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData>;
 
     /// Mutable borrow of the full EdgeData.
@@ -615,6 +635,19 @@ pub(super) fn flatten_to_csr(
     (sources, offsets, flat)
 }
 
+// Read-only Deref for MemoryGraph / MappedGraph stays — petgraph's
+// inherent read methods (`node_weight`, `edge_references`, etc.) are
+// the same shape as the GraphRead trait methods, and trait dispatch
+// is enforced explicitly elsewhere via UFCS or `use Trait`.
+//
+// DerefMut is REMOVED (0.9.0 Cluster 6 / D2 hygiene). Without it,
+// callers that need a mutable petgraph view must go through
+// `inner_mut()`, and any mutation that requires lazy-index
+// invalidation must route through the GraphWrite trait. This kills
+// the silent footgun: pre-fix, `g.add_node(data)` on `&mut MappedGraph`
+// auto-deref'd to petgraph, bypassing
+// `MappedGraph::invalidate_property_index()`. Post-fix, the same call
+// site fails to compile and forces the author to choose explicitly.
 impl Deref for MemoryGraph {
     type Target = StableDiGraph<NodeData, EdgeData>;
     #[inline]
@@ -623,25 +656,11 @@ impl Deref for MemoryGraph {
     }
 }
 
-impl DerefMut for MemoryGraph {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 impl Deref for MappedGraph {
     type Target = StableDiGraph<NodeData, EdgeData>;
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.inner
-    }
-}
-
-impl DerefMut for MappedGraph {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
     }
 }
 

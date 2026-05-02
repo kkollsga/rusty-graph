@@ -676,6 +676,24 @@ impl DiskGraph {
             return None;
         }
 
+        // 0.9.0 Cluster 6 — preventative invariant. node_weight_mut
+        // stages writes in node_mut_cache; if an entry exists for
+        // this index here on the read path, the staged write is
+        // about to be silently shadowed by the column_stores read
+        // (i.e. a missed flush_pending_writes call). 0.8.41's
+        // execute_mutable post-write flush should keep this empty
+        // outside of mid-mutation evaluation; firing here means a
+        // new code path needs an explicit flush.
+        #[cfg(debug_assertions)]
+        if self.node_mut_cache.contains_key(&(i as u32)) {
+            eprintln!(
+                "BUG: DiskGraph::node_weight({}) called while node_mut_cache holds a staged \
+                 write for that index. Missing flush_pending_writes() call. See 0.9.0 \
+                 readiness Cluster 6 / node_weight_mut docs.",
+                i
+            );
+        }
+
         // SAFETY: `node_arena` is UnsafeCell<Vec<NodeData>>. Accessed from
         // this `&self` path, `clear_arenas` (`&mut self`), and `reset_arenas`
         // (`&self`, requires no live materialization refs). Under KGLite's
