@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-05-02
+
+### Disk-mode regression fix — property visibility after blueprint build
+
+Disk-mode `from_blueprint(...)` left freshly-built graphs in a
+state where every Cypher property read returned NULL.
+`MATCH (p) RETURN count(p)` worked (slot enumeration), but
+`RETURN p.x` for any property — even `id` and `title` — returned
+None. The Sodir prospect-graph build on disk surfaced the failure
+shape: every Stage 2.x derived edge was 0, every Stage 3 SET
+cascade collapsed because the read-back of the previous stage's
+writes returned 0 rows. Single-process build → enhance → save was
+unusable on disk; default and mapped modes were unaffected.
+
+Two related sync gaps between `DirGraph.column_stores` and
+`DiskGraph.column_stores`:
+
+- **batch.rs deferred-columnar pass after creates.** Disk's
+  `add_nodes` populated `graph.column_stores` (DirGraph-side) and
+  updated each slot's `row_id`, but never mirrored to
+  `disk_graph.column_stores` (where disk reads through
+  `node_weight` / `get_node_id` / `get_node_title`). The existing
+  `sync_disk_column_stores()` only fired when the chunk had
+  UPDATEs, never on creates-only. Fix: after the deferred-columnar
+  loop, call `graph.sync_disk_column_stores()` when disk-backed.
+
+- **write.rs after Cypher mutation flushes.** Each SET / REMOVE /
+  MERGE clause calls `flush_pending_writes` (0.8.41) which drains
+  `node_mut_cache` into `disk_graph.column_stores`. But
+  `graph.column_stores` stayed stale. A subsequent `add_nodes`
+  (which now calls `sync_disk_column_stores` per the first fix)
+  would clobber disk's post-flush state with the pre-flush
+  DirGraph snapshot — silently losing the SET's effects on the
+  multi-stage `SET → add_nodes → read` pipeline. Fix: after every
+  `flush_pending_writes` (per-clause + end-of-query), also call
+  `graph.sync_column_stores_from_disk()` to mirror the post-flush
+  disk state back to DirGraph.
+
+**Verification on the Sodir prospect-graph build (557k nodes, 47
+edge types):**
+
+- All Stage 2.x derived edges populated (was all 0): IN_BLOCK
+  7,983, IN_STRUCTURAL_ELEMENT 6,763, IN_AFEX_AREA 779,
+  NEAREST_AFEX_HUB 5,560.
+- All Stage 7 derived edges populated (was all 0):
+  HC_IN_FORMATION 850, ENCLOSES 10,588, PLAY_HAS_FORMATION 248,
+  DRILLED_IN_PLAY 2,627.
+- Stage 3.6 value_basis distribution matches the in-memory
+  baseline byte-for-byte: estimate=2754, realized=546, dry=1437,
+  deflagged=1577, unscored=460. Pre-fix every prospect collapsed
+  into `unscored`.
+
+All three storage modes — default, mapped, disk — now produce
+identical results on a 16-case integration smoke test that exercises
+every 0.9.x gate item plus the multi-stage SET / `add_connections`
+/ save+reload pipeline.
+
+585 cargo, 2333 pytest, 97/97 parity, lint clean.
+
 ## [0.9.1] — 2026-05-02
 
 ### Breaking change in 0.9.0 (Rust crate API) — late-breaking notice
