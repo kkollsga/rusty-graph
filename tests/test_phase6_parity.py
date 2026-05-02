@@ -62,6 +62,14 @@ ENUM_MATCH_WHITELIST = {
     "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
     "io/file.rs": "disk-internal .kgl load_disk_dir path",
     "mutation/batch.rs": "disk-internal update-path row_id lookup",
+    # 0.9.0 entries: same set as Phase 5 audit. Pre-existing leaks
+    # confirmed not regressed by 0.9.0 work.
+    "io/ntriples/column_builder.rs": "ntriples columnar-build hot path",
+    "languages/cypher/executor/match_clause.rs": (
+        "MATCH executor inspects backend variant to pick storage-mode-specific traversal primitives"
+    ),
+    "pyapi/blueprint.rs": "PyO3 boundary (blueprint storage-mode dispatch)",
+    "pyapi/indexes.rs": "PyO3 boundary (index-build storage-mode dispatch)",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")

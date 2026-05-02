@@ -176,10 +176,11 @@ impl IdIndexBase {
         // SAFETY: payload was written as little-endian u32 arrays at file offsets
         // chosen so each region begins at a 4-byte boundary; mmap pages are
         // page-aligned (4 KB) so any sub-slice that's 4-byte aligned by file
-        // construction is also 4-byte aligned in memory. We index two adjacent
-        // u32 slices of length `n`, totalling `2 * n * 4` bytes, fully inside
-        // `payload_len` (verified above). No mutation possible — `Mmap` (not
-        // `MmapMut`) is a read-only mapping.
+        // construction is also 4-byte aligned in memory.
+        // We index two adjacent u32 slices of length `n`, totalling
+        // `2 * n * 4` bytes, fully inside `payload_len` (verified above).
+        // No mutation possible — `Mmap` (not `MmapMut`) is a read-only mapping.
+        // SAFETY: see comment above (4-byte aligned + length-checked).
         unsafe {
             let keys_ptr = bytes.as_ptr() as *const u32;
             let idxs_ptr = bytes.as_ptr().add(half) as *const u32;
