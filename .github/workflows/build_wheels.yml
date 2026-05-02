@@ -40,28 +40,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI workflow
-        uses: lewagon/wait-on-check-action@v1.6.0
+        uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Rust checks'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
       - name: Wait for Python tests (3.10)
-        uses: lewagon/wait-on-check-action@v1.6.0
+        uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Python tests (py3.10)'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
       - name: Wait for Python tests (3.12)
-        uses: lewagon/wait-on-check-action@v1.6.0
+        uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Python tests (py3.12)'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
       - name: Wait for Python lint
-        uses: lewagon/wait-on-check-action@v1.6.0
+        uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Python lint'
@@ -150,7 +150,7 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
       - name: Create GitHub Release (with changelog)
         if: steps.changelog.outputs.has_notes == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.whl
           body_path: /tmp/release_notes.md
@@ -159,7 +159,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Create GitHub Release (auto-generated)
         if: steps.changelog.outputs.has_notes != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.whl
           generate_release_notes: true
