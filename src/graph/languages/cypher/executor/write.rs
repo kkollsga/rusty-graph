@@ -429,6 +429,7 @@ fn value_type_name(v: &Value) -> String {
         Value::UniqueId(_) => "UniqueId",
         Value::DateTime(_) => "DateTime",
         Value::Point { .. } => "Point",
+        Value::Duration { .. } => "Duration",
         Value::Null => "Null",
         Value::NodeRef(_) => "NodeRef",
     }

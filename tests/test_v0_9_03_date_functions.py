@@ -122,6 +122,51 @@ def test_datetime_minus_datetime_returns_duration():
     assert rows[0]["days"] == 31
 
 
+def test_duration_components_stay_separate():
+    """0.9.0 Cluster 2 — calendar units (months) and clock units
+    (days/seconds) are stored separately. Pre-Cluster-2 the
+    soft-Duration folded everything to days, so
+    duration({months: 1}).months returned 30 (collapsed) instead of 1.
+    """
+    g = kglite.KnowledgeGraph()
+    rows = list(
+        g.cypher(
+            "RETURN duration({months: 1, days: 5}).months AS m, "
+            "duration({months: 1, days: 5}).days AS d, "
+            "duration({months: 1, days: 5}).seconds AS s"
+        )
+    )
+    assert rows[0]["m"] == 1
+    assert rows[0]["d"] == 5
+    assert rows[0]["s"] == 0
+
+
+def test_duration_seconds_component():
+    """Sub-day inputs (hours/minutes/seconds) are folded into the
+    `seconds` component without collapsing to days."""
+    g = kglite.KnowledgeGraph()
+    rows = list(
+        g.cypher("RETURN duration({hours: 1, minutes: 30}).seconds AS s, duration({hours: 1, minutes: 30}).hours AS h")
+    )
+    assert rows[0]["s"] == 5400  # 3600 + 1800
+    assert rows[0]["h"] == 1
+
+
+def test_duration_addition_component_wise():
+    """Duration + Duration sums components separately. Bound via
+    WITH because chained `.field` access on a parenthesised
+    expression isn't parsed yet."""
+    g = kglite.KnowledgeGraph()
+    rows = list(
+        g.cypher(
+            "WITH duration({months: 1, days: 5}) + duration({months: 2, days: 10}) AS d "
+            "RETURN d.months AS m, d.days AS dd"
+        )
+    )
+    assert rows[0]["m"] == 3
+    assert rows[0]["dd"] == 15
+
+
 def test_estimate_is_stale_pattern(datetime_graph):
     """The Sodir 'estimate is stale (>5y old)' pattern, expressed
     naturally with duration arithmetic instead of toString hacking."""

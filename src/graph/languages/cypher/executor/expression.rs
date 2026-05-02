@@ -535,12 +535,21 @@ impl<'a> CypherExecutor<'a> {
                             _ => Ok(Value::Null),
                         }
                     }
-                    // Soft-duration support: integer values (representing
-                    // days, see scalar_functions::duration / duration.between)
-                    // expose `.days` as identity. Lets the
-                    // `duration.between(d1, d2).days` chain resolve without
-                    // adding a Value::Duration variant. 0.9.0 §3.
-                    Value::Int64(n) if property.as_str() == "days" => Ok(Value::Int64(*n)),
+                    // 0.9.0 Cluster 2 — proper Duration accessors.
+                    Value::Duration {
+                        months,
+                        days,
+                        seconds,
+                    } => match property.as_str() {
+                        "months" => Ok(Value::Int64(*months as i64)),
+                        "days" => Ok(Value::Int64(*days as i64)),
+                        "seconds" => Ok(Value::Int64(*seconds)),
+                        // Convenience composites (Neo4j duration component fields).
+                        "years" => Ok(Value::Int64((*months / 12) as i64)),
+                        "minutes" => Ok(Value::Int64(*seconds / 60)),
+                        "hours" => Ok(Value::Int64(*seconds / 3600)),
+                        _ => Ok(Value::Null),
+                    },
                     Value::Point { .. } => Ok(point_field(&val, property)),
                     _ => Ok(Value::Null),
                 }
@@ -1147,6 +1156,26 @@ impl<'a> CypherExecutor<'a> {
                 if !matches!(extracted, Value::Null) {
                     return Ok(extracted);
                 }
+            }
+            // Duration-shaped projection: `WITH duration({...}) AS d
+            // RETURN d.months` — pulls the scalar component (0.9.0
+            // Cluster 2). Composite accessors (years/hours/minutes)
+            // mirror the ExprPropertyAccess arm.
+            if let Value::Duration {
+                months,
+                days,
+                seconds,
+            } = val
+            {
+                return Ok(match property {
+                    "months" => Value::Int64(*months as i64),
+                    "days" => Value::Int64(*days as i64),
+                    "seconds" => Value::Int64(*seconds),
+                    "years" => Value::Int64((*months / 12) as i64),
+                    "minutes" => Value::Int64(*seconds / 60),
+                    "hours" => Value::Int64(*seconds / 3600),
+                    _ => Value::Null,
+                });
             }
             return Ok(val.clone());
         }

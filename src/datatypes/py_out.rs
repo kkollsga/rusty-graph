@@ -40,6 +40,19 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         Value::Null => Ok(py.None()),
         // NodeRef should be resolved before reaching Python; fallback to index
         Value::NodeRef(idx) => idx.into_py_any(py),
+        // Value::Duration → Python dict {months, days, seconds}.
+        // 0.9.0 Cluster 2.
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => {
+            let dict = PyDict::new(py);
+            dict.set_item("months", months)?;
+            dict.set_item("days", days)?;
+            dict.set_item("seconds", seconds)?;
+            Ok(dict.into_any().unbind())
+        }
     }
 }
 

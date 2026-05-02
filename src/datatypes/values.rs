@@ -41,6 +41,30 @@ pub enum Value {
     /// through collect() → index → WITH → property access pipelines.
     /// Never persisted — only exists during Cypher execution.
     NodeRef(u32),
+    /// Calendar duration: months + days + seconds (Neo4j shape).
+    /// 0.9.0 Cluster 2 — replaces the soft-duration Int64-as-days
+    /// hack from §3 v1. Calendar units (months, years) and clock
+    /// units (days, hours, minutes, seconds) are kept separate so
+    /// `duration({months: 1, days: 5}).months` returns 1, not 35.
+    /// Sub-day precision (hours/minutes/seconds) is wired in seconds
+    /// — Value::DateTime is still NaiveDate (Cluster 1, deferred),
+    /// so DateTime + Duration discards the seconds component for
+    /// now.
+    ///
+    /// Field widths (months/days as i32) sized to keep the enum
+    /// payload at 16 bytes (matches Point's 2×f64). months/days are
+    /// bounded around ±2e9 — 178 M years / 5.8 M years respectively
+    /// — far past anything the user can reasonably need.
+    ///
+    /// **Layout note**: Duration is the LAST variant on purpose.
+    /// serde derives the discriminant from positional order, so any
+    /// new Value variant gets appended to keep older `.kgl` files
+    /// backward-compatible — discriminants 0..=8 stay stable.
+    Duration {
+        months: i32,
+        days: i32,
+        seconds: i64,
+    },
 }
 
 // Implement Eq for Value
@@ -61,7 +85,12 @@ impl PartialOrd for Value {
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        // Helper to get discriminant order
+        // Helper to get discriminant order. Independent of the enum's
+        // serde discriminant — this is the ordering used for
+        // cross-variant comparisons in Ord, where Null sorts first
+        // and Duration last (mirrors Neo4j-ish "values < types <
+        // structured types"). The serde discriminant is positional
+        // (see enum doc).
         fn disc(v: &Value) -> u8 {
             match v {
                 Value::Null => 0,
@@ -71,8 +100,9 @@ impl Ord for Value {
                 Value::Float64(_) => 4,
                 Value::String(_) => 5,
                 Value::DateTime(_) => 6,
-                Value::Point { .. } => 7,
-                Value::NodeRef(_) => 8,
+                Value::Duration { .. } => 7,
+                Value::Point { .. } => 8,
+                Value::NodeRef(_) => 9,
             }
         }
         match (self, other) {
@@ -108,6 +138,18 @@ impl Ord for Value {
                 .unwrap_or(Ordering::Equal)
                 .then(a_lon.partial_cmp(b_lon).unwrap_or(Ordering::Equal)),
             (Value::NodeRef(a), Value::NodeRef(b)) => a.cmp(b),
+            (
+                Value::Duration {
+                    months: am,
+                    days: ad,
+                    seconds: as_,
+                },
+                Value::Duration {
+                    months: bm,
+                    days: bd,
+                    seconds: bs,
+                },
+            ) => am.cmp(bm).then(ad.cmp(bd)).then(as_.cmp(bs)),
             // Cross-variant: order by discriminant
             _ => disc(self).cmp(&disc(other)),
         }
@@ -144,6 +186,15 @@ impl Hash for Value {
             Value::Point { lat, lon } => {
                 lat.to_bits().hash(state);
                 lon.to_bits().hash(state);
+            }
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            } => {
+                months.hash(state);
+                days.hash(state);
+                seconds.hash(state);
             }
             Value::Null => 0.hash(state),
             Value::NodeRef(v) => v.hash(state),
@@ -381,6 +432,9 @@ impl DataFrame {
                     Value::Boolean(_) => Some(ColumnType::Boolean),
                     Value::DateTime(_) => Some(ColumnType::DateTime),
                     Value::Point { .. } => Some(ColumnType::String), // Serialize as WKT
+                    // Durations are query-time-only — never persisted as
+                    // a column (Cluster 2). Serialize via the String column.
+                    Value::Duration { .. } => Some(ColumnType::String),
                     Value::Null | Value::NodeRef(_) => None,
                 };
             }
@@ -520,6 +574,13 @@ impl DataFrame {
             Value::NodeRef(_) => {
                 return Err("Cannot add a constant column with NodeRef value".to_string())
             }
+            Value::Duration { .. } => {
+                return Err(
+                    "Cannot add a constant column with Duration value — durations are \
+                     query-time-only (0.9.0 Cluster 2)"
+                        .to_string(),
+                )
+            }
         };
         self.add_column(name, col_type, data)
     }
@@ -617,6 +678,14 @@ pub fn format_value(value: &Value) -> String {
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "NULL".to_string(),
         Value::NodeRef(idx) => format!("node#{}", idx),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!(
+            "duration(months={}, days={}, seconds={})",
+            months, days, seconds
+        ),
     }
 }
 

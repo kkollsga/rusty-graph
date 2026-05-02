@@ -763,6 +763,8 @@ fn value_type_name(value: &Value) -> String {
         Value::DateTime(_) => "date".to_string(),
         Value::UniqueId(_) => "int".to_string(),
         Value::Point { .. } => "string".to_string(), // serialized as string in CSV
+        // Durations are query-time-only — CSV export serializes as string.
+        Value::Duration { .. } => "string".to_string(),
         Value::Null => "string".to_string(),
         Value::NodeRef(_) => "int".to_string(),
     }
@@ -904,6 +906,11 @@ fn value_to_string(value: &Value) -> String {
         Value::DateTime(dt) => dt.to_string(),
         Value::UniqueId(id) => id.to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!("duration(M={}, D={}, S={})", months, days, seconds),
         Value::Null => String::new(),
         Value::NodeRef(idx) => format!("node#{}", idx),
     }
@@ -933,6 +940,14 @@ fn json_value(value: &Value) -> String {
         Value::DateTime(dt) => json_string(&dt.to_string()),
         Value::UniqueId(id) => id.to_string(),
         Value::Point { lat, lon } => format!("{{\"lat\":{},\"lon\":{}}}", lat, lon),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!(
+            "{{\"months\":{},\"days\":{},\"seconds\":{}}}",
+            months, days, seconds
+        ),
         Value::Null => "null".to_string(),
         Value::NodeRef(idx) => idx.to_string(),
     }

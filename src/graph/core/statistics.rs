@@ -170,6 +170,7 @@ fn calculate_stats_for_nodes(
                             Value::DateTime(_) => "datetime",
                             Value::UniqueId(_) => "unique_id",
                             Value::Point { .. } => "point",
+                            Value::Duration { .. } => "duration",
                             Value::Null => "null",
                             Value::NodeRef(_) => "noderef",
                         });

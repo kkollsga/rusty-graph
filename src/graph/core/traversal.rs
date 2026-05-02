@@ -1577,6 +1577,14 @@ pub fn get_children_properties(
                             Some(Value::Point { lat, lon }) => {
                                 format!("point({}, {})", lat, lon)
                             }
+                            Some(Value::Duration {
+                                months,
+                                days,
+                                seconds,
+                            }) => format!(
+                                "duration(months={}, days={}, seconds={})",
+                                months, days, seconds
+                            ),
                             Some(Value::Null) => "null".to_string(),
                             Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                             None => continue,

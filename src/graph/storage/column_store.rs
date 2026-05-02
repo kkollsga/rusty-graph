@@ -921,6 +921,11 @@ impl ColumnStore {
                 // NodeRef is transient — skip (write as null)
                 buf.push(0);
             }
+            Value::Duration { .. } => {
+                // Durations are query-time-only — never persisted in
+                // the overflow bag (Cluster 2). Skip as null.
+                buf.push(0);
+            }
         }
     }
 

@@ -1320,6 +1320,11 @@ impl KnowledgeGraph {
                         Some(Value::UniqueId(u)) => u.to_string(),
                         Some(Value::DateTime(d)) => d.to_string(),
                         Some(Value::Point { lat, lon }) => format!("({}, {})", lat, lon),
+                        Some(Value::Duration {
+                            months,
+                            days,
+                            seconds,
+                        }) => format!("duration(M={},D={},S={})", months, days, seconds),
                         Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                         Some(Value::Null) | None => "null".to_string(),
                     };

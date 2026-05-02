@@ -340,6 +340,14 @@ fn csv_value(buf: &mut String, val: &Value) {
             use std::fmt::Write;
             let _ = write!(buf, "POINT({} {})", lon, lat);
         }
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => {
+            use std::fmt::Write;
+            let _ = write!(buf, "duration(M={}, D={}, S={})", months, days, seconds);
+        }
         Value::NodeRef(idx) => {
             use std::fmt::Write;
             let _ = write!(buf, "{}", idx);

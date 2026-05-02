@@ -431,6 +431,7 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::DateTime(_) => "datetime",
         Value::UniqueId(_) => "uniqueid",
         Value::Point { .. } => "point",
+        Value::Duration { .. } => "duration",
         Value::Null => "unknown",
         Value::NodeRef(_) => "noderef",
     }
@@ -461,6 +462,11 @@ pub(super) fn value_display_compact(v: &Value) -> String {
         Value::DateTime(d) => d.to_string(),
         Value::UniqueId(u) => u.to_string(),
         Value::Point { lat, lon } => format!("({},{})", lat, lon),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!("dur(M={},D={},S={})", months, days, seconds),
         Value::NodeRef(idx) => format!("node#{}", idx),
         Value::Null => String::new(),
     }

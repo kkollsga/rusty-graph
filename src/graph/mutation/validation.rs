@@ -234,6 +234,7 @@ pub fn get_value_type_name(value: &Value) -> String {
         Value::DateTime(_) => "datetime".to_string(),
         Value::UniqueId(_) => "integer".to_string(),
         Value::Point { .. } => "point".to_string(),
+        Value::Duration { .. } => "duration".to_string(),
         Value::Null => "null".to_string(),
         Value::NodeRef(_) => "noderef".to_string(),
     }

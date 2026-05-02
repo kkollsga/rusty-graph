@@ -52,6 +52,48 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
         // DateTime + Int → DateTime (add days)
         (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d + chrono::Duration::days(*n)),
         (Value::Int64(n), Value::DateTime(d)) => Value::DateTime(*d + chrono::Duration::days(*n)),
+        // 0.9.0 Cluster 2 — DateTime + Duration. Months: chrono crate
+        // doesn't have a "checked add months" helper on NaiveDate, so
+        // approximate with `* 30` — the same approximation
+        // duration({months: 1}) used pre-§3-v2 as a single fold step.
+        // Seconds component is dropped (Value::DateTime is NaiveDate;
+        // sub-day precision deferred to Cluster 1).
+        (
+            Value::DateTime(d),
+            Value::Duration {
+                months,
+                days,
+                seconds: _,
+            },
+        )
+        | (
+            Value::Duration {
+                months,
+                days,
+                seconds: _,
+            },
+            Value::DateTime(d),
+        ) => {
+            let total_days = (*months as i64) * 30 + (*days as i64);
+            Value::DateTime(*d + chrono::Duration::days(total_days))
+        }
+        // Duration + Duration — component-wise sum.
+        (
+            Value::Duration {
+                months: am,
+                days: ad,
+                seconds: as_,
+            },
+            Value::Duration {
+                months: bm,
+                days: bd,
+                seconds: bs,
+            },
+        ) => Value::Duration {
+            months: am + bm,
+            days: ad + bd,
+            seconds: as_ + bs,
+        },
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
         // Null propagation for string ops
         (Value::String(_), Value::Null) | (Value::Null, Value::String(_)) => Value::Null,
@@ -71,8 +113,41 @@ pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x - y),
         // DateTime - Int → DateTime (subtract days)
         (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d - chrono::Duration::days(*n)),
-        // DateTime - DateTime → Int (days between)
-        (Value::DateTime(a), Value::DateTime(b)) => Value::Int64((*a - *b).num_days()),
+        // DateTime - DateTime → Duration (0.9.0 Cluster 2 — was Int64 days).
+        (Value::DateTime(a), Value::DateTime(b)) => Value::Duration {
+            months: 0,
+            days: (*a - *b).num_days() as i32,
+            seconds: 0,
+        },
+        // DateTime - Duration → DateTime (component-wise subtraction).
+        (
+            Value::DateTime(d),
+            Value::Duration {
+                months,
+                days,
+                seconds: _,
+            },
+        ) => {
+            let total_days = (*months as i64) * 30 + (*days as i64);
+            Value::DateTime(*d - chrono::Duration::days(total_days))
+        }
+        // Duration - Duration → Duration.
+        (
+            Value::Duration {
+                months: am,
+                days: ad,
+                seconds: as_,
+            },
+            Value::Duration {
+                months: bm,
+                days: bd,
+                seconds: bs,
+            },
+        ) => Value::Duration {
+            months: am - bm,
+            days: ad - bd,
+            seconds: as_ - bs,
+        },
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x - y),
             _ => Value::Null,
@@ -196,6 +271,11 @@ pub fn format_value_compact(val: &Value) -> String {
         Value::Boolean(v) => v.to_string(),
         Value::DateTime(v) => v.format("%Y-%m-%d").to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!("duration(M={}, D={}, S={})", months, days, seconds),
         Value::Null => "null".to_string(),
         Value::NodeRef(idx) => format!("node#{}", idx),
     }
@@ -231,6 +311,11 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         Value::Boolean(v) => write!(buf, "{}", v).unwrap(),
         Value::DateTime(v) => write!(buf, "{}", v.format("%Y-%m-%d")).unwrap(),
         Value::Point { lat, lon } => write!(buf, "point({}, {})", lat, lon).unwrap(),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => write!(buf, "duration(M={}, D={}, S={})", months, days, seconds).unwrap(),
         Value::Null => buf.push_str("null"),
         Value::NodeRef(idx) => write!(buf, "node#{}", idx).unwrap(),
     }
