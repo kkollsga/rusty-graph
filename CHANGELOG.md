@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-05-02
+
+### Breaking change in 0.9.0 (Rust crate API) — late-breaking notice
+
+`MemoryGraph` and `MappedGraph` no longer implement
+`std::ops::DerefMut` to their inner `StableDiGraph`. Code that
+mutated through auto-deref now fails to compile and must use one
+of:
+
+- the explicit accessor: `g.inner_mut().add_node(data)`, OR
+- trait dispatch: `use kglite::graph::storage::GraphWrite;
+  g.add_node(data)`.
+
+**Why**: auto-deref-via-DerefMut shadowed `GraphWrite::add_node`
+(and peer mutation methods), causing calls to bypass
+`MappedGraph::invalidate_property_index()` that the trait impl
+runs first. Removing `DerefMut` converts a silent stale-index bug
+into a compile-time error. Read-only `Deref` is retained — read
+calls (`g.node_count()`, etc.) are unchanged.
+
+**Python users**: no impact. The PyO3 boundary is unchanged.
+
+This was already in 0.9.0 (commit `bcb0bb7`, "chore(storage): drop
+DerefMut on Memory/MappedGraph") under "Hygiene & test coverage" —
+this entry simply re-flags it for downstream Rust embedders who
+might miss it under that subhead.
+
+### Documentation
+
+- **CYPHER.md** gained a "Duration semantics" subsection explaining
+  the calendar-vs-clock component split (months/years stay
+  separate from days/hours/minutes/seconds), with worked examples
+  for `duration.between()` and `DateTime ± Duration`. Postgres
+  `interval` users will want this. Pinned by an anchor test
+  (`test_duration_between_cypher_md_example`).
+
 ## [0.9.0] — 2026-05-02
 
 ### Cypher dialect — gate items
