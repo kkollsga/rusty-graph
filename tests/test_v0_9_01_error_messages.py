@@ -16,10 +16,11 @@ Post-§1 baseline (this iteration):
    queries. Future unimplemented features will pick up the
    `intent_level_rewrite` machinery in `parser/mod.rs`.
 
-Position estimation is approximate (token-counting via re-walk of
-the input string, not byte-precise offsets from the tokenizer).
-Tracked as v2 follow-up — the user can locate the failing area to
-within a few characters, which is the UX win that mattered.
+Positions are byte-precise as of 0.9.0 Cluster 3 — the tokenizer
+attaches a char offset to every token, the parser threads them
+through, and `format_parse_error` walks `input.chars()` to convert
+to (line, col) on the error path. Earlier shipped variant used a
+re-walk estimator; that's gone.
 """
 
 from __future__ import annotations

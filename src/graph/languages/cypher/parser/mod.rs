@@ -258,49 +258,46 @@ impl CypherParser {
 ///
 /// On error, enriches the bare token-level message with a source
 /// position — `line N col M` plus an excerpt of the source with a
-/// caret pointing at the failing position. 0.9.0 §1 baseline UX:
-/// users distinguish "you typo'd" from "feature not yet implemented"
-/// by reading the error, not by re-running with `print()`s.
+/// caret pointing at the failing position. 0.9.0 §1 / Cluster 3
+/// baseline UX: users distinguish "you typo'd" from "feature not
+/// yet implemented" by reading the error, not by re-running with
+/// `print()`s.
 ///
-/// Position is approximate when the underlying tokenizer doesn't
-/// report char offsets (the current case). The estimator
-/// reconstructs token boundaries by re-walking the input and counting
-/// tokens up to `parser.pos`. Good enough for "where in the source",
-/// not byte-precise.
+/// Position is **byte-precise** — the tokenizer attaches a char
+/// offset to every token, the parser threads them through, and
+/// `format_parse_error` walks `input.chars()` to convert to
+/// (line, col).
 pub fn parse_cypher(input: &str) -> Result<CypherQuery, String> {
-    let tokens = super::tokenizer::tokenize_cypher(input)?;
+    let positioned = super::tokenizer::tokenize_cypher_with_positions(input)?;
+    let (tokens, positions): (Vec<_>, Vec<_>) = positioned.into_iter().unzip();
     let mut parser = CypherParser::new(tokens);
     match parser.parse_query() {
         Ok(q) => Ok(q),
-        Err(e) => Err(format_parse_error(input, &e, parser.pos)),
+        Err(e) => {
+            // Failing char offset = position of token at parser.pos,
+            // or end-of-input if the parser ran past the end.
+            let char_offset = positions
+                .get(parser.pos)
+                .copied()
+                .unwrap_or_else(|| input.chars().count());
+            Err(format_parse_error(input, &e, char_offset))
+        }
     }
 }
 
-/// Estimate the (line, col) of the `target_token`-th non-whitespace
-/// token in `input`. Returns 1-based line and col. Falls back to
-/// (line of last newline + 1, 1) when the parser ran past the end
-/// (`target_token >= total tokens`).
-fn estimate_token_position(input: &str, target_token: usize) -> (usize, usize) {
-    let mut tokens_seen = 0usize;
+/// Convert a char offset (index into `input.chars().collect()`)
+/// to a 1-based (line, col) pair by walking the input. Used on
+/// the error path, so iteration cost is fine.
+fn char_offset_to_line_col(input: &str, target_char: usize) -> (usize, usize) {
     let mut line = 1usize;
     let mut col = 1usize;
-    let mut in_token = false;
-
-    for ch in input.chars() {
-        if !ch.is_ascii_whitespace() && !in_token {
-            if tokens_seen == target_token {
-                return (line, col);
-            }
-            tokens_seen += 1;
-            in_token = true;
+    for (idx, ch) in input.chars().enumerate() {
+        if idx == target_char {
+            return (line, col);
         }
         if ch == '\n' {
             line += 1;
             col = 1;
-            in_token = false;
-        } else if ch.is_ascii_whitespace() {
-            col += 1;
-            in_token = false;
         } else {
             col += 1;
         }
@@ -322,9 +319,9 @@ fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
     None
 }
 
-fn format_parse_error(input: &str, err: &str, parser_pos: usize) -> String {
+fn format_parse_error(input: &str, err: &str, char_offset: usize) -> String {
     let intent = intent_level_rewrite(input, err);
-    let (line, col) = estimate_token_position(input, parser_pos);
+    let (line, col) = char_offset_to_line_col(input, char_offset);
 
     // Build a single-line excerpt of the offending line + a caret
     // marker. Avoids dumping the whole multi-line query.

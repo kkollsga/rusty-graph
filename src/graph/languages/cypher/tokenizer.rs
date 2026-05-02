@@ -109,14 +109,39 @@ pub enum CypherToken {
 // Tokenizer
 // ============================================================================
 
+/// Position-stripping wrapper kept for the tokenizer's own tests
+/// (which assert on `Vec<CypherToken>` directly). Production code
+/// goes through [`tokenize_cypher_with_positions`] via
+/// `parse_cypher`. 0.9.0 Cluster 3.
+#[cfg(test)]
 pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
-    let mut tokens = Vec::new();
+    Ok(tokenize_cypher_with_positions(input)?
+        .into_iter()
+        .map(|(tok, _pos)| tok)
+        .collect())
+}
+
+/// Same as [`tokenize_cypher`] but returns the **char-position** at
+/// the start of each token, alongside the token. 0.9.0 Cluster 3 — the
+/// parser uses this to format byte-precise `(line, col)` in error
+/// messages instead of the prior approximate token re-walk.
+///
+/// Char-position is the index into `input.chars().collect()` —
+/// converted to byte offset / line:col by the consumer on error
+/// (rare path; not worth a parallel byte-offset table for the hot
+/// path).
+pub fn tokenize_cypher_with_positions(input: &str) -> Result<Vec<(CypherToken, usize)>, String> {
+    let mut tokens: Vec<(CypherToken, usize)> = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
         let ch = chars[i];
+        // Position at the start of this token. Captured once per
+        // loop iteration; tokens.push(...) callers below pair their
+        // CypherToken with `start`. (0.9.0 Cluster 3.)
+        let start = i;
 
         // Skip whitespace
         if ch.is_ascii_whitespace() {
@@ -134,72 +159,72 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
 
         match ch {
             '(' => {
-                tokens.push(CypherToken::LParen);
+                tokens.push((CypherToken::LParen, start));
                 i += 1;
             }
             ')' => {
-                tokens.push(CypherToken::RParen);
+                tokens.push((CypherToken::RParen, start));
                 i += 1;
             }
             '[' => {
-                tokens.push(CypherToken::LBracket);
+                tokens.push((CypherToken::LBracket, start));
                 i += 1;
             }
             ']' => {
-                tokens.push(CypherToken::RBracket);
+                tokens.push((CypherToken::RBracket, start));
                 i += 1;
             }
             '{' => {
-                tokens.push(CypherToken::LBrace);
+                tokens.push((CypherToken::LBrace, start));
                 i += 1;
             }
             '}' => {
-                tokens.push(CypherToken::RBrace);
+                tokens.push((CypherToken::RBrace, start));
                 i += 1;
             }
             ':' => {
-                tokens.push(CypherToken::Colon);
+                tokens.push((CypherToken::Colon, start));
                 i += 1;
             }
             ',' => {
-                tokens.push(CypherToken::Comma);
+                tokens.push((CypherToken::Comma, start));
                 i += 1;
             }
             ';' => {
-                tokens.push(CypherToken::Semicolon);
+                tokens.push((CypherToken::Semicolon, start));
                 i += 1;
             }
             '*' => {
-                tokens.push(CypherToken::Star);
+                tokens.push((CypherToken::Star, start));
                 i += 1;
             }
             '+' => {
-                tokens.push(CypherToken::Plus);
+                tokens.push((CypherToken::Plus, start));
                 i += 1;
             }
             '/' => {
-                tokens.push(CypherToken::Slash);
+                tokens.push((CypherToken::Slash, start));
                 i += 1;
             }
             '%' => {
-                tokens.push(CypherToken::Percent);
+                tokens.push((CypherToken::Percent, start));
                 i += 1;
             }
             '|' => {
                 if i + 1 < len && chars[i + 1] == '|' {
-                    tokens.push(CypherToken::DoublePipe);
+                    tokens.push((CypherToken::DoublePipe, start));
                     i += 2;
                 } else {
-                    tokens.push(CypherToken::Pipe);
+                    tokens.push((CypherToken::Pipe, start));
                     i += 1;
                 }
             }
             '=' => {
                 if i + 1 < chars.len() && chars[i + 1] == '~' {
-                    tokens.push(CypherToken::RegexMatch);
+                    tokens.push((CypherToken::RegexMatch, start));
                     i += 2;
                 } else {
-                    tokens.push(CypherToken::Equals);
+                    tokens.push((CypherToken::Equals, start));
                     i += 1;
                 }
             }
@@ -207,36 +232,36 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
             '-' => {
                 // Could be dash (edge syntax) or negative number in some contexts,
                 // but we always tokenize as Dash and let the parser handle unary negation
-                tokens.push(CypherToken::Dash);
+                tokens.push((CypherToken::Dash, start));
                 i += 1;
             }
 
             '<' => {
                 if i + 1 < len && chars[i + 1] == '>' {
-                    tokens.push(CypherToken::NotEquals);
+                    tokens.push((CypherToken::NotEquals, start));
                     i += 2;
                 } else if i + 1 < len && chars[i + 1] == '=' {
-                    tokens.push(CypherToken::LessThanEquals);
+                    tokens.push((CypherToken::LessThanEquals, start));
                     i += 2;
                 } else {
-                    tokens.push(CypherToken::LessThan);
+                    tokens.push((CypherToken::LessThan, start));
                     i += 1;
                 }
             }
 
             '>' => {
                 if i + 1 < len && chars[i + 1] == '=' {
-                    tokens.push(CypherToken::GreaterThanEquals);
+                    tokens.push((CypherToken::GreaterThanEquals, start));
                     i += 2;
                 } else {
-                    tokens.push(CypherToken::GreaterThan);
+                    tokens.push((CypherToken::GreaterThan, start));
                     i += 1;
                 }
             }
 
             '!' => {
                 if i + 1 < len && chars[i + 1] == '=' {
-                    tokens.push(CypherToken::NotEquals);
+                    tokens.push((CypherToken::NotEquals, start));
                     i += 2;
                 } else {
                     return Err(format!(
@@ -248,7 +273,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
 
             '.' => {
                 if i + 1 < len && chars[i + 1] == '.' {
-                    tokens.push(CypherToken::DotDot);
+                    tokens.push((CypherToken::DotDot, start));
                     i += 2;
                 } else if i + 1 < len && chars[i + 1].is_ascii_digit() {
                     // Float starting with dot: .5
@@ -261,9 +286,9 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                     let f: f64 = num_str
                         .parse()
                         .map_err(|_| format!("Invalid float: {}", num_str))?;
-                    tokens.push(CypherToken::FloatLit(f));
+                    tokens.push((CypherToken::FloatLit(f), start));
                 } else {
-                    tokens.push(CypherToken::Dot);
+                    tokens.push((CypherToken::Dot, start));
                     i += 1;
                 }
             }
@@ -299,7 +324,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 if !closed {
                     return Err(format!("Unterminated string literal: {}{}", quote, s));
                 }
-                tokens.push(CypherToken::StringLit(s));
+                tokens.push((CypherToken::StringLit(s), start));
             }
 
             // Numbers
@@ -336,12 +361,12 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                     let f: f64 = num_str
                         .parse()
                         .map_err(|_| format!("Invalid float: {}", num_str))?;
-                    tokens.push(CypherToken::FloatLit(f));
+                    tokens.push((CypherToken::FloatLit(f), start));
                 } else {
                     let n: i64 = num_str
                         .parse()
                         .map_err(|_| format!("Invalid integer: {}", num_str))?;
-                    tokens.push(CypherToken::IntLit(n));
+                    tokens.push((CypherToken::IntLit(n), start));
                 }
             }
 
@@ -359,7 +384,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                     ));
                 }
                 let name: String = chars[start..i].iter().collect();
-                tokens.push(CypherToken::Parameter(name));
+                tokens.push((CypherToken::Parameter(name), start));
             }
 
             // Identifiers and keywords
@@ -369,7 +394,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                tokens.push(identifier_to_token(ident));
+                tokens.push((identifier_to_token(ident), start));
             }
 
             // Backtick-quoted identifiers: `My Identifier`
@@ -385,7 +410,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 }
                 let ident: String = chars[start..i].iter().collect();
                 i += 1; // consume closing backtick
-                tokens.push(CypherToken::Identifier(ident));
+                tokens.push((CypherToken::Identifier(ident), start));
             }
 
             _ => {
