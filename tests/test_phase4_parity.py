@@ -145,7 +145,14 @@ GOLDEN_V3_DIGEST = "03a40002568ceea467914e4b0b344a829ff9236ae004fe7d93181dc6f371
 # clear this set.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Pre-0.9.0 digest captured during the Cluster-2 sweep when the
+        # version was still 0.8.41.
         "640c1736230d54084ce13592d0f9c6bee023d5c64d3d01b3a44d5ab0d9ef1343",
+        # 0.9.0 release digest. Version string is embedded in the .kgl
+        # header, so every version bump shifts this. Format itself
+        # unchanged (CURRENT_FORMAT_VERSION still 3); old .kgl files
+        # still load.
+        "68af967421fa01d7db6afd4bf4efb9baa36c11bf269b42393430420ce9e7f494",
     }
 )
 

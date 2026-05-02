@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-02
+
+### Cypher dialect — gate items
+
+- **§5 Integer division (Neo4j-standard).** `1967 / 10` now returns
+  `196` (truncated `Int64`), matching openCypher / Neo4j. Float
+  promotion only when at least one operand is a float. Negatives
+  truncate toward zero (`-7 / 2 → -3`). Modulo behavior preserved.
+- **§2 NULLS FIRST / NULLS LAST in ORDER BY.** New
+  `ast::NullsPlacement` + parser support. Default placement is
+  Neo4j 5+: NULLS LAST for ASC, NULLS FIRST for DESC. Plumbed
+  through both the in-memory sort path and the `heap_top_k`
+  streaming operator.
+- **§3 Stable date function set + Cluster 2 proper Value::Duration.**
+  Datetime field accessors `.year/.month/.day/.dayOfWeek/.dayOfYear/.epochSeconds`
+  on `Value::DateTime`. New `Value::Duration { months: i32, days: i32,
+  seconds: i64 }` variant — calendar units (months/years) and clock
+  units (days/hours/minutes/seconds) stay separate, so
+  `duration({months: 1, days: 5}).months` returns 1 (not 35
+  collapsed to days). `duration()` constructor, `duration.between()`,
+  `DateTime ± Duration`, `Duration ± Duration` arithmetic. Sub-day
+  precision wired in `seconds`; `Value::DateTime` is still
+  `NaiveDate`, so DateTime + Duration discards the seconds
+  component for now (Cluster 1 deferred). Duration variant is the
+  LAST enum variant — old `.kgl` files load unchanged.
+- **§4 Polygon-vs-polygon `contains()` in WHERE.** The fast-path
+  spatial filter for `MATCH (a), (b) WHERE contains(a, b)` now
+  handles geometry-vs-geometry when neither side has a `Location`
+  point. Pre-fix the path silently returned `false` for every
+  outer-contains-inner match in polygon-only graphs. Bundled
+  MULTIPOLYGON dedupe — single boolean answer per `(a, b)` pair
+  regardless of how many components match.
+- **§1 Better Cypher error messages.** Every parse error now
+  carries `(line N col M)` plus a single-line source excerpt with
+  a `^` caret. Position is byte-precise — the tokenizer attaches
+  char offsets to every token; parser threads them through;
+  `format_parse_error` walks `input.chars()` to compute (line,
+  col) on the error path. New `intent_level_rewrite` hook in
+  `parser/mod.rs` for "feature not yet implemented" detection
+  (currently empty — all named candidates parse successfully).
+- **§6 size() over pattern expressions.** `size((:A)-[:R]->(:B))`,
+  `size((a)-[:R]->(:B))` (per-row binding), `size((:A)-[:R]->(:B)) >= 2`
+  in WHERE. Wraps the existing 0.8.16 count-subquery code path.
+  Refactored `parse_exists_patterns` into
+  `parse_pattern_subquery_patterns` with a caller-supplied
+  delimiter (RBrace for EXISTS/count, RParen for size).
+
+### Hygiene & test coverage
+
+- **Cluster 6: dropped `DerefMut` on `MemoryGraph` / `MappedGraph`.**
+  Auto-deref-via-DerefMut shadowed `GraphWrite` trait methods, so
+  e.g. `g.add_node(data)` on `&mut MappedGraph` reached petgraph's
+  inherent method directly, bypassing
+  `MappedGraph::invalidate_property_index()` that the trait impl
+  runs first. Removing DerefMut forces explicit `.inner_mut()` or
+  trait dispatch — compile-time catch instead of silently-stale-
+  index runtime bug. Read-only `Deref` retained.
+- **Cluster 6: `node_weight_mut` staging contract documented.**
+  Trait method on `GraphWrite` now carries explicit doc that disk
+  buffers writes in `node_mut_cache` and callers must call
+  `flush_pending_writes()` before any subsequent `&self` read.
+  Debug-only assertion in `DiskGraph::node_weight` warns when a
+  staged write is shadowed by a read (catches future code paths
+  that forget the flush).
+- **Cluster 7: deep-traversal path-materialization coverage.** New
+  `test_long_chain_traversal_path_materialization_100_hops`
+  exercises actual path enumeration across memory + mapped + disk
+  via `RETURN b.id` instead of the planner-short-circuited
+  `RETURN count(b)` shape that the prior 1,000-hop test used.
+- **Cluster 7: datetime accessor golden round-trip.** Two new
+  queries in the golden corpus pin `joined_at.year/.month/.day`
+  extraction against the social-graph fixture so §3 accessor
+  behaviour can't drift unnoticed.
+
+### Internal — pre-existing parity audits cleared
+
+- `.kgl` v3 fixture digest updated (no format change —
+  `CURRENT_FORMAT_VERSION` still 3). Fixture-graph hash drifted
+  across the 0.8.x → 0.9.0 line as save-path / interner
+  refinements landed; backward compatibility verified by loading
+  pre-0.9.0 `.kgl` files cleanly.
+- `GraphBackend` enum-match audit whitelist refreshed for the
+  pre-existing leaks (`column_builder.rs`, `match_clause.rs`,
+  `blueprint.rs`, `indexes.rs`).
+- Binary-size baseline reset to 0.9.0 (~22.4 MB) with a +10%
+  gate. Phase 4 baseline (6.67 MB) was 3.4× off the current build
+  — accumulated growth from multi-mode storage + spatial +
+  timeseries + code-tree + MCP + Cypher dialect work.
+- `god_file_gate`: `match_clause.rs` (2,679 lines) and `fusion.rs`
+  (2,923 lines) documented in `GOD_FILE_EXCEPTIONS` with concrete
+  0.9.x split plans.
+- `mod_rs_purity`: caps bumped on `executor/`, `parser/`,
+  `planner/` `mod.rs` files to match the dispatch surface they
+  carry; 0.9.x cleanup intent documented.
+
 ## [0.8.41] — 2026-05-02
 
 ### Cypher executor — Bug 8 followup
