@@ -35,6 +35,11 @@ bench-save:
 bench-compare:
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare
 
+## Compare against the v0.9.0 baseline and fail on >5% mean regression (release build).
+## Run after each 0.9.0 gate-item lands to enforce the no-regression rule.
+bench-check-v090:
+	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare=v0_9_0_baseline --benchmark-compare-fail=mean:5%
+
 ## Run bug-path performance benchmarks (pre/post bugfix baseline)
 bench-bugs:
 	$(ACTIVATE) && python bench/benchmark_bugs.py
