@@ -57,6 +57,19 @@ CYPHER_QUERIES: list[tuple[str, str]] = [
         "RETURN c.cid AS cid, count(p) AS hires "
         "ORDER BY hires DESC, cid ASC LIMIT 10",
     ),
+    # 0.9.0 §3 — datetime field accessors. Pin year/month/day
+    # extraction from `joined_at` against the golden fixture so the
+    # accessors don't drift across releases.
+    (
+        "joined_year_distribution",
+        "MATCH (p:Person) WHERE p.joined_at IS NOT NULL RETURN p.joined_at.year AS y, count(p) AS n ORDER BY y, n",
+    ),
+    (
+        "earliest_joiners_by_month",
+        "MATCH (p:Person) WHERE p.joined_at IS NOT NULL "
+        "RETURN p.id AS id, p.joined_at.year AS y, p.joined_at.month AS m, p.joined_at.day AS d "
+        "ORDER BY p.joined_at, p.id ASC LIMIT 10",
+    ),
 ]
 
 # find(name, node_type=...) — code-entity-only in this build; always empty

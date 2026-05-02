@@ -1,0 +1,65 @@
+{
+  "query": "MATCH (p:Person) WHERE p.joined_at IS NOT NULL RETURN p.id AS id, p.joined_at.year AS y, p.joined_at.month AS m, p.joined_at.day AS d ORDER BY p.joined_at, p.id ASC LIMIT 10",
+  "rows": [
+    {
+      "d": 10,
+      "id": 460,
+      "m": 1,
+      "y": 2020
+    },
+    {
+      "d": 14,
+      "id": 3,
+      "m": 1,
+      "y": 2020
+    },
+    {
+      "d": 14,
+      "id": 437,
+      "m": 1,
+      "y": 2020
+    },
+    {
+      "d": 2,
+      "id": 383,
+      "m": 2,
+      "y": 2020
+    },
+    {
+      "d": 2,
+      "id": 420,
+      "m": 2,
+      "y": 2020
+    },
+    {
+      "d": 20,
+      "id": 58,
+      "m": 1,
+      "y": 2020
+    },
+    {
+      "d": 20,
+      "id": 79,
+      "m": 2,
+      "y": 2020
+    },
+    {
+      "d": 3,
+      "id": 492,
+      "m": 2,
+      "y": 2020
+    },
+    {
+      "d": 8,
+      "id": 231,
+      "m": 2,
+      "y": 2020
+    },
+    {
+      "d": 8,
+      "id": 270,
+      "m": 2,
+      "y": 2020
+    }
+  ]
+}

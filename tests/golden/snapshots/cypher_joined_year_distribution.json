@@ -1,0 +1,25 @@
+{
+  "query": "MATCH (p:Person) WHERE p.joined_at IS NOT NULL RETURN p.joined_at.year AS y, count(p) AS n ORDER BY y, n",
+  "rows": [
+    {
+      "n": 107,
+      "y": 2022
+    },
+    {
+      "n": 119,
+      "y": 2020
+    },
+    {
+      "n": 127,
+      "y": 2023
+    },
+    {
+      "n": 130,
+      "y": 2021
+    },
+    {
+      "n": 17,
+      "y": 2024
+    }
+  ]
+}

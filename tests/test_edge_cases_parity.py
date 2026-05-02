@@ -123,6 +123,50 @@ def test_long_chain_traversal_1000_hops(mode, tmp_path):
     assert rows == [{"c": 1000}]
 
 
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_long_chain_traversal_path_materialization_100_hops(mode, tmp_path):
+    """100-hop chain: variable-length path returns the right number of
+    individual rows (one per matched terminal node), not just `count(b)`.
+    Closes the test-coverage gap flagged by 0.9.0 readiness Cluster 7 —
+    `count(b)` was being short-circuited by the planner, so the
+    1,000-hop test above didn't actually exercise enumeration.
+
+    Capped at 100 hops here because path-materialisation is O(depth)
+    per row vs O(1) for the count short-circuit; 1,000 hops would
+    timeout on disk."""
+    kg = _kg_for(mode, tmp_path)
+    n = 101  # 100 hops between 101 nodes
+    kg.add_nodes(
+        pd.DataFrame({"id": list(range(n)), "name": [f"P{i}" for i in range(n)]}),
+        "Person",
+        "id",
+        "name",
+    )
+    kg.add_connections(
+        pd.DataFrame(
+            {
+                "s": list(range(n - 1)),
+                "t": list(range(1, n)),
+                "type": ["KNOWS"] * (n - 1),
+            }
+        ),
+        "KNOWS",
+        "Person",
+        "s",
+        "Person",
+        "t",
+    )
+    # Per-row enumeration — one row per (a, b) match. With a 100-hop
+    # cap, b ranges over P1..P100 (100 distinct ends). The parity
+    # helper `_rows()` re-sorts by repr() so we assert on the SET of
+    # bids (size + membership), not on ordering — `ORDER BY bid` in
+    # Cypher returns numeric order, but the harness re-orders
+    # lexicographically.
+    raw = list(kg.cypher("MATCH (a:Person {id: 0})-[*..100]->(b) RETURN b.id AS bid"))
+    bids = sorted(r["bid"] for r in raw)
+    assert bids == list(range(1, n)), f"{mode}: missing or extra paths"
+
+
 # ─── 4. Unicode round-trip ──────────────────────────────────────────────────
 
 
