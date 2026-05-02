@@ -79,21 +79,57 @@ pub fn from_blueprint_rust(
 
                 if verbose {
                     let n_total: usize = report.nodes_by_type.values().sum();
-                    let e_total: usize = report.edges_by_type.values().sum();
+                    // 0.9.1 #1: report.edges_by_type counts ATTEMPTED
+                    // edge writes from the blueprint pipeline. With the
+                    // default Update conflict handling, each duplicate
+                    // input row increments the counter but only one
+                    // edge ends up in the graph — so the report total
+                    // overcounts vs `MATCH ()-[r]->() RETURN count(r)`.
+                    // Query the actual graph edge counts here so the
+                    // verbose log matches reality. Difference is
+                    // surfaced as "(N input rows, M deduped)" when
+                    // non-zero.
+                    let actual_counts = graph.get_edge_type_counts();
+                    let e_actual: usize = actual_counts.values().sum();
+                    let e_input: usize = report.edges_by_type.values().sum();
                     println!("Loading blueprint...");
                     for (t, n) in &report.nodes_by_type {
                         println!("  {}: {} nodes", t, n);
                     }
-                    for (t, n) in &report.edges_by_type {
-                        println!("  [{}]: {} edges", t, n);
+                    for (t, n_input) in &report.edges_by_type {
+                        let n_actual = actual_counts.get(t).copied().unwrap_or(0);
+                        if n_actual == *n_input {
+                            println!("  [{}]: {} edges", t, n_actual);
+                        } else {
+                            println!(
+                                "  [{}]: {} edges ({} input rows, {} deduped)",
+                                t,
+                                n_actual,
+                                n_input,
+                                n_input.saturating_sub(n_actual),
+                            );
+                        }
                     }
-                    println!(
-                        "Loaded {} nodes ({} types), {} edges ({} types)",
-                        n_total,
-                        report.nodes_by_type.len(),
-                        e_total,
-                        report.edges_by_type.len(),
-                    );
+                    if e_actual == e_input {
+                        println!(
+                            "Loaded {} nodes ({} types), {} edges ({} types)",
+                            n_total,
+                            report.nodes_by_type.len(),
+                            e_actual,
+                            report.edges_by_type.len(),
+                        );
+                    } else {
+                        println!(
+                            "Loaded {} nodes ({} types), {} edges ({} types) — \
+                             {} input rows, {} deduped",
+                            n_total,
+                            report.nodes_by_type.len(),
+                            e_actual,
+                            report.edges_by_type.len(),
+                            e_input,
+                            e_input.saturating_sub(e_actual),
+                        );
+                    }
                 }
                 if !report.warnings.is_empty() {
                     if verbose {

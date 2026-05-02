@@ -99,12 +99,36 @@ class TestBasicLoading:
         edges = [(r["src"], r["tgt"]) for r in result]
         assert edges == [("Alice", "Bob"), ("Bob", "Charlie")]
 
-    def test_verbose_mode(self, tmp_path, capsys):
+    def test_verbose_mode(self, tmp_path, capfd):
+        # capfd captures file-descriptor-level stdout so Rust println!
+        # output reaches the buffer (capsys would only see Python-side
+        # writes).
         bp_path = _minimal_blueprint(tmp_path)
         from_blueprint(bp_path, save=False, verbose=True)
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "Loading blueprint" in captured.out
         assert "Person" in captured.out
+
+    def test_verbose_edge_count_matches_graph_truth(self, tmp_path, capfd):
+        """0.9.1 #1 — the verbose log must report the actual graph
+        edge count (queryable via `MATCH ()-[r]->() RETURN count(r)`),
+        not the accumulated input-row count from the blueprint
+        pipeline. The two diverge when the blueprint touches the same
+        edge type from multiple sections (default Update conflict
+        handling collapses repeats), or in any future scenario where
+        the report's accumulated count overcounts vs the graph."""
+        bp_path = _minimal_blueprint(tmp_path)
+        graph = from_blueprint(bp_path, save=False, verbose=True)
+        captured = capfd.readouterr()
+
+        # Ground truth from the graph
+        rows = list(graph.cypher("MATCH ()-[r:KNOWS]->() RETURN count(r) AS n"))
+        graph_count = rows[0]["n"]
+
+        # Verbose log must report exactly graph_count under [KNOWS]
+        assert f"[KNOWS]: {graph_count} edges" in captured.out
+        # And the summary line must also report graph_count
+        assert f"{graph_count} edges (1 types)" in captured.out
 
     def test_top_level_import(self):
         """Verify from_blueprint is importable from kglite top level."""
