@@ -254,11 +254,92 @@ impl CypherParser {
 // Public API
 // ============================================================================
 
-/// Parse a Cypher query string into a CypherQuery AST
+/// Parse a Cypher query string into a CypherQuery AST.
+///
+/// On error, enriches the bare token-level message with a source
+/// position — `line N col M` plus an excerpt of the source with a
+/// caret pointing at the failing position. 0.9.0 §1 baseline UX:
+/// users distinguish "you typo'd" from "feature not yet implemented"
+/// by reading the error, not by re-running with `print()`s.
+///
+/// Position is approximate when the underlying tokenizer doesn't
+/// report char offsets (the current case). The estimator
+/// reconstructs token boundaries by re-walking the input and counting
+/// tokens up to `parser.pos`. Good enough for "where in the source",
+/// not byte-precise.
 pub fn parse_cypher(input: &str) -> Result<CypherQuery, String> {
     let tokens = super::tokenizer::tokenize_cypher(input)?;
     let mut parser = CypherParser::new(tokens);
-    parser.parse_query()
+    match parser.parse_query() {
+        Ok(q) => Ok(q),
+        Err(e) => Err(format_parse_error(input, &e, parser.pos)),
+    }
+}
+
+/// Estimate the (line, col) of the `target_token`-th non-whitespace
+/// token in `input`. Returns 1-based line and col. Falls back to
+/// (line of last newline + 1, 1) when the parser ran past the end
+/// (`target_token >= total tokens`).
+fn estimate_token_position(input: &str, target_token: usize) -> (usize, usize) {
+    let mut tokens_seen = 0usize;
+    let mut line = 1usize;
+    let mut col = 1usize;
+    let mut in_token = false;
+
+    for ch in input.chars() {
+        if !ch.is_ascii_whitespace() && !in_token {
+            if tokens_seen == target_token {
+                return (line, col);
+            }
+            tokens_seen += 1;
+            in_token = true;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+            in_token = false;
+        } else if ch.is_ascii_whitespace() {
+            col += 1;
+            in_token = false;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Recognize a small set of "feature not yet implemented" sequences
+/// and rewrite the parser error into an intent-level message.
+/// Conservative: only reframes when we're confident the original
+/// query targeted an unimplemented feature, otherwise returns None.
+///
+/// Currently a stub — no stable not-yet-implemented features to
+/// detect (the named candidates — NULLS, datetime-accessor,
+/// variable-length paths — all parse without error today). New §X
+/// work plugs in detection here as features land or ship as
+/// `not-yet-implemented`.
+fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
+    None
+}
+
+fn format_parse_error(input: &str, err: &str, parser_pos: usize) -> String {
+    let intent = intent_level_rewrite(input, err);
+    let (line, col) = estimate_token_position(input, parser_pos);
+
+    // Build a single-line excerpt of the offending line + a caret
+    // marker. Avoids dumping the whole multi-line query.
+    let lines: Vec<&str> = input.lines().collect();
+    let excerpt = if line >= 1 && line <= lines.len() {
+        let src_line = lines[line - 1];
+        let caret_col = col.saturating_sub(1).min(src_line.len());
+        let caret = format!("{:width$}^", "", width = caret_col);
+        format!("\n   {}\n   {}", src_line, caret)
+    } else {
+        String::new()
+    };
+
+    let body = intent.as_deref().unwrap_or(err);
+    format!("{} (line {} col {}){}", body, line, col, excerpt)
 }
 
 // ============================================================================

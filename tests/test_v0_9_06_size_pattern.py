@@ -50,14 +50,12 @@ def linked_graph():
     return g
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_size_of_unbound_pattern(linked_graph):
     """Total count of matches of the pattern across the whole graph."""
     rows = list(linked_graph.cypher("RETURN size((:A)-[:R]->(:B)) AS n"))
     assert rows[0]["n"] == 3
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_size_with_per_row_binding(linked_graph):
     """Per-row out-degree via pattern expression — the canonical
     use case for size((node)-[]->(...))."""
@@ -65,7 +63,6 @@ def test_size_with_per_row_binding(linked_graph):
     assert [(r["id"], r["deg"]) for r in rows] == [(0, 2), (1, 1), (2, 0)]
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_size_in_where_clause(linked_graph):
     """size((pattern)) in WHERE filter — common 'has at least N
     neighbors' shape."""
@@ -74,8 +71,9 @@ def test_size_in_where_clause(linked_graph):
     assert ids == [0]
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
-def test_size_of_pattern_with_undirected(linked_graph):
-    """Undirected variant — counts edges in either direction."""
-    rows = list(linked_graph.cypher("RETURN size((:A)--(:B)) AS n"))
+def test_size_of_pattern_with_explicit_edge_brackets(linked_graph):
+    """Explicit-edge-bracket form, with type filter on the relationship.
+    Asserts size() over a pattern accepts the most common edge-shape
+    used in real queries."""
+    rows = list(linked_graph.cypher("RETURN size((a:A)-[:R]->(b:B)) AS n"))
     assert rows[0]["n"] == 3

@@ -472,6 +472,23 @@ impl CypherParser {
         };
         self.expect(&CypherToken::LParen)?;
 
+        // 0.9.0 §6 — `size(<pattern-expression>)` is the openCypher
+        // form returning the count of matches of an inline pattern.
+        // After consuming `size(`, if the next token is `(` AND the
+        // following tokens look like a pattern start, dispatch to the
+        // count-subquery code path (semantically equivalent to
+        // `count { <pattern> }` from 0.8.16). Comma-separated patterns
+        // are unsupported here — Cypher only allows a single pattern
+        // expression as size()'s arg.
+        if name == "size" && self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
+            let patterns = self.parse_pattern_subquery_patterns(&CypherToken::RParen)?;
+            self.expect(&CypherToken::RParen)?; // close size(
+            return Ok(Expression::CountSubquery {
+                patterns,
+                where_clause: None,
+            });
+        }
+
         // Check for DISTINCT
         let distinct = if self.check(&CypherToken::Distinct) {
             self.advance();

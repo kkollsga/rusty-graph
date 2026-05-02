@@ -126,10 +126,21 @@ impl CypherParser {
     pub(super) fn parse_exists_patterns(
         &mut self,
     ) -> Result<Vec<crate::graph::core::pattern_matching::Pattern>, String> {
+        // Default delimiter for `EXISTS { ... }` / `count { ... }`: closing brace.
+        self.parse_pattern_subquery_patterns(&CypherToken::RBrace)
+    }
+
+    /// Parse one or more comma/MATCH-separated patterns until a delimiter
+    /// token at top level. Used by EXISTS/count (delimiter = `}`) and the
+    /// 0.9.0 §6 `size((pattern))` form (delimiter = `)`).
+    pub(super) fn parse_pattern_subquery_patterns(
+        &mut self,
+        end_token: &CypherToken,
+    ) -> Result<Vec<crate::graph::core::pattern_matching::Pattern>, String> {
         let mut patterns = Vec::new();
 
         loop {
-            let pattern_str = self.extract_exists_pattern_string()?;
+            let pattern_str = self.extract_pattern_subquery_string(end_token)?;
             if pattern_str.is_empty() {
                 if patterns.is_empty() {
                     return Err("Expected a pattern inside EXISTS { }".to_string());
@@ -172,7 +183,12 @@ impl CypherParser {
         }
     }
 
-    pub(super) fn extract_exists_pattern_string(&mut self) -> Result<String, String> {
+    /// Re-serialize tokens forming a pattern, stopping at the supplied
+    /// delimiter (RBrace for EXISTS/count, RParen for size).
+    pub(super) fn extract_pattern_subquery_string(
+        &mut self,
+        end_token: &CypherToken,
+    ) -> Result<String, String> {
         // Skip optional MATCH keyword — standard Cypher allows EXISTS { MATCH (pattern) }
         if self.check(&CypherToken::Match) {
             self.advance();
@@ -183,8 +199,9 @@ impl CypherParser {
         let mut bracket_depth = 0i32;
 
         while self.has_tokens() {
-            // Stop at closing brace (the EXISTS boundary)
-            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::RBrace) {
+            // Stop at the caller-supplied end-token (RBrace for EXISTS,
+            // RParen for size). Only at top level (depth 0).
+            if paren_depth == 0 && bracket_depth == 0 && self.check(end_token) {
                 break;
             }
 

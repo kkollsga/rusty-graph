@@ -1,27 +1,25 @@
 """0.9.0 gate item §1 — better Cypher error messages.
 
-Today the parser emits token-level errors with no source positions
-and no distinction between "you typo'd" and "feature not yet
-supported". The agent's recent UX feedback singled this out as the
-gating item that compounds with the dialect gaps in §2/§3/§6 — when
-the user can't tell "wrong" from "not implemented", every gap feels
-twice as rough.
+Pre-§1, the parser emitted token-level errors with no source
+positions and no distinction between "you typo'd" and "feature not
+yet supported". The agent's recent UX feedback singled this out as
+the gating item that compounds with §2/§3/§6 — when the user can't
+tell "wrong" from "not implemented", every gap feels twice as rough.
 
-Target behavior (post-§1):
-1. Errors carry source offsets (line + column).
-2. Known unimplemented features ("NULLS LAST", "n.d.year",
-   "size((:A)-[:R]->(:B))") emit intent-level messages naming
-   the feature, not raw tokens.
-3. Errors include a caret-pointing excerpt or column number.
+Post-§1 baseline (this iteration):
 
-These tests are xfail-strict — see test_v0_9_05_integer_division.py
-header for the workflow.
+1. Every parse error now carries `(line N col M)` plus a source
+   excerpt with a `^` caret pointing at the failing column.
+2. `§2/§3/§6` queries that previously errored with token-level
+   messages now succeed (because those features are implemented) —
+   the intent-message UX they targeted is moot for those exact
+   queries. Future unimplemented features will pick up the
+   `intent_level_rewrite` machinery in `parser/mod.rs`.
 
-Note: tests in this file may also begin to pass as §2/§3/§6 land
-(because the test query no longer errors). When that happens, this
-file's xfail markers will flip in lockstep with §1's actual fix —
-which is fine; §1 lands last per the readiness doc precisely
-because it benefits from the prior fixes.
+Position estimation is approximate (token-counting via re-walk of
+the input string, not byte-precise offsets from the tokenizer).
+Tracked as v2 follow-up — the user can locate the failing area to
+within a few characters, which is the UX win that mattered.
 """
 
 from __future__ import annotations
@@ -30,16 +28,10 @@ import pytest
 
 import kglite
 
-NOT_IMPLEMENTED = (
-    "0.9.0 §1 — Cypher error messages are token-level today; flip when "
-    "source-offset + intent-message + caret-pointing land."
-)
-
 
 def _try_cypher_capture_error(g: kglite.KnowledgeGraph, query: str) -> str:
     """Run a query expected to fail; return the error message string."""
     try:
-        # Force materialization in case the API is lazy
         list(g.cypher(query))
     except Exception as e:  # noqa: BLE001 — we want any error
         return str(e)
@@ -51,61 +43,52 @@ def _try_cypher_capture_error(g: kglite.KnowledgeGraph, query: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_error_carries_line_number():
     g = kglite.KnowledgeGraph()
     msg = _try_cypher_capture_error(g, "MATCH (n)\nRETURN n.))")
-    # Accept either explicit "line 2" or "2:" position prefix
     assert "line 2" in msg.lower() or "2:" in msg, f"missing line info: {msg!r}"
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_error_carries_column_number():
     g = kglite.KnowledgeGraph()
     msg = _try_cypher_capture_error(g, "RETURN ))")
-    # Either column number or caret marker
     assert "col" in msg.lower() or "column" in msg.lower() or "^" in msg, f"missing column info: {msg!r}"
 
 
+def test_error_carries_caret_excerpt():
+    """Errors include a single-line source excerpt with a `^` caret."""
+    g = kglite.KnowledgeGraph()
+    msg = _try_cypher_capture_error(g, "MATCH (n)\nRETURN n.))")
+    assert "^" in msg, f"missing caret marker: {msg!r}"
+
+
 # ---------------------------------------------------------------------------
-# Intent-level messages for known unimplemented features.
+# Locked-in: §2/§3/§6 queries now succeed (intent-message tests
+# converted from "must error with intent message" to "must succeed",
+# since the features they probed are implemented).
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
-def test_intent_message_for_nulls_last():
-    """The query is a known-unimplemented feature (§2). The error
-    should name it, not point at the token."""
+def test_nulls_last_query_now_succeeds():
+    """§2 landed — `ORDER BY x DESC NULLS LAST` parses and runs."""
     g = kglite.KnowledgeGraph()
-    msg = _try_cypher_capture_error(g, "MATCH (n) RETURN n ORDER BY n.x DESC NULLS LAST").lower()
-    # Either: feature names the gap, or the feature lands in §2 first
-    # (in which case this test no longer errors and xfail flips).
-    assert "nulls" in msg, f"error doesn't mention NULLS: {msg!r}"
-    assert "not yet" in msg or "not implemented" in msg or "unsupported" in msg, (
-        f"error doesn't read as intent-level: {msg!r}"
-    )
+    # Empty graph, but the parser path is what we're locking in.
+    list(g.cypher("MATCH (n) RETURN n ORDER BY n.title DESC NULLS LAST"))
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
-def test_intent_message_for_datetime_accessor():
-    """`n.d.year` is §3. Same shape: error names the feature."""
+def test_datetime_accessor_query_now_succeeds():
+    """§3 landed — `n.d.year` parses and runs (returns Null on
+    nodes without a `joined` property; the parser path is what we're
+    locking in)."""
     g = kglite.KnowledgeGraph()
-    msg = _try_cypher_capture_error(g, "MATCH (n:X) RETURN n.joined.year AS y").lower()
-    # Expect message mentions datetime / temporal / accessor
-    assert any(kw in msg for kw in ("datetime", "temporal", "accessor", "not yet", "not implemented")), (
-        f"error doesn't read as intent-level: {msg!r}"
-    )
+    list(g.cypher("MATCH (n:X) RETURN n.joined.year AS y"))
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
-def test_intent_message_for_pattern_in_size():
-    """`size((:A)-[:R]->(:B))` is §6."""
+def test_size_pattern_expression_query_now_succeeds():
+    """§6 landed — `size((:A)-[:R]->(:B))` parses and runs."""
     g = kglite.KnowledgeGraph()
-    msg = _try_cypher_capture_error(g, "RETURN size((:A)-[:R]->(:B)) AS n").lower()
-    # Expect message to read as intent-level rather than "Unexpected token: Colon"
-    assert "pattern" in msg or "not yet" in msg or "not implemented" in msg, (
-        f"error doesn't read as intent-level: {msg!r}"
-    )
+    rows = list(g.cypher("RETURN size((:A)-[:R]->(:B)) AS n"))
+    assert rows[0]["n"] == 0  # empty graph
 
 
 # ---------------------------------------------------------------------------
@@ -113,12 +96,16 @@ def test_intent_message_for_pattern_in_size():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_caret_or_column_for_typo_extra_paren():
-    """The user's reported case: typo'd extra `)` in CASE produces a
-    parser error that should locate the bad `)`, not say "Expected
-    Then, found RParen" with no positional info."""
+    """Typo'd extra `)` in CASE — error locates the bad `)`."""
     g = kglite.KnowledgeGraph()
     msg = _try_cypher_capture_error(g, "MATCH (n:X) RETURN CASE WHEN count(n)) THEN 1 END")
-    # Either caret marker or numeric column
     assert "^" in msg or "col" in msg.lower() or "column" in msg.lower(), f"no positional info on typo error: {msg!r}"
+
+
+# Intent-level rewrites — `intent_level_rewrite` in `parser/mod.rs`
+# is the hook for future features. Currently no stable
+# "not-yet-implemented" feature to lock in (the named candidates —
+# variable-length paths, quantified relationships — already parse
+# without error). The hook returns None for everything today; new
+# §X work can plug in detection there as features land.
