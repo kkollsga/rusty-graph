@@ -34,6 +34,27 @@ DerefMut on Memory/MappedGraph") under "Hygiene & test coverage" —
 this entry simply re-flags it for downstream Rust embedders who
 might miss it under that subhead.
 
+### Blueprint diagnostics
+
+- **`from_blueprint(verbose=True)` reports actual graph edge counts.**
+  Pre-fix, the verbose log printed an accumulated input-row count
+  from the blueprint pipeline; with default Update conflict
+  handling, repeated `(src, tgt)` pairs across multiple section
+  ingests over-counted vs `MATCH ()-[r]->() RETURN count(r)`. Easy
+  to mistake for a save regression. Now queries
+  `graph.get_edge_type_counts()` (the post-build truth) and reports
+  those numbers; when input and graph counts diverge, the line is
+  annotated `[T]: N edges (M input rows, K deduped)` so users see
+  both. Backward-compatible for zero-duplicate datasets.
+- **Warning capture documented.** Blueprint warnings (target node
+  not found, null FK, etc.) hit stderr by default. Python's
+  standard `logging.captureWarnings(True)` routes the Rust-emitted
+  UserWarnings into the `py.warnings` logger where any standard
+  handler (file, rotating, stream) can catch them — no `2>&1`
+  shell redirect needed. The `from_blueprint` docstring now
+  documents the pattern with a copy-paste-ready file-capture
+  example. Pinned by `test_logging_capture_warnings_pipeline`.
+
 ### Documentation
 
 - **CYPHER.md** gained a "Duration semantics" subsection explaining

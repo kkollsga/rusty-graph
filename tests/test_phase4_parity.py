@@ -153,6 +153,8 @@ ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
         # unchanged (CURRENT_FORMAT_VERSION still 3); old .kgl files
         # still load.
         "68af967421fa01d7db6afd4bf4efb9baa36c11bf269b42393430420ce9e7f494",
+        # 0.9.1 release digest.
+        "feaa0333408efb695a1c8668f016079248577a83ade3ca37f8e495641c3b7654",
     }
 )
 
