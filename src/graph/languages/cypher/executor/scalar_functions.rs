@@ -74,9 +74,15 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "datetime" => {
+                // 0-arg form returns "now" (today's date — Value::DateTime
+                // is NaiveDate, so subsecond precision is dropped).
+                // 0.9.0 §3.
+                if args.is_empty() {
+                    return Ok(Value::DateTime(chrono::Local::now().date_naive()));
+                }
                 if args.len() != 1 {
                     return Err(
-                        "datetime() requires 1 argument: datetime('2024-03-15T10:30:00')".into(),
+                        "datetime() requires 0 or 1 argument: datetime() or datetime('2024-03-15T10:30:00')".into(),
                     );
                 }
                 let val = self.evaluate_expression(&args[0], row)?;
@@ -117,6 +123,69 @@ impl<'a> CypherExecutor<'a> {
                     }
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     _ => Err("date_diff() arguments must be dates".into()),
+                }
+            }
+            // 0.9.0 §3 — duration support. Soft representation: a Duration
+            // is just an Int64 carrying days. The `.days` accessor on
+            // Int64 (in expression.rs) is the identity, so the chained
+            // `duration.between(d1, d2).days` shape resolves naturally.
+            // Sub-day precision (hours/minutes/seconds) is deferred —
+            // Value::DateTime is currently NaiveDate (date-only), so any
+            // duration finer than a day requires a separate type-system
+            // refactor. See 0.9.0-readiness.md §3.
+            "duration" => {
+                if args.len() != 1 {
+                    return Err("duration() requires 1 map argument: duration({days: N})".into());
+                }
+                // Accepts duration({days: N}) — extracts the `days` key.
+                if let Expression::MapLiteral(entries) = &args[0] {
+                    let mut total_days: i64 = 0;
+                    for (key, expr) in entries {
+                        let v = self.evaluate_expression(expr, row)?;
+                        let n = match v {
+                            Value::Int64(n) => n,
+                            Value::Float64(f) => f as i64,
+                            Value::Null => 0,
+                            _ => {
+                                return Err(format!("duration({{{key}: ...}}) expects a number"));
+                            }
+                        };
+                        match key.as_str() {
+                            "days" => total_days += n,
+                            "weeks" => total_days += n * 7,
+                            // Months/years approximate to 30/365 days for
+                            // arithmetic purposes — flagged in §3.
+                            "months" => total_days += n * 30,
+                            "years" => total_days += n * 365,
+                            "hours" | "minutes" | "seconds" => {
+                                // Sub-day precision dropped silently in v1.
+                                // Reads as 0 days.
+                            }
+                            other => {
+                                return Err(format!(
+                                    "duration(): unknown key '{other}' (expected days/weeks/months/years)"
+                                ));
+                            }
+                        }
+                    }
+                    Ok(Value::Int64(total_days))
+                } else {
+                    Err("duration() requires a map literal: duration({days: N})".into())
+                }
+            }
+            "duration.between" => {
+                if args.len() != 2 {
+                    return Err("duration.between() requires 2 datetime arguments".into());
+                }
+                let a = self.evaluate_expression(&args[0], row)?;
+                let b = self.evaluate_expression(&args[1], row)?;
+                match (&a, &b) {
+                    (Value::DateTime(d1), Value::DateTime(d2)) => {
+                        // Returns days difference as a soft-Duration Int64.
+                        Ok(Value::Int64((*d2 - *d1).num_days()))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err("duration.between() arguments must be datetime values".into()),
                 }
             }
             "size" => {

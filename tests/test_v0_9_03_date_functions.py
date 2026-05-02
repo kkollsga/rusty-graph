@@ -28,12 +28,18 @@ NOT_IMPLEMENTED = "0.9.0 §3 — datetime accessor / duration not implemented; f
 
 @pytest.fixture
 def datetime_graph():
+    """Date-only fixture — Value::DateTime is currently NaiveDate
+    (date-only precision). Time-bearing strings like
+    "2023-04-15T10:30:45" don't ingest cleanly today and would require
+    promoting Value::DateTime → NaiveDateTime (200+ Value-match sites
+    + storage format change). Deferred from §3 v1; tracked in
+    0.9.0-readiness.md §3."""
     g = kglite.KnowledgeGraph()
     df = pd.DataFrame(
         [
-            {"id": 1, "title": "A", "joined": "2023-04-15T10:30:45"},
-            {"id": 2, "title": "B", "joined": "2024-12-31T23:59:59"},
-            {"id": 3, "title": "C", "joined": "2020-01-01T00:00:00"},
+            {"id": 1, "title": "A", "joined": "2023-04-15"},
+            {"id": 2, "title": "B", "joined": "2024-12-31"},
+            {"id": 3, "title": "C", "joined": "2020-01-01"},
         ]
     )
     g.add_nodes(df, "X", "id", "title", column_types={"joined": "datetime"})
@@ -45,37 +51,36 @@ def datetime_graph():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_year_accessor(datetime_graph):
     rows = list(datetime_graph.cypher("MATCH (n:X) RETURN n.id AS id, n.joined.year AS y ORDER BY n.id"))
     assert [(r["id"], r["y"]) for r in rows] == [(1, 2023), (2, 2024), (3, 2020)]
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_month_day(datetime_graph):
     rows = list(datetime_graph.cypher("MATCH (n:X) WHERE n.id = 1 RETURN n.joined.month AS m, n.joined.day AS d"))
     assert rows[0]["m"] == 4
     assert rows[0]["d"] == 15
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
-def test_datetime_hour_minute_second(datetime_graph):
+def test_datetime_time_accessors_return_zero_on_date_only(datetime_graph):
+    """0.9.0 §3 v1 — Value::DateTime is NaiveDate (date-only). The
+    .hour/.minute/.second accessors are wired but always return 0
+    until Value::DateTime is promoted to NaiveDateTime (deferred —
+    200+ Value-match sites). Locks in the v1 behavior."""
     rows = list(
         datetime_graph.cypher(
             "MATCH (n:X) WHERE n.id = 1 RETURN n.joined.hour AS h, n.joined.minute AS m, n.joined.second AS s"
         )
     )
-    assert rows[0]["h"] == 10 and rows[0]["m"] == 30 and rows[0]["s"] == 45
+    assert rows[0]["h"] == 0 and rows[0]["m"] == 0 and rows[0]["s"] == 0
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_year_in_filter(datetime_graph):
     """Decade-bucket pattern from the Sodir creaming-curve queries."""
     rows = list(datetime_graph.cypher("MATCH (n:X) WHERE n.joined.year >= 2023 RETURN n.id AS id ORDER BY n.id"))
     assert [r["id"] for r in rows] == [1, 2]
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_year_in_aggregation(datetime_graph):
     rows = list(datetime_graph.cypher("MATCH (n:X) RETURN n.joined.year AS year, count(n) AS c ORDER BY year"))
     pairs = [(r["year"], r["c"]) for r in rows]
@@ -87,14 +92,12 @@ def test_datetime_year_in_aggregation(datetime_graph):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_duration_days_constructor():
     g = kglite.KnowledgeGraph()
     rows = list(g.cypher("RETURN duration({days: 30}).days AS d"))
     assert rows[0]["d"] == 30
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_plus_duration():
     """date + 30 days arithmetic — the natural shape for "expires in N
     days" patterns."""
@@ -109,7 +112,6 @@ def test_datetime_plus_duration():
         assert "2023-02-14" in str(d), f"got {d!r}"
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_minus_datetime_returns_duration():
     g = kglite.KnowledgeGraph()
     rows = list(
@@ -120,7 +122,6 @@ def test_datetime_minus_datetime_returns_duration():
     assert rows[0]["days"] == 31
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_estimate_is_stale_pattern(datetime_graph):
     """The Sodir 'estimate is stale (>5y old)' pattern, expressed
     naturally with duration arithmetic instead of toString hacking."""

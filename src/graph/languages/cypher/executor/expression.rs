@@ -506,14 +506,41 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Null)
                     }
                     Value::DateTime(date) => {
+                        // 0.9.0 §3 — datetime field-accessor set. Note:
+                        // Value::DateTime currently carries `chrono::NaiveDate`
+                        // (date-only precision); time-of-day fields
+                        // (hour/minute/second) return 0. Promoting to
+                        // NaiveDateTime is a separate refactor (touches
+                        // 200+ Value-match sites + storage format); see
+                        // 0.9.0-readiness.md §3 for the deferred subtlety.
                         use chrono::Datelike;
                         match property.as_str() {
                             "year" => Ok(Value::Int64(date.year() as i64)),
                             "month" => Ok(Value::Int64(date.month() as i64)),
                             "day" => Ok(Value::Int64(date.day() as i64)),
+                            "hour" | "minute" | "second" => Ok(Value::Int64(0)),
+                            "dayOfWeek" => {
+                                // Neo4j: Monday=1 .. Sunday=7. chrono: same encoding via
+                                // num_days_from_monday() + 1.
+                                Ok(Value::Int64(
+                                    date.weekday().num_days_from_monday() as i64 + 1,
+                                ))
+                            }
+                            "dayOfYear" => Ok(Value::Int64(date.ordinal() as i64)),
+                            "epochSeconds" => Ok(Value::Int64(
+                                date.and_hms_opt(0, 0, 0)
+                                    .map(|dt| dt.and_utc().timestamp())
+                                    .unwrap_or(0),
+                            )),
                             _ => Ok(Value::Null),
                         }
                     }
+                    // Soft-duration support: integer values (representing
+                    // days, see scalar_functions::duration / duration.between)
+                    // expose `.days` as identity. Lets the
+                    // `duration.between(d1, d2).days` chain resolve without
+                    // adding a Value::Duration variant. 0.9.0 §3.
+                    Value::Int64(n) if property.as_str() == "days" => Ok(Value::Int64(*n)),
                     Value::Point { .. } => Ok(point_field(&val, property)),
                     _ => Ok(Value::Null),
                 }

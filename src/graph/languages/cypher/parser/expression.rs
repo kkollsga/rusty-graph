@@ -354,16 +354,64 @@ impl CypherParser {
                     return Ok(func_expr);
                 }
 
-                // Check for property access: identifier.property
+                // Check for namespaced function call: `duration.between(...)`,
+                // `point.distance(...)`, etc. Pattern is
+                // `<ident>.<ident>(`. 0.9.0 §3 introduces the first
+                // namespaced function `duration.between`.
+                if self.check(&CypherToken::Dot)
+                    && matches!(self.peek_at(1), Some(CypherToken::Identifier(_)))
+                    && self.peek_at(2) == Some(&CypherToken::LParen)
+                {
+                    self.advance(); // dot
+                    let sub = match self.advance().cloned() {
+                        Some(CypherToken::Identifier(s)) => s,
+                        _ => unreachable!("guarded by peek_at(1)"),
+                    };
+                    let qualified_name = format!("{}.{}", name, sub);
+                    let func_expr = self.parse_function_call(qualified_name)?;
+                    // Allow trailing `.field` chains on the result, e.g.
+                    // `duration.between(d1, d2).days`.
+                    let mut expr = func_expr;
+                    while self.check(&CypherToken::Dot) {
+                        self.advance();
+                        let field = match self.advance().cloned() {
+                            Some(CypherToken::Identifier(p)) => p,
+                            _ => return Err("Expected property name after '.'".to_string()),
+                        };
+                        expr = Expression::ExprPropertyAccess {
+                            expr: Box::new(expr),
+                            property: field,
+                        };
+                    }
+                    return Ok(expr);
+                }
+
+                // Check for property access: identifier.property,
+                // and chained accessors like `n.joined.year` (datetime
+                // field accessors per 0.9.0 §3) — repeatedly wrap in
+                // ExprPropertyAccess.
                 if self.check(&CypherToken::Dot) {
                     self.advance(); // consume dot
-                    match self.advance().cloned() {
-                        Some(CypherToken::Identifier(prop)) => Ok(Expression::PropertyAccess {
-                            variable: name,
-                            property: prop,
-                        }),
-                        _ => Err("Expected property name after '.'".to_string()),
+                    let first_prop = match self.advance().cloned() {
+                        Some(CypherToken::Identifier(prop)) => prop,
+                        _ => return Err("Expected property name after '.'".to_string()),
+                    };
+                    let mut expr = Expression::PropertyAccess {
+                        variable: name,
+                        property: first_prop,
+                    };
+                    while self.check(&CypherToken::Dot) {
+                        self.advance(); // consume the chained dot
+                        let next_prop = match self.advance().cloned() {
+                            Some(CypherToken::Identifier(prop)) => prop,
+                            _ => return Err("Expected property name after '.'".to_string()),
+                        };
+                        expr = Expression::ExprPropertyAccess {
+                            expr: Box::new(expr),
+                            property: next_prop,
+                        };
                     }
+                    Ok(expr)
                 }
                 // Identifier followed by `{` is ambiguous between two shapes:
                 //   1. Map projection: `n { .prop1, .prop2, alias: expr }`
