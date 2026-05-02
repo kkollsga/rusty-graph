@@ -167,6 +167,25 @@ def test_duration_addition_component_wise():
     assert rows[0]["dd"] == 15
 
 
+def test_duration_between_cypher_md_example():
+    """0.9.1 — anchor test for the (2024-08-12, 2026-05-02) example
+    used in CYPHER.md "Duration semantics" section. Ensures the
+    documented behaviour can't drift unnoticed.
+
+    `duration.between` only fills in `days` (Value::DateTime is
+    NaiveDate; calendar-month-aware diff is deferred).
+    """
+    g = kglite.KnowledgeGraph()
+    rows = list(
+        g.cypher(
+            "RETURN duration.between(date('2024-08-12'), date('2026-05-02')).days AS d, "
+            "duration.between(date('2024-08-12'), date('2026-05-02')).months AS m"
+        )
+    )
+    assert rows[0]["d"] == 628
+    assert rows[0]["m"] == 0
+
+
 def test_estimate_is_stale_pattern(datetime_graph):
     """The Sodir 'estimate is stale (>5y old)' pattern, expressed
     naturally with duration arithmetic instead of toString hacking."""

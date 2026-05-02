@@ -339,10 +339,15 @@ Date-range filtering on nodes and relationships with explicit field names.
 | Function | Description |
 |----------|-------------|
 | `date(str)` / `datetime(str)` | Parse date string to DateTime value |
-| `d.year`, `d.month`, `d.day` | Extract component from a DateTime value (use `WITH` to alias first) |
-| `date_diff(d1, d2)` | Days between two dates (same as `d1 - d2`) |
-| `date + N` / `date - N` | Add/subtract N days |
-| `date - date` | Days between two dates (integer) |
+| `datetime()` | Today's date (no-arg form) |
+| `n.d.year`, `n.d.month`, `n.d.day` | Extract component from a DateTime property (chained accessor — works in `RETURN`, `WHERE`, `ORDER BY`) |
+| `n.d.dayOfWeek`, `n.d.dayOfYear`, `n.d.epochSeconds` | Other temporal field accessors |
+| `duration({days: N, months: M, ...})` | Build a Duration value (see [Duration semantics](#duration-semantics) below) |
+| `duration.between(d1, d2)` | Day-delta between two DateTime values, returned as a Duration |
+| `date + duration({days: N})` | Add a duration to a date |
+| `date_diff(d1, d2)` | Days between two dates (legacy; same as `d2 - d1` returning Int64 directly) |
+| `date + N` / `date - N` | Add/subtract N days (Int64 form, kept for backward compat) |
+| `date - date` | Returns a Duration (was Int64 days pre-0.9.0) |
 | `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time |
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
 
@@ -379,6 +384,63 @@ graph.cypher("""
 
 # Works with date() function too
 graph.cypher("MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_from', 'date_to') RETURN count(*)")
+```
+
+### Duration semantics
+
+A `Duration` value carries three independent components:
+
+| Component | Source                              | Units              |
+|-----------|-------------------------------------|--------------------|
+| `months`  | `years` + `months` from constructor | calendar months    |
+| `days`    | `weeks` + `days` from constructor   | clock days         |
+| `seconds` | `hours` + `minutes` + `seconds`     | clock seconds      |
+
+**Components stay separate by design.** Calendar arithmetic
+(`+ duration({months: 1})`) is fundamentally different from clock
+arithmetic (`+ duration({days: 30})`) because months have variable
+length. `duration({months: 1, days: 5}).months` returns `1`, not `35`.
+
+This matches Neo4j and openCypher; it diverges from Postgres
+`interval` (which collapses everything into a single combined value).
+Users coming from Postgres will need to know.
+
+#### `duration.between(d1, d2)`
+
+Computes the day-delta between two `DateTime` values. **Months and
+seconds are always 0** because `Value::DateTime` is currently
+date-only (`NaiveDate`); a calendar-month-aware diff requires the
+`Value::DateTime` → `NaiveDateTime` refactor (deferred).
+
+```cypher
+RETURN duration.between(date('2024-08-12'), date('2026-05-02')).days
+// → 628
+
+RETURN duration.between(date('2024-08-12'), date('2026-05-02')).months
+// → 0   (NOT 20 — `between` only fills in `days`)
+```
+
+#### Composite accessors
+
+`d.years = d.months / 12`, `d.minutes = d.seconds / 60`,
+`d.hours = d.seconds / 3600`. These are integer-truncated convenience
+views on the underlying components — derived, not stored.
+
+```cypher
+WITH duration({months: 26, days: 100}) AS d
+RETURN d.months AS m, d.years AS y, d.days AS days
+// → m=26, y=2 (26/12 truncated), days=100
+```
+
+#### `DateTime ± Duration`
+
+Calendar months in the duration are approximated as 30 days for
+`DateTime` arithmetic (the `Value::DateTime` precision limitation
+again). For exact month-aware addition, use a literal date.
+
+```cypher
+RETURN date('2024-01-15') + duration({days: 30})  // → 2024-02-14
+RETURN date('2024-01-15') + duration({months: 1}) // → 2024-02-14 (1*30 days), NOT 2024-02-15
 ```
 
 ## Math Functions
