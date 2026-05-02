@@ -343,6 +343,18 @@ impl BatchProcessor {
                 }
                 GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
             }
+            // 0.9.2: disk-side reads (node_weight, get_node_id, get_node_title)
+            // resolve via `disk_graph.column_stores`, NOT the DirGraph-level
+            // `graph.column_stores` we just populated. Without this sync, a
+            // freshly-built disk graph from `from_blueprint` (or any
+            // multi-create add_nodes path) has empty disk-side column_stores
+            // — every property read returns Null until save+reload bridges
+            // them. Existing sync site in the update path
+            // (`disk_updates_applied`) only fires when an UPDATE is in the
+            // chunk, never on creates-only.
+            if GraphRead::is_disk(&graph.graph) {
+                graph.sync_disk_column_stores();
+            }
         }
 
         // Process updates in current chunk.

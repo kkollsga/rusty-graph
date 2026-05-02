@@ -98,6 +98,14 @@ pub fn execute_mutable(
                 // `node_weight` reads through `column_stores` and
                 // returns the pre-SET values.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
+                // Disk: mirror disk's freshly-flushed column_stores back
+                // into DirGraph.column_stores so a subsequent add_nodes
+                // (which calls sync_disk_column_stores DirGraph→Disk)
+                // doesn't clobber the post-SET state with the stale
+                // pre-SET DirGraph snapshot. Without this, a multi-stage
+                // SET → add_nodes → read pipeline silently loses the
+                // SET's effects on disk-mode graphs.
+                graph.sync_column_stores_from_disk();
             }
             Clause::Delete(del) => {
                 execute_delete(graph, del, &result_set, &mut stats)?;
@@ -107,6 +115,7 @@ pub fn execute_mutable(
                 // Same rationale as SET — REMOVE goes through
                 // node_weight_mut on disk.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
+                graph.sync_column_stores_from_disk();
             }
             Clause::Merge(merge) => {
                 result_set = execute_merge(graph, merge, result_set, &params, &mut stats)?;
@@ -114,6 +123,7 @@ pub fn execute_mutable(
                 // `execute_set`; flush so any following clause sees the
                 // mutations.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
+                graph.sync_column_stores_from_disk();
             }
             // Read clauses: create temporary immutable executor
             _ => {
@@ -143,6 +153,7 @@ pub fn execute_mutable(
     // Without this, Cypher SET on a disk-backed graph appeared to no-op
     // until the next mutation/save flushed the cache — see CHANGELOG.
     GraphWrite::flush_pending_writes(&mut graph.graph);
+    graph.sync_column_stores_from_disk();
 
     // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
