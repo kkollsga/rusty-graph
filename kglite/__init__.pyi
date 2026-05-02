@@ -353,6 +353,30 @@ def from_blueprint(
     timeseries, and data sources. CSV paths in the blueprint are resolved
     relative to ``settings.root``.
 
+    **Diagnostic output**:
+
+    - **Progress** (per-type counts, summary line) prints to **stdout**
+      when ``verbose=True``. Edge counts come from the live graph, not
+      the input-row tally — so they match
+      ``MATCH ()-[r]->() RETURN count(r)``. When dedupe collapses input
+      rows, the line is annotated as
+      ``[T]: N edges (M input rows, K deduped)``.
+    - **Warnings** (target node not found, null FK, type mismatch, etc.)
+      are emitted as Python ``UserWarning`` objects (originating in Rust
+      via PyO3). By default they reach **stderr**.
+
+    To capture warnings to a file, use the standard Python pattern::
+
+        import logging
+        logging.captureWarnings(True)
+        logging.basicConfig(
+            filename="blueprint.log",
+            level=logging.WARNING,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
+        graph = kglite.from_blueprint("blueprint.json", verbose=True)
+        # All warnings now in blueprint.log instead of stderr.
+
     Args:
         blueprint_path: Path to the blueprint JSON file.
         verbose: If True, print progress information during loading.

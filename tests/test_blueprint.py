@@ -136,6 +136,66 @@ class TestBasicLoading:
         assert kglite.from_blueprint is from_blueprint
 
 
+class TestWarningCapture:
+    """0.9.1 #2 — Rust-emitted PyUserWarnings can be captured via the
+    standard Python `logging.captureWarnings(True)` pattern. The
+    `from_blueprint` docstring documents this; these tests pin the
+    behaviour so the docs can't drift unnoticed.
+    """
+
+    def test_logging_capture_warnings_pipeline(self, tmp_path):
+        """`logging.captureWarnings(True)` routes the Rust-emitted
+        UserWarning into the `py.warnings` logger, where it can be
+        sent to a file (or any other handler).
+        """
+        import logging
+
+        log_path = tmp_path / "warnings.log"
+        # Snapshot py.warnings handlers so we can restore them
+        py_warnings = logging.getLogger("py.warnings")
+        prior_handlers = list(py_warnings.handlers)
+        prior_level = py_warnings.level
+        prior_capture = logging.getLogger("py.warnings").propagate
+
+        try:
+            logging.captureWarnings(True)
+            handler = logging.FileHandler(str(log_path))
+            handler.setLevel(logging.WARNING)
+            py_warnings.addHandler(handler)
+            py_warnings.setLevel(logging.WARNING)
+
+            # Trigger a Rust-emitted PyUserWarning. The fluent
+            # `create_connections()` chain-discard guard is the
+            # cleanest reliable trigger.
+            g = kglite.KnowledgeGraph()
+            g.add_nodes(
+                pd.DataFrame([{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]),
+                "P",
+                "id",
+                "name",
+            )
+            try:
+                g.select("P").create_connections("LINK")
+            except Exception:
+                pass  # the warning fires regardless of any subsequent error
+
+            handler.flush()
+            handler.close()
+            py_warnings.removeHandler(handler)
+        finally:
+            # Restore prior state so other tests aren't affected.
+            logging.captureWarnings(False)
+            py_warnings.handlers = prior_handlers
+            py_warnings.setLevel(prior_level)
+            py_warnings.propagate = prior_capture
+
+        log_content = log_path.read_text()
+        # The Rust-emitted UserWarning should appear in the log.
+        assert "create_connections" in log_content, (
+            f"py.warnings logger didn't capture the Rust UserWarning. Log: {log_content!r}"
+        )
+
+
 class TestFKEdges:
     def test_fk_edges(self, tmp_path):
         companies = pd.DataFrame({"company_id": [10, 20], "name": ["Acme", "Globex"]})
