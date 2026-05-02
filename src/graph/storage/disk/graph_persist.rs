@@ -931,7 +931,7 @@ impl DiskGraph {
                 node_slots,
                 node_count: meta.node_count,
                 free_node_slots: meta.free_node_slots,
-                node_arena: UnsafeCell::new(Vec::with_capacity(1024)),
+                node_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
                 column_stores: HashMap::new(),
                 out_offsets,
                 out_edges,

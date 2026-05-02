@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-05-02
+
+### Disk-mode regression fix — parallel projection data race on `node_arena`
+
+Disk-mode queries that reached `node_weight` materialization through
+the Cypher executor's projection phase produced **non-deterministic
+results across runs**, ranging from silently wrong row counts (Bug A
+in the 0.9.2 disk regression report — ~13% of `NEAREST_AFEX_HUB`
+edges and ~2% of `IN_AFEX_AREA` edges silently dropped on the Sodir
+prospect graph) to use-after-free segfaults with `BUG: InternedKey N
+not found in StringInterner` lines on stderr (Bug B in the same
+report).
+
+**Root cause.** `DiskGraph::node_arena` was an
+`UnsafeCell<Vec<NodeData>>` and its module-level SAFETY block claimed
+the single-threaded-query contract guaranteed exclusive access. In
+reality the Cypher executor's projection phase
+(`return_clause::project_row`) runs `evaluate_expression` under
+`par_iter_mut` once `result_set.rows.len() >= RAYON_THRESHOLD` (256),
+and any expression that reaches `node_weight` — spatial functions
+(`centroid` / `contains` / `distance`), the spatial-fallback branch
+of `resolve_property`, the `NodeRef`-in-projected branch — pushed
+onto the unguarded `Vec` from sibling Rayon tasks. A `push` that
+triggered realloc invalidated the `&NodeData` references already
+returned to other tasks; downstream reads either (a) saw the wrong
+row's properties (Bug A — sometimes the polygon parsed cleanly to a
+near-but-different centroid and the row simply missed its hub) or
+(b) followed a dangling pointer into the freed allocation (Bug B —
+sometimes the dangling slot decoded to an `InternedKey` the interner
+didn't know, surfacing the BUG line; with worse timing, SIGSEGV).
+
+The non-determinism explains why the fresh build → save → reload →
+read flow showed different counts than the in-process build: the
+in-process flow used the warm in-memory column stores, while the
+load-then-read flow re-materialized through `node_weight` under the
+parallel projection.
+
+**Fix.** `node_arena` is now `Mutex<Vec<Box<NodeData>>>`, mirroring
+the long-standing pattern used by `edge_arena`. The Box gives stable
+heap pointers that survive Vec growth; the Mutex serialises pushes.
+The `&NodeData` references handed back are valid for the lifetime of
+`&self` because the arena is only cleared via `clear_arenas`
+(`&mut self`) or `reset_arenas` (called between top-level queries).
+
+**Verification.** Fresh disk build of the Sodir prospect graph
+(557k nodes) now produces edge counts that match the in-memory
+build byte-for-byte:
+
+| Edge type             | default | disk (pre) | disk (post) |
+|-----------------------|---------|------------|-------------|
+| `IN_AFEX_AREA`        |    886  |       866  |        886  |
+| `NEAREST_AFEX_HUB`    |  5,881  |     5,134  |      5,881  |
+| `IN_BLOCK`            |  7,983  |     7,983  |      7,983  |
+| `IN_STRUCTURAL_ELEMENT`|  6,763  |     6,763  |      6,763  |
+
+The `load → enhance → save` workflow that was reported as
+segfaulting on disk now completes cleanly with no `BUG: InternedKey`
+lines on stderr.
+
+Two regression tests cover the race surface:
+`test_disk_parallel_projection_node_weight_is_race_free` (8 repeated
+runs of `centroid` projection on a 600-node disk graph must report
+identical counts) and
+`test_disk_parallel_projection_no_interner_corruption` (asserts no
+`BUG: InternedKey N not found` lines appear on stderr across
+repeated parallel projections).
+
+585 cargo, 2333 pytest, 97/97 parity, lint clean.
+
 ## [0.9.2] — 2026-05-02
 
 ### Disk-mode regression fix — property visibility after blueprint build

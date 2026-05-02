@@ -402,3 +402,114 @@ def test_cypher_set_new_property_persists_through_save_reload(mode, tmp_path):
         ("P_3", 230),
         ("P_4", 240),
     ], f"value_score lost on save+reload in {mode} mode"
+
+
+def test_disk_parallel_projection_node_weight_is_race_free(tmp_path):
+    """Spatial-projection over a disk graph must be deterministic across
+    repeated runs.
+
+    Pre-0.9.3 disk regression: `DiskGraph::node_arena` was an
+    `UnsafeCell<Vec<NodeData>>` that the docstring claimed was
+    single-threaded only. In reality, the Cypher executor's projection
+    phase (`return_clause::project_row`) runs `evaluate_expression`
+    under `par_iter_mut` once `result_set.rows.len() >= 256`, and any
+    expression that reaches the `node_weight` materialization path —
+    spatial functions like `centroid` / `contains`, plus the
+    spatial-fallback branch of `resolve_property` — concurrently
+    pushed onto the unguarded `Vec`. A push that triggered realloc
+    invalidated `&NodeData` references held by sibling Rayon tasks,
+    leaking into either silent wrong-row reads (Bug A in the 0.9.2
+    disk-mode regression report — ~13% NEAREST_AFEX_HUB and ~2%
+    IN_AFEX_AREA edges silently dropped on the Sodir prospect graph)
+    or use-after-free segfaults (Bug B in the same report — `BUG:
+    InternedKey N not found in StringInterner` on stderr).
+
+    Fix: `node_arena` is now `Mutex<Vec<Box<NodeData>>>`, mirroring
+    the long-standing `edge_arena` pattern. The Box gives stable
+    heap pointers across Vec growth and the Mutex serialises pushes.
+
+    This test creates a disk graph with > 256 polygon-bearing nodes
+    (the Rayon threshold) and runs a `centroid` projection 8 times,
+    asserting identical row counts. Pre-fix: counts varied run-to-run
+    by 1–3 rows. Post-fix: deterministic.
+    """
+    graph_path = str(tmp_path / "g_disk_race")
+    kg = KnowledgeGraph(storage="disk", path=graph_path)
+
+    # 600 tiny squares — well above the RAYON_THRESHOLD of 256.
+    # Each polygon is offset so centroids are all distinct.
+    rows = []
+    for i in range(600):
+        cx = -180.0 + (i * 0.5)
+        cy = -45.0 + (i * 0.05)
+        wkt = f"POLYGON(({cx} {cy}, {cx + 0.1} {cy}, {cx + 0.1} {cy + 0.1}, {cx} {cy + 0.1}, {cx} {cy}))"
+        rows.append({"id": f"P_{i}", "title": f"P{i}", "wkt_geometry": wkt})
+
+    kg.add_nodes(
+        pd.DataFrame(rows),
+        "Region",
+        "id",
+        "title",
+        column_types={"wkt_geometry": "geometry"},
+    )
+    kg.save(graph_path)
+
+    reloaded = kglite.load(graph_path)
+    counts: list[int] = []
+    for _ in range(8):
+        out = _rows(
+            reloaded.cypher(
+                "MATCH (r:Region) WHERE r.wkt_geometry IS NOT NULL WITH r, centroid(r) AS c RETURN count(c) AS n"
+            )
+        )
+        counts.append(out[0]["n"])
+    # All 8 runs must report the same count. Pre-fix: ~1-3 row variance.
+    assert all(c == counts[0] for c in counts), f"centroid() projection over disk graph is non-deterministic: {counts}"
+    # And the count itself must equal the input row count — losing any
+    # rows here would mean a parallel write into the spatial cache
+    # raced and a sibling task observed a stale entry.
+    assert counts[0] == 600, f"expected 600 centroids, got {counts}"
+
+
+def test_disk_parallel_projection_no_interner_corruption(tmp_path, capfd):
+    """Same race surface as `…_node_weight_is_race_free`, but watching
+    a different victim: `&NodeData` carries an `InternedKey`-tagged
+    Columnar property storage. When the Vec realloc invalidated the
+    reference, downstream `interner.resolve(key)` would sometimes hit
+    a key the interner didn't know — surfacing as `BUG: InternedKey N
+    not found in StringInterner` on stderr (or, with bad timing, a
+    SIGSEGV). The fix removes the race; the test asserts no such
+    BUG line ever appears across many repeated parallel projections.
+    """
+    graph_path = str(tmp_path / "g_disk_interner_race")
+    kg = KnowledgeGraph(storage="disk", path=graph_path)
+
+    rows = []
+    for i in range(600):
+        cx = -180.0 + (i * 0.5)
+        cy = -45.0 + (i * 0.05)
+        wkt = f"POLYGON(({cx} {cy}, {cx + 0.1} {cy}, {cx + 0.1} {cy + 0.1}, {cx} {cy + 0.1}, {cx} {cy}))"
+        rows.append({"id": f"P_{i}", "title": f"P{i}", "wkt_geometry": wkt})
+
+    kg.add_nodes(
+        pd.DataFrame(rows),
+        "Region",
+        "id",
+        "title",
+        column_types={"wkt_geometry": "geometry"},
+    )
+    kg.save(graph_path)
+
+    # Reload and hammer the projection a few times. The Rust-side
+    # `eprintln!` for "BUG: InternedKey N not found" goes through C
+    # stdio (stderr), which capfd captures.
+    reloaded = kglite.load(graph_path)
+    for _ in range(8):
+        list(
+            reloaded.cypher(
+                "MATCH (r:Region) WHERE r.wkt_geometry IS NOT NULL WITH r, centroid(r) AS c WHERE c IS NULL RETURN r.id"
+            )
+        )
+    out, err = capfd.readouterr()
+    bug_lines = [ln for ln in err.splitlines() if "BUG: InternedKey" in ln and "not found" in ln]
+    assert not bug_lines, f"Disk parallel projection still racing on the StringInterner: {bug_lines[:3]}"
