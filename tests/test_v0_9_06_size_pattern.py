@@ -40,9 +40,7 @@ def linked_graph():
         "title",
     )
     g.add_connections(
-        pd.DataFrame(
-            [{"src": 0, "tgt": 0}, {"src": 0, "tgt": 1}, {"src": 1, "tgt": 0}]
-        ),
+        pd.DataFrame([{"src": 0, "tgt": 0}, {"src": 0, "tgt": 1}, {"src": 1, "tgt": 0}]),
         "R",
         "A",
         "src",
@@ -63,11 +61,7 @@ def test_size_of_unbound_pattern(linked_graph):
 def test_size_with_per_row_binding(linked_graph):
     """Per-row out-degree via pattern expression — the canonical
     use case for size((node)-[]->(...))."""
-    rows = list(
-        linked_graph.cypher(
-            "MATCH (a:A) RETURN a.id AS id, size((a)-[:R]->(:B)) AS deg ORDER BY a.id"
-        )
-    )
+    rows = list(linked_graph.cypher("MATCH (a:A) RETURN a.id AS id, size((a)-[:R]->(:B)) AS deg ORDER BY a.id"))
     assert [(r["id"], r["deg"]) for r in rows] == [(0, 2), (1, 1), (2, 0)]
 
 
@@ -75,11 +69,7 @@ def test_size_with_per_row_binding(linked_graph):
 def test_size_in_where_clause(linked_graph):
     """size((pattern)) in WHERE filter — common 'has at least N
     neighbors' shape."""
-    rows = list(
-        linked_graph.cypher(
-            "MATCH (a:A) WHERE size((a)-[:R]->(:B)) >= 2 RETURN a.id AS id"
-        )
-    )
+    rows = list(linked_graph.cypher("MATCH (a:A) WHERE size((a)-[:R]->(:B)) >= 2 RETURN a.id AS id"))
     ids = [r["id"] for r in rows]
     assert ids == [0]
 

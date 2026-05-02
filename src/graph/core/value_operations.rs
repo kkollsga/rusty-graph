@@ -92,10 +92,19 @@ pub fn arithmetic_mul(a: &Value, b: &Value) -> Value {
 }
 
 /// Divide two Values. Returns Null for incompatible types or division by zero.
+///
+/// Integer-by-integer division truncates toward zero (Neo4j / openCypher
+/// semantics — `1967 / 10 → 196`, `-7 / 2 → -3`). Promote to Float64 only
+/// when at least one operand is a float. The previous unconditional Float64
+/// promotion was a footgun that surfaced in date-bucketing patterns
+/// (e.g. `year / 10 * 10`); see 0.9.0 readiness §5.
 pub fn arithmetic_div(a: &Value, b: &Value) -> Value {
-    match (value_to_f64(a), value_to_f64(b)) {
-        (Some(x), Some(y)) if y != 0.0 => Value::Float64(x / y),
-        _ => Value::Null,
+    match (a, b) {
+        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x / y),
+        _ => match (value_to_f64(a), value_to_f64(b)) {
+            (Some(x), Some(y)) if y != 0.0 => Value::Float64(x / y),
+            _ => Value::Null,
+        },
     }
 }
 
@@ -394,10 +403,22 @@ mod tests {
 
     #[test]
     fn test_div_basic() {
-        match arithmetic_div(&Value::Int64(10), &Value::Int64(4)) {
+        // int / int → int (truncated toward zero), per Neo4j / openCypher.
+        // 0.9.0 §5: previously promoted unconditionally to Float64.
+        assert_eq!(
+            arithmetic_div(&Value::Int64(10), &Value::Int64(4)),
+            Value::Int64(2),
+        );
+        // Mixed: any float operand promotes the result.
+        match arithmetic_div(&Value::Int64(10), &Value::Float64(4.0)) {
             Value::Float64(v) => assert!((v - 2.5).abs() < 1e-10),
-            other => panic!("Expected Float64, got {:?}", other),
+            other => panic!("Expected Float64 for int/float, got {:?}", other),
         }
+        // Truncation toward zero on negatives — -7 / 2 = -3, not -4.
+        assert_eq!(
+            arithmetic_div(&Value::Int64(-7), &Value::Int64(2)),
+            Value::Int64(-3),
+        );
     }
 
     #[test]

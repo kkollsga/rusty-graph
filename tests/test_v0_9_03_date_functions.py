@@ -47,21 +47,13 @@ def datetime_graph():
 
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_year_accessor(datetime_graph):
-    rows = list(
-        datetime_graph.cypher(
-            "MATCH (n:X) RETURN n.id AS id, n.joined.year AS y ORDER BY n.id"
-        )
-    )
+    rows = list(datetime_graph.cypher("MATCH (n:X) RETURN n.id AS id, n.joined.year AS y ORDER BY n.id"))
     assert [(r["id"], r["y"]) for r in rows] == [(1, 2023), (2, 2024), (3, 2020)]
 
 
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_month_day(datetime_graph):
-    rows = list(
-        datetime_graph.cypher(
-            "MATCH (n:X) WHERE n.id = 1 RETURN n.joined.month AS m, n.joined.day AS d"
-        )
-    )
+    rows = list(datetime_graph.cypher("MATCH (n:X) WHERE n.id = 1 RETURN n.joined.month AS m, n.joined.day AS d"))
     assert rows[0]["m"] == 4
     assert rows[0]["d"] == 15
 
@@ -79,21 +71,13 @@ def test_datetime_hour_minute_second(datetime_graph):
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_year_in_filter(datetime_graph):
     """Decade-bucket pattern from the Sodir creaming-curve queries."""
-    rows = list(
-        datetime_graph.cypher(
-            "MATCH (n:X) WHERE n.joined.year >= 2023 RETURN n.id AS id ORDER BY n.id"
-        )
-    )
+    rows = list(datetime_graph.cypher("MATCH (n:X) WHERE n.joined.year >= 2023 RETURN n.id AS id ORDER BY n.id"))
     assert [r["id"] for r in rows] == [1, 2]
 
 
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_datetime_year_in_aggregation(datetime_graph):
-    rows = list(
-        datetime_graph.cypher(
-            "MATCH (n:X) RETURN n.joined.year AS year, count(n) AS c ORDER BY year"
-        )
-    )
+    rows = list(datetime_graph.cypher("MATCH (n:X) RETURN n.joined.year AS year, count(n) AS c ORDER BY year"))
     pairs = [(r["year"], r["c"]) for r in rows]
     assert pairs == [(2020, 1), (2023, 1), (2024, 1)]
 
@@ -115,11 +99,7 @@ def test_datetime_plus_duration():
     """date + 30 days arithmetic — the natural shape for "expires in N
     days" patterns."""
     g = kglite.KnowledgeGraph()
-    rows = list(
-        g.cypher(
-            "RETURN datetime('2023-01-15T00:00:00') + duration({days: 30}) AS d"
-        )
-    )
+    rows = list(g.cypher("RETURN datetime('2023-01-15T00:00:00') + duration({days: 30}) AS d"))
     # 2023-01-15 + 30 = 2023-02-14
     d = rows[0]["d"]
     # Accept any datetime representation; check year/month/day if dict-shaped

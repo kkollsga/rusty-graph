@@ -37,11 +37,7 @@ def nullable_graph():
 
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_order_by_desc_nulls_last(nullable_graph):
-    rows = list(
-        nullable_graph.cypher(
-            "MATCH (n:X) RETURN n.title AS t ORDER BY n.score DESC NULLS LAST, n.id ASC"
-        )
-    )
+    rows = list(nullable_graph.cypher("MATCH (n:X) RETURN n.title AS t ORDER BY n.score DESC NULLS LAST, n.id ASC"))
     titles = [r["t"] for r in rows]
     # 10.0 (A), 5.0 (C), then NULLs broken by id: B(2), D(4)
     assert titles == ["A", "C", "B", "D"]
@@ -49,11 +45,7 @@ def test_order_by_desc_nulls_last(nullable_graph):
 
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_order_by_asc_nulls_first(nullable_graph):
-    rows = list(
-        nullable_graph.cypher(
-            "MATCH (n:X) RETURN n.title AS t ORDER BY n.score ASC NULLS FIRST, n.id ASC"
-        )
-    )
+    rows = list(nullable_graph.cypher("MATCH (n:X) RETURN n.title AS t ORDER BY n.score ASC NULLS FIRST, n.id ASC"))
     titles = [r["t"] for r in rows]
     # NULLs first broken by id: B(2), D(4); then 5.0 (C), 10.0 (A)
     assert titles == ["B", "D", "C", "A"]
@@ -63,11 +55,7 @@ def test_order_by_asc_nulls_first(nullable_graph):
 def test_order_by_asc_nulls_last_explicit(nullable_graph):
     """ASC NULLS LAST is the Neo4j-default for ASC, but assert it
     explicitly to lock the parser shape."""
-    rows = list(
-        nullable_graph.cypher(
-            "MATCH (n:X) RETURN n.title AS t ORDER BY n.score ASC NULLS LAST, n.id ASC"
-        )
-    )
+    rows = list(nullable_graph.cypher("MATCH (n:X) RETURN n.title AS t ORDER BY n.score ASC NULLS LAST, n.id ASC"))
     titles = [r["t"] for r in rows]
     assert titles == ["C", "A", "B", "D"]
 
@@ -76,10 +64,6 @@ def test_order_by_asc_nulls_last_explicit(nullable_graph):
 def test_order_by_desc_nulls_first_explicit(nullable_graph):
     """DESC NULLS FIRST is the Neo4j-default for DESC, but assert
     it explicitly."""
-    rows = list(
-        nullable_graph.cypher(
-            "MATCH (n:X) RETURN n.title AS t ORDER BY n.score DESC NULLS FIRST, n.id ASC"
-        )
-    )
+    rows = list(nullable_graph.cypher("MATCH (n:X) RETURN n.title AS t ORDER BY n.score DESC NULLS FIRST, n.id ASC"))
     titles = [r["t"] for r in rows]
     assert titles == ["B", "D", "A", "C"]

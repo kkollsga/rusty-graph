@@ -127,12 +127,7 @@ def test_multipolygon_contains_point_no_duplicates():
             {
                 "id": 1,
                 "title": "multi",
-                "wkt_geometry": (
-                    "MULTIPOLYGON("
-                    "((0 0, 10 0, 10 10, 0 10, 0 0)),"
-                    "((20 0, 30 0, 30 10, 20 10, 20 0))"
-                    ")"
-                ),
+                "wkt_geometry": ("MULTIPOLYGON(((0 0, 10 0, 10 10, 0 10, 0 0)),((20 0, 30 0, 30 10, 20 10, 20 0)))"),
             },
         ]
     )

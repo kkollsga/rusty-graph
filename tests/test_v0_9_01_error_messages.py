@@ -64,9 +64,7 @@ def test_error_carries_column_number():
     g = kglite.KnowledgeGraph()
     msg = _try_cypher_capture_error(g, "RETURN ))")
     # Either column number or caret marker
-    assert "col" in msg.lower() or "column" in msg.lower() or "^" in msg, (
-        f"missing column info: {msg!r}"
-    )
+    assert "col" in msg.lower() or "column" in msg.lower() or "^" in msg, f"missing column info: {msg!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +90,11 @@ def test_intent_message_for_nulls_last():
 def test_intent_message_for_datetime_accessor():
     """`n.d.year` is §3. Same shape: error names the feature."""
     g = kglite.KnowledgeGraph()
-    msg = _try_cypher_capture_error(
-        g, "MATCH (n:X) RETURN n.joined.year AS y"
-    ).lower()
+    msg = _try_cypher_capture_error(g, "MATCH (n:X) RETURN n.joined.year AS y").lower()
     # Expect message mentions datetime / temporal / accessor
-    assert any(
-        kw in msg for kw in ("datetime", "temporal", "accessor", "not yet", "not implemented")
-    ), f"error doesn't read as intent-level: {msg!r}"
+    assert any(kw in msg for kw in ("datetime", "temporal", "accessor", "not yet", "not implemented")), (
+        f"error doesn't read as intent-level: {msg!r}"
+    )
 
 
 @pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
@@ -123,10 +119,6 @@ def test_caret_or_column_for_typo_extra_paren():
     parser error that should locate the bad `)`, not say "Expected
     Then, found RParen" with no positional info."""
     g = kglite.KnowledgeGraph()
-    msg = _try_cypher_capture_error(
-        g, "MATCH (n:X) RETURN CASE WHEN count(n)) THEN 1 END"
-    )
+    msg = _try_cypher_capture_error(g, "MATCH (n:X) RETURN CASE WHEN count(n)) THEN 1 END")
     # Either caret marker or numeric column
-    assert "^" in msg or "col" in msg.lower() or "column" in msg.lower(), (
-        f"no positional info on typo error: {msg!r}"
-    )
+    assert "^" in msg or "col" in msg.lower() or "column" in msg.lower(), f"no positional info on typo error: {msg!r}"

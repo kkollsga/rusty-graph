@@ -174,8 +174,14 @@ fn test_arithmetic_mul() {
 
 #[test]
 fn test_arithmetic_div() {
+    // int / int → int (truncated), per 0.9.0 §5. Float promotion only
+    // when at least one operand is a float.
     assert_eq!(
         arithmetic_div(&Value::Int64(10), &Value::Int64(4)),
+        Value::Int64(2)
+    );
+    assert_eq!(
+        arithmetic_div(&Value::Int64(10), &Value::Float64(4.0)),
         Value::Float64(2.5)
     );
 }

@@ -19,7 +19,6 @@ import kglite
 NOT_IMPLEMENTED = "0.9.0 §5 — int÷int currently promotes to float; flip when fixed."
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_int_div_int_returns_int():
     g = kglite.KnowledgeGraph()
     rows = list(g.cypher("RETURN 1967 / 10 AS d"))
@@ -27,7 +26,6 @@ def test_int_div_int_returns_int():
     assert isinstance(rows[0]["d"], int), f"expected int, got {type(rows[0]['d']).__name__}"
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_decade_bucketing_pattern():
     """The Sodir creaming-curve query shape: bucket year into decade."""
     g = kglite.KnowledgeGraph()
@@ -35,7 +33,6 @@ def test_decade_bucketing_pattern():
     assert rows[0]["decade"] == 1960
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED)
 def test_int_div_negative():
     g = kglite.KnowledgeGraph()
     rows = list(g.cypher("RETURN -7 / 2 AS d"))
