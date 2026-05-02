@@ -973,9 +973,30 @@ impl ColumnStore {
     /// on mapped / disk graphs where properties live in the columnar store
     /// rather than in a per-node heap map. Returns `true` on success.
     pub fn set_title(&mut self, row_id: u32, value: &Value) -> bool {
-        let Some(col) = self.title_column.as_mut() else {
+        if (row_id as usize) >= self.row_count as usize {
             return false;
-        };
+        }
+        // Lazy promotion: if this store is mmap-backed, the local
+        // `title_column` is None and `set_title` would silently drop the
+        // write (pre-0.9.4 Bug C). Materialize a Mixed column from the
+        // mmap-backed titles so subsequent reads via `get_title` see
+        // both the override at `row_id` and the original titles for the
+        // rest. The new column is dense (one entry per row); titles for
+        // unmodified rows are read out of mmap once and rewritten as
+        // owned Values, paying a one-time RAM cost on first SET-title.
+        if self.title_column.is_none() {
+            if let Some(ref ms) = self.mmap_store {
+                let row_count = ms.row_count();
+                let mut mixed: Vec<Value> = Vec::with_capacity(row_count as usize);
+                for i in 0..row_count {
+                    mixed.push(ms.get_title(i).unwrap_or(Value::Null));
+                }
+                self.title_column = Some(TypedColumn::Mixed { data: mixed });
+            } else {
+                return false;
+            }
+        }
+        let col = self.title_column.as_mut().unwrap();
         if (row_id as usize) >= col.len() {
             return false;
         }
@@ -1001,10 +1022,16 @@ impl ColumnStore {
     /// Get the node title from the title column at the given row.
     #[inline]
     pub fn get_title(&self, row_id: u32) -> Option<Value> {
+        // Same overlay rule as `get`: in-memory `title_column`
+        // (populated lazily by `set_title` on first override) always
+        // wins over the mmap-backed read.
+        if let Some(ref col) = self.title_column {
+            return col.get(row_id);
+        }
         if let Some(ref ms) = self.mmap_store {
             return ms.get_title(row_id);
         }
-        self.title_column.as_ref()?.get(row_id)
+        None
     }
 
     /// Whether this store has id/title columns (mapped mode).
@@ -1076,9 +1103,6 @@ impl ColumnStore {
     /// Falls back to the overflow bag when the key isn't in the schema or the
     /// dense column value is null.
     pub fn get(&self, row_id: u32, key: InternedKey) -> Option<Value> {
-        if let Some(ref ms) = self.mmap_store {
-            return ms.get(row_id, key);
-        }
         if row_id >= self.row_count {
             return None;
         }
@@ -1090,10 +1114,21 @@ impl ColumnStore {
         {
             return None;
         }
+        // In-memory write overlay always wins over the mmap-backed read.
+        // Pre-0.9.4 the mmap-backed branch short-circuited at the top of
+        // this method, so any Cypher SET that landed in `self.columns`
+        // via `set()` was invisible on read — `MATCH … SET p.x = 1` would
+        // succeed (count=1 returned) but a subsequent `RETURN p.x` saw
+        // `None`. Triggered by the `load_ntriples` build path that
+        // constructs ColumnStores via `from_mmap_store`. Bug C in the
+        // 0.9.3 disk-mode regression report.
         if let Some(slot) = self.schema.slot(key) {
             if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
                 return Some(val);
             }
+        }
+        if let Some(ref ms) = self.mmap_store {
+            return ms.get(row_id, key);
         }
         // Fall back to overflow bag
         self.get_overflow_property(row_id, key)
@@ -1106,9 +1141,6 @@ impl ColumnStore {
     /// significant on mapped graphs where string property scans are the
     /// main perf gap vs in-memory mode.
     pub fn str_prop_eq(&self, row_id: u32, key: InternedKey, target: &str) -> Option<bool> {
-        if let Some(ref ms) = self.mmap_store {
-            return ms.str_prop_eq(row_id, key, target);
-        }
         if row_id >= self.row_count
             || self
                 .tombstones
@@ -1118,17 +1150,19 @@ impl ColumnStore {
         {
             return None;
         }
+        // In-memory overlay wins over mmap (mirrors `get` — Bug C fix).
         if let Some(slot) = self.schema.slot(key) {
             if let Some(col) = self.columns.get(slot as usize) {
                 if let Some(s) = col.get_str(row_id) {
                     return Some(s == target);
                 }
-                // Column present but not a Str variant, or null.
-                // Fall back to value-based compare for mixed columns.
                 if let Some(v) = col.get(row_id) {
                     return Some(matches!(v, Value::String(ref s) if s == target));
                 }
             }
+        }
+        if let Some(ref ms) = self.mmap_store {
+            return ms.str_prop_eq(row_id, key, target);
         }
         self.get_overflow_property(row_id, key)
             .map(|v| matches!(v, Value::String(ref s) if s == target))
@@ -1216,9 +1250,6 @@ impl ColumnStore {
     /// Iterate over all non-null properties for a row.
     /// Returns (InternedKey, Value) pairs from both dense columns and overflow bag.
     pub fn row_properties(&self, row_id: u32) -> Vec<(InternedKey, Value)> {
-        if let Some(ref ms) = self.mmap_store {
-            return ms.row_properties(row_id);
-        }
         if row_id >= self.row_count
             || self
                 .tombstones
@@ -1228,8 +1259,35 @@ impl ColumnStore {
         {
             return Vec::new();
         }
+        // Build up the in-memory overlay first so `keys(node)` and
+        // similar surface operators can see Cypher-SET-introduced
+        // properties on mmap-backed stores. Then merge with the
+        // mmap-backed row, with the in-memory overlay winning on
+        // collisions. Pre-0.9.4 the mmap-backed branch short-
+        // circuited and SET-introduced keys never appeared.
         let mut result = Vec::new();
+        let mut seen: std::collections::HashSet<InternedKey> = std::collections::HashSet::new();
         for (slot, ik) in self.schema.iter() {
+            if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
+                seen.insert(ik);
+                result.push((ik, val));
+            }
+        }
+        if let Some(ref ms) = self.mmap_store {
+            for (ik, val) in ms.row_properties(row_id) {
+                if !seen.contains(&ik) {
+                    result.push((ik, val));
+                }
+            }
+            return result;
+        }
+        for (slot, ik) in self.schema.iter() {
+            // re-iterate to keep overflow-bag fall-through unchanged for
+            // the non-mmap path (the loop above already inserted dense
+            // entries; below we only fill blanks).
+            if seen.contains(&ik) {
+                continue;
+            }
             if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
                 result.push((ik, val));
             }

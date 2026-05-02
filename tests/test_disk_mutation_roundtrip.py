@@ -513,3 +513,74 @@ def test_disk_parallel_projection_no_interner_corruption(tmp_path, capfd):
     out, err = capfd.readouterr()
     bug_lines = [ln for ln in err.splitlines() if "BUG: InternedKey" in ln and "not found" in ln]
     assert not bug_lines, f"Disk parallel projection still racing on the StringInterner: {bug_lines[:3]}"
+
+
+@pytest.mark.parametrize("mode", ["mapped", "disk"])
+def test_cypher_set_visible_on_mmap_backed_columnstore(mode, tmp_path):
+    """Cypher SET on a mmap-backed ColumnStore must be visible on
+    subsequent reads.
+
+    Pre-0.9.4 Bug C: when a ColumnStore is constructed via
+    `from_mmap_store` — the path `load_ntriples` always takes for
+    mapped / disk targets — every read method (`get`, `get_title`,
+    `str_prop_eq`, `row_properties`) short-circuited to the mmap-backed
+    store at the top of the function. But `set()` and `set_title()`
+    wrote into `self.columns` / `self.title_column` — fields the read
+    short-circuit bypassed. So `MATCH (a) SET a.x = 1 RETURN count(a)`
+    returned the expected `count = 1` (proving the SET matched + the
+    writer reported success), but a follow-up `RETURN a.x` returned
+    `None`. Surfaced by the cross-mode consistency check on a
+    Wikidata-style graph: memory mode reported the SET marker
+    correctly, mapped + disk reported the property as NULL.
+
+    Fix: `get` / `get_title` / `str_prop_eq` / `row_properties` consult
+    the in-memory overlay first and only fall through to the mmap-backed
+    read when no override exists. `set_title` lazily promotes the mmap-
+    backed title column into a Mixed in-memory column on first override
+    so the dense title column doesn't have to be allocated up-front.
+
+    `add_nodes` + save + reload doesn't take the from_mmap_store path
+    today (column blobs reload as in-memory `columns: Vec<TypedColumn>`
+    with `mmap_store: None`), so the bug requires `load_ntriples` to
+    reproduce. The test writes a tiny `.nt` inline, loads it into
+    mapped + disk, applies SET, and reads back.
+    """
+    nt_path = tmp_path / "tiny.nt"
+    # 5 Q-entities each with a title (rdfs:label@en) + P31 instance-of
+    # so the type rename surfaces them. load_ntriples in mapped / disk
+    # mode populates ColumnStores via from_mmap_store regardless of
+    # input size — that's enough to trigger Bug C.
+    nt_lines = []
+    for i in range(1, 6):
+        nt_lines.append(
+            f'<http://www.wikidata.org/entity/Q{i}> <http://www.w3.org/2000/01/rdf-schema#label> "orig{i}"@en .'
+        )
+        nt_lines.append(
+            f"<http://www.wikidata.org/entity/Q{i}> "
+            f"<http://www.wikidata.org/prop/direct/P31> "
+            f"<http://www.wikidata.org/entity/Q5> ."
+        )
+    nt_path.write_text("\n".join(nt_lines) + "\n")
+
+    if mode == "mapped":
+        kg = KnowledgeGraph(storage="mapped")
+    else:
+        kg = KnowledgeGraph(storage="disk", path=str(tmp_path / "g_disk"))
+    kg.load_ntriples(str(nt_path), languages=["en"], verbose=False)
+
+    pre = _rows(kg.cypher("MATCH (a {nid: 'Q3'}) RETURN a.title AS t"))
+    assert pre == [{"t": "orig3"}], f"{mode}: load_ntriples didn't materialise Q3: {pre}"
+
+    # SET an existing property (title — set_title's lazy-promotion
+    # branch) AND a new property name (bench_marker — the schema-
+    # extension branch in `set`). The SET clause itself reports
+    # success either way; pre-fix the regression was only on the read.
+    rep = _rows(kg.cypher("MATCH (a {nid: 'Q3'}) SET a.title = 'updated', a.bench_marker = 1 RETURN count(a) AS n"))
+    assert rep == [{"n": 1}], f"{mode}: SET clause didn't match Q3: {rep}"
+
+    rb = _rows(kg.cypher("MATCH (a {nid: 'Q3'}) RETURN a.title AS t, a.bench_marker AS m"))
+    assert rb == [{"t": "updated", "m": 1}], f"{mode}: SET visibility regression on mmap-backed ColumnStore: {rb}"
+
+    # Sibling row must be untouched (overlay must not leak across rows).
+    other = _rows(kg.cypher("MATCH (a {nid: 'Q4'}) RETURN a.title AS t, a.bench_marker AS m"))
+    assert other == [{"t": "orig4", "m": None}], f"{mode}: SET overlay leaked into a non-target row: {other}"

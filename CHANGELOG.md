@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-05-02
+
+### Disk- and mapped-mode regression fix — Cypher SET silently no-oped on mmap-backed ColumnStores
+
+Cypher `SET` on nodes whose property storage was an mmap-backed
+`ColumnStore` (the path `load_ntriples` always takes for mapped /
+disk targets, regardless of input size) reported success at the
+clause boundary — `MATCH (a) SET a.x = 1 RETURN count(a)` returned
+the expected `count = 1` — but a follow-up `RETURN a.x` came back
+`None`. The clause matched, the writer reported success, but the
+write was invisible on read. Same pattern for `SET a.title = …`:
+the title column held the old value forever.
+
+**Root cause.** `ColumnStore::from_mmap_store` builds a store with
+`schema = TypeSchema::new()` (empty), `columns = Vec::new()`,
+`title_column = None`, and `mmap_store = Some(...)` carrying the
+real data. Every read method (`get`, `get_title`, `str_prop_eq`,
+`row_properties`) short-circuited to the mmap-backed read at the
+top of the function — but `set` and `set_title` wrote into the
+local `self.columns` / `self.title_column` fields the readers
+bypassed. The fix to 0.9.2's disk-mode SET visibility regression
+(per-clause `flush_pending_writes` + `sync_column_stores_from_disk`)
+landed the writes in the right place; readers just couldn't see
+them once the store was mmap-backed.
+
+The bug only surfaced for `load_ntriples`-built graphs: `add_nodes`
+followed by save+reload produces ColumnStores whose blobs reload as
+in-memory `columns: Vec<TypedColumn>` with `mmap_store: None`, so
+the read short-circuit never fires there. Sodir's
+`from_blueprint` build → save → reload path passes the existing
+SET-roundtrip parity tests for the same reason.
+
+**Fix.** `get` / `get_title` / `str_prop_eq` / `row_properties` now
+consult the in-memory overlay first and only fall through to the
+mmap-backed read when no override exists for that (row, key).
+`set_title` lazy-promotes the mmap-backed title column into a
+Mixed in-memory column on first override, so the dense title column
+isn't allocated up-front (avoiding the multi-million-row
+materialisation that an eager promotion would force on Wikidata).
+
+**Verification on the cross-mode consistency harness**
+(`bench/cross_mode_consistency.py`, runs the same edit + read
+queries against every (graph, mode) cell and SHA-256s the rows):
+
+| graph | mode coverage | pre-fix `verify_edit` digest | post-fix |
+|-------|---------------|------------------------------|----------|
+| legal      | memory + mapped + disk | identical | identical ✓ |
+| sodir      | memory + mapped + disk | identical | identical ✓ |
+| wiki100m   | memory + mapped + disk | memory=`278f…9516`, mapped/disk=∅ | all `278f…9516` ✓ |
+| wiki500m   | mapped + disk          | mapped/disk=∅ vs absent canonical | both `278f…9516` ✓ |
+
+Read-only queries (simple / medium / complex) were already
+identical pre-fix; this release closes the SET-visibility gap.
+
+Regression test `test_cypher_set_visible_on_mmap_backed_columnstore`
+in `tests/test_disk_mutation_roundtrip.py` builds a tiny inline
+`.nt` with 5 Q-entities, loads it under mapped + disk, applies SET
+to both a new property name AND `title`, and asserts the writes are
+visible. Test fails with the fix reverted (confirmed by
+`git stash`-ing `column_store.rs` only).
+
+585 cargo, 2337 pytest, 97/97 parity, lint clean.
+
 ## [0.9.3] — 2026-05-02
 
 ### Disk-mode regression fix — parallel projection data race on `node_arena`
