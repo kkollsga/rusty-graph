@@ -106,9 +106,19 @@ impl<'a> CypherExecutor<'a> {
                     None => return false,
                 };
 
-                // Get contained point
-                let (lat, lon) = match &spec.contained {
-                    ContainsTarget::ConstantPoint(lat, lon) => (*lat, *lon),
+                // Get contained side: a Point (location | constant) or
+                // — 0.9.0 §4 — a Geometry (when the contained variable
+                // is a polygon-bearing node with no Location). The
+                // pre-§4 fast path silently returned false for the
+                // polygon-vs-polygon case, masking outer-contains-inner
+                // matches.
+                #[derive(Clone)]
+                enum ContainedSide {
+                    Point(f64, f64),
+                    Geom(Arc<geo::Geometry<f64>>, Option<geo::Rect<f64>>),
+                }
+                let contained = match &spec.contained {
+                    ContainsTarget::ConstantPoint(lat, lon) => ContainedSide::Point(*lat, *lon),
                     ContainsTarget::Variable { name } => {
                         let contained_idx = match row.node_bindings.get(name) {
                             Some(&idx) => idx,
@@ -116,30 +126,54 @@ impl<'a> CypherExecutor<'a> {
                         };
                         self.ensure_node_spatial_cached(contained_idx);
                         let cache = self.spatial_node_cache.read().unwrap();
-                        match cache
+                        let resolved = cache
                             .get(&contained_idx.index())
                             .and_then(|opt| opt.as_ref())
-                        {
-                            Some(data) => match data.location {
-                                Some((lat, lon)) => (lat, lon),
-                                None => return false,
-                            },
-                            _ => return false,
+                            .and_then(|data| {
+                                if let Some((lat, lon)) = data.location {
+                                    Some(ContainedSide::Point(lat, lon))
+                                } else {
+                                    data.geometry
+                                        .as_ref()
+                                        .map(|(g, bb)| ContainedSide::Geom(Arc::clone(g), *bb))
+                                }
+                            });
+                        match resolved {
+                            Some(c) => c,
+                            None => return false,
                         }
                     }
                 };
 
-                // Bbox pre-filter
-                if let Some(bb) = bbox {
-                    if lon < bb.min().x || lon > bb.max().x || lat < bb.min().y || lat > bb.max().y
-                    {
-                        return spec.negated;
+                let result = match &contained {
+                    ContainedSide::Point(lat, lon) => {
+                        // Bbox pre-filter
+                        if let Some(bb) = bbox {
+                            if *lon < bb.min().x
+                                || *lon > bb.max().x
+                                || *lat < bb.min().y
+                                || *lat > bb.max().y
+                            {
+                                return spec.negated;
+                            }
+                        }
+                        let pt = geo::Point::new(*lon, *lat);
+                        crate::graph::features::spatial::geometry_contains_point(&geom, &pt)
                     }
-                }
-
-                // Full polygon test
-                let pt = geo::Point::new(lon, lat);
-                let result = crate::graph::features::spatial::geometry_contains_point(&geom, &pt);
+                    ContainedSide::Geom(g2, bbox2) => {
+                        // Bbox pre-filter for geom-vs-geom
+                        if let (Some(bb1), Some(bb2)) = (bbox, *bbox2) {
+                            if bb1.max().x < bb2.min().x
+                                || bb2.max().x < bb1.min().x
+                                || bb1.max().y < bb2.min().y
+                                || bb2.max().y < bb1.min().y
+                            {
+                                return spec.negated;
+                            }
+                        }
+                        crate::graph::features::spatial::geometry_contains_geometry(&geom, g2)
+                    }
+                };
                 if spec.negated {
                     !result
                 } else {

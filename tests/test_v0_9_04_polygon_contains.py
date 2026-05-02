@@ -48,7 +48,6 @@ def nested_polygons_graph():
     return g
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED_POLY)
 def test_polygon_contains_polygon_inside(nested_polygons_graph):
     rows = list(
         nested_polygons_graph.cypher(
@@ -116,7 +115,6 @@ def test_polygon_contains_partial_overlap_returns_zero():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=NOT_IMPLEMENTED_MULTI)
 def test_multipolygon_contains_point_no_duplicates():
     """A MULTIPOLYGON with two components, only one of which contains
     the point. Must emit exactly one (a, b) row, not multiple.
