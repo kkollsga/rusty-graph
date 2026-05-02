@@ -22,6 +22,9 @@ pub enum CypherToken {
     In,
     Is,
     Null,
+    /// `NULLS` keyword used in ORDER BY clauses (e.g. `ORDER BY x DESC NULLS LAST`).
+    /// 0.9.0 §2 — distinct from `Null`.
+    Nulls,
     Limit,
     Skip,
     Unwind,
@@ -411,6 +414,7 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "IN" => CypherToken::In,
         "IS" => CypherToken::Is,
         "NULL" => CypherToken::Null,
+        "NULLS" => CypherToken::Nulls,
         "LIMIT" => CypherToken::Limit,
         "SKIP" => CypherToken::Skip,
         "UNWIND" => CypherToken::Unwind,
@@ -469,6 +473,7 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
         CypherToken::In => "in",
         CypherToken::Is => "is",
         CypherToken::Null => "null",
+        CypherToken::Nulls => "nulls",
         CypherToken::Limit => "limit",
         CypherToken::Skip => "skip",
         CypherToken::Unwind => "unwind",

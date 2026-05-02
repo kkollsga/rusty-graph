@@ -1097,14 +1097,49 @@ impl<'a> CypherExecutor<'a> {
             })
             .collect();
 
+        // Pre-compute effective nulls placement per item: explicit
+        // NULLS FIRST/LAST wins; otherwise ASC → Last, DESC → First
+        // (Neo4j 5+ defaults). 0.9.0 §2.
+        use crate::graph::languages::cypher::ast::NullsPlacement;
+        let nulls_placement: Vec<NullsPlacement> = clause
+            .items
+            .iter()
+            .map(|item| item.effective_nulls())
+            .collect();
+
         // Create indices and sort them
         let mut indices: Vec<usize> = (0..result_set.rows.len()).collect();
         indices.sort_by(|&a, &b| {
             for (i, item) in clause.items.iter().enumerate() {
-                if let Some(ordering) = crate::graph::core::filtering::compare_values(
-                    &sort_keys[a][i],
-                    &sort_keys[b][i],
-                ) {
+                let key_a = &sort_keys[a][i];
+                let key_b = &sort_keys[b][i];
+
+                // Explicit NULL handling — overrides compare_values' default
+                // (which puts NULL Less than everything). Honors per-item
+                // NULLS FIRST/LAST regardless of ASC/DESC.
+                let a_null = matches!(key_a, Value::Null);
+                let b_null = matches!(key_b, Value::Null);
+                let null_ordering = match (a_null, b_null) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => match nulls_placement[i] {
+                        NullsPlacement::First => std::cmp::Ordering::Less,
+                        NullsPlacement::Last => std::cmp::Ordering::Greater,
+                    },
+                    (false, true) => match nulls_placement[i] {
+                        NullsPlacement::First => std::cmp::Ordering::Greater,
+                        NullsPlacement::Last => std::cmp::Ordering::Less,
+                    },
+                    (false, false) => std::cmp::Ordering::Equal, // fall through to value compare
+                };
+                if null_ordering != std::cmp::Ordering::Equal {
+                    return null_ordering;
+                }
+                if a_null || b_null {
+                    continue; // both null after the match above; move to next sort item
+                }
+
+                if let Some(ordering) = crate::graph::core::filtering::compare_values(key_a, key_b)
+                {
                     let ordering = if item.ascending {
                         ordering
                     } else {
@@ -1389,6 +1424,7 @@ impl<'a> CypherExecutor<'a> {
                         items: vec![OrderItem {
                             expression: return_clause.items[score_item_index].expression.clone(),
                             ascending: !descending,
+                            nulls: None,
                         }],
                     };
                     let result = self.execute_order_by(&order_clause, result)?;

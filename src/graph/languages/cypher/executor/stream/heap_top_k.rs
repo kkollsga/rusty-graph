@@ -13,7 +13,7 @@
 //! references — which matters when the upstream cardinality is in the
 //! tens of millions but K is a few dozen.
 
-use super::super::super::ast::OrderItem;
+use super::super::super::ast::{NullsPlacement, OrderItem};
 use super::super::super::result::ResultRow;
 use super::super::CypherExecutor;
 use super::RowStream;
@@ -21,35 +21,67 @@ use crate::datatypes::values::Value;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+/// Per-key sort spec: ASC/DESC + nulls placement. Pre-resolved at
+/// stream-build time so the inner loop is a pure `&[SortSpec]` walk.
+/// 0.9.0 §2.
+#[derive(Clone, Copy)]
+struct SortSpec {
+    ascending: bool,
+    nulls: NullsPlacement,
+}
+
 /// A sort-key tuple paired with the row it belongs to. The `Ord` impl
 /// orders entries so that the heap's *root* is the entry the operator
 /// wants to evict first when the heap grows past K.
 ///
-/// `directions[i] == true` for ascending (smaller is better, evict
+/// `specs[i].ascending == true` for ascending (smaller is better, evict
 /// largest), `false` for descending (larger is better, evict smallest).
 struct HeapEntry {
     sort_keys: Vec<Value>,
-    directions: std::sync::Arc<[bool]>,
+    specs: std::sync::Arc<[SortSpec]>,
     row: ResultRow,
 }
 
 impl HeapEntry {
-    /// Compare two entries respecting the ASC/DESC direction of each
-    /// key. Returns `Ordering` from the perspective of "which entry is
-    /// better according to the user's ORDER BY direction" — better
-    /// entries compare *Less* so that `BinaryHeap` (max-heap) keeps
-    /// the worst at the root.
+    /// Compare two entries respecting the ASC/DESC direction and NULLS
+    /// placement of each key. Returns `Ordering` from the perspective
+    /// of "which entry is better according to the user's ORDER BY" —
+    /// better entries compare *Less* so that `BinaryHeap` (max-heap)
+    /// keeps the worst at the root.
     fn cmp_better_first(&self, other: &Self) -> Ordering {
-        for (i, &asc) in self.directions.iter().enumerate() {
+        for (i, spec) in self.specs.iter().enumerate() {
             let a = self.sort_keys.get(i).unwrap_or(&Value::Null);
             let b = other.sort_keys.get(i).unwrap_or(&Value::Null);
+
+            // Explicit NULLS placement. NULL First → NULL is "better"
+            // (sorts earlier in result, evicted last). NULL Last → NULL
+            // is "worse".
+            let a_null = matches!(a, Value::Null);
+            let b_null = matches!(b, Value::Null);
+            match (a_null, b_null) {
+                (true, true) => continue,
+                (true, false) => {
+                    return match spec.nulls {
+                        NullsPlacement::First => Ordering::Less,
+                        NullsPlacement::Last => Ordering::Greater,
+                    };
+                }
+                (false, true) => {
+                    return match spec.nulls {
+                        NullsPlacement::First => Ordering::Greater,
+                        NullsPlacement::Last => Ordering::Less,
+                    };
+                }
+                (false, false) => {}
+            }
+
             let raw =
                 crate::graph::core::filtering::compare_values(a, b).unwrap_or(Ordering::Equal);
             // `raw == Less` means a is smaller. For ascending order,
             // smaller is "better" (closer to top of final result).
             // We want better entries to compare `Less` so the
             // max-heap root holds the worst entry.
-            let oriented = if asc { raw } else { raw.reverse() };
+            let oriented = if spec.ascending { raw } else { raw.reverse() };
             if oriented != Ordering::Equal {
                 return oriented;
             }
@@ -117,9 +149,12 @@ pub fn apply<'q>(
         .map(|item| executor.fold_constants_expr(&item.expression))
         .collect();
 
-    let directions: std::sync::Arc<[bool]> = order_items
+    let specs: std::sync::Arc<[SortSpec]> = order_items
         .iter()
-        .map(|item| item.ascending)
+        .map(|item| SortSpec {
+            ascending: item.ascending,
+            nulls: item.effective_nulls(),
+        })
         .collect::<Vec<_>>()
         .into();
 
@@ -139,7 +174,7 @@ pub fn apply<'q>(
 
         let entry = HeapEntry {
             sort_keys,
-            directions: directions.clone(),
+            specs: specs.clone(),
             row,
         };
 

@@ -533,11 +533,36 @@ pub struct OrderByClause {
     pub items: Vec<OrderItem>,
 }
 
-/// Single ORDER BY item: expression + direction
+/// NULLS placement modifier for an ORDER BY item.
+/// 0.9.0 §2: explicit `NULLS FIRST` / `NULLS LAST` in the source.
+/// Default mirrors Neo4j 5+ — NULLS LAST for ASC, NULLS FIRST for DESC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullsPlacement {
+    First,
+    Last,
+}
+
+/// Single ORDER BY item: expression + direction.
+/// `nulls` is `None` when the source omitted `NULLS FIRST/LAST`; the
+/// executor falls back to the `ascending`-derived default.
 #[derive(Debug, Clone)]
 pub struct OrderItem {
     pub expression: Expression,
     pub ascending: bool,
+    pub nulls: Option<NullsPlacement>,
+}
+
+impl OrderItem {
+    /// Effective NULLS placement: explicit modifier wins, otherwise
+    /// ASC → Last, DESC → First (Neo4j 5+ default).
+    #[inline]
+    pub fn effective_nulls(&self) -> NullsPlacement {
+        self.nulls.unwrap_or(if self.ascending {
+            NullsPlacement::Last
+        } else {
+            NullsPlacement::First
+        })
+    }
 }
 
 /// SKIP clause

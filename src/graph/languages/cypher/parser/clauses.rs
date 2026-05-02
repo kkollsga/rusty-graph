@@ -129,9 +129,36 @@ impl CypherParser {
             _ => true, // default ascending
         };
 
+        // 0.9.0 §2 — optional NULLS FIRST / NULLS LAST modifier.
+        // Default placement (when omitted) is NULLS LAST for ASC and
+        // NULLS FIRST for DESC, computed at sort time via
+        // OrderItem::effective_nulls().
+        let nulls = if matches!(self.peek(), Some(CypherToken::Nulls)) {
+            self.advance();
+            match self.peek() {
+                Some(CypherToken::Identifier(ident)) if ident.eq_ignore_ascii_case("first") => {
+                    self.advance();
+                    Some(crate::graph::languages::cypher::ast::NullsPlacement::First)
+                }
+                Some(CypherToken::Identifier(ident)) if ident.eq_ignore_ascii_case("last") => {
+                    self.advance();
+                    Some(crate::graph::languages::cypher::ast::NullsPlacement::Last)
+                }
+                other => {
+                    return Err(format!(
+                        "Expected FIRST or LAST after NULLS in ORDER BY, found {:?}",
+                        other
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(OrderItem {
             expression,
             ascending,
+            nulls,
         })
     }
 
