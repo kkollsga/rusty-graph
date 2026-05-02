@@ -1460,6 +1460,17 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         }
     }
 
+    // Backfill the connection_types O(1)-lookup cache from the loaded
+    // metadata. The v3 / file loader does this at line 1606 of read_v3;
+    // the disk loader was the only path that left it empty and relied
+    // on `has_connection_type`'s metadata-fallback branch. The fallback
+    // is correct on a freshly-loaded graph but flips into the wrong
+    // branch the moment any code path calls `register_connection_type`
+    // (which inserts into the cache and trips the "use cache" fast
+    // path on subsequent lookups). Backfilling here keeps the cache
+    // authoritative throughout the lifetime of the loaded graph.
+    graph.build_connection_types_cache();
+
     log_stage("load_disk_dir_total", _load_t);
 
     Ok(KnowledgeGraph {

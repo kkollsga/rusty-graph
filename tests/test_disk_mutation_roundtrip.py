@@ -584,3 +584,95 @@ def test_cypher_set_visible_on_mmap_backed_columnstore(mode, tmp_path):
     # Sibling row must be untouched (overlay must not leak across rows).
     other = _rows(kg.cypher("MATCH (a {nid: 'Q4'}) RETURN a.title AS t, a.bench_marker AS m"))
     assert other == [{"t": "orig4", "m": None}], f"{mode}: SET overlay leaked into a non-target row: {other}"
+
+
+def test_register_new_conn_type_preserves_existing_type_lookups(tmp_path):
+    """add_connections of a brand-new edge type on a *loaded* disk graph
+    must not break MATCH queries on existing edge types.
+
+    Pre-0.9.5 Bug C (separate from the SET-visibility bug also called
+    Bug C in the prior release report — naming collision). After
+    `kglite.load(disk_graph_path)`, the `connection_types` HashSet
+    cache was empty (the disk loader, unlike `load_v3`, never called
+    `build_connection_types_cache`). `has_connection_type("EXISTING")`
+    fell through to the `connection_type_metadata` branch and
+    correctly returned True.
+
+    The moment any code path called `register_connection_type("NEW")`
+    — e.g. via `add_connections` — the `connection_types` set went
+    from empty to {NEW}, which flipped `has_connection_type` into the
+    "use cache" fast path. From that point on,
+    `has_connection_type("EXISTING")` returned False, and every typed
+    MATCH (`MATCH (a)-[:EXISTING]->(b)`) returned 0 rows because the
+    pattern matcher's early-exit "skip iteration when the conn type
+    doesn't exist" check fired. Surfaced on the Sodir
+    load-then-enhance flow: stages that traverse FK edges
+    (`OF_DISCOVERY`, `OF_FIELD`, `OF_PROSPECT`, `IN_PLAY`) all
+    silently produced 0 rows after the first `add_connections` of the
+    re-enhance pass.
+
+    Fix: backfill the cache from `connection_type_metadata` in
+    `load_disk_dir`, AND make `register_connection_type` lazy-build
+    the cache when called against an empty set with non-empty metadata.
+    Either layer alone closes the bug; both keeps the cache
+    authoritative for any code path.
+    """
+    graph_path = str(tmp_path / "g_disk")
+    kg = KnowledgeGraph(storage="disk", path=graph_path)
+    # Two node types + one edge type. Save + reload to mimic the
+    # production "kglite.load(saved_graph)" workflow.
+    kg.add_nodes(
+        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}"} for i in range(5)]),
+        "Person",
+        "id",
+        "title",
+    )
+    kg.add_nodes(
+        pd.DataFrame([{"id": f"C_{i}", "title": f"C{i}"} for i in range(3)]),
+        "Company",
+        "id",
+        "title",
+    )
+    kg.add_connections(
+        pd.DataFrame([{"src": f"P_{i}", "tgt": "C_0"} for i in range(5)]),
+        "WORKS_AT",
+        "Person",
+        "src",
+        "Company",
+        "tgt",
+    )
+    kg.save(graph_path)
+    reloaded = kglite.load(graph_path)
+
+    # Sanity: existing edge type findable on a fresh load.
+    pre = _rows(reloaded.cypher("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN count(*) AS n"))
+    assert pre == [{"n": 5}], f"existing edge type not findable post-load: {pre}"
+
+    # Trigger: register a brand-new edge type. Pre-fix, this flipped
+    # has_connection_type from "metadata fallback" to "cache lookup"
+    # mode, and the cache only contained the new key.
+    reloaded.add_connections(
+        pd.DataFrame([{"src": "P_0", "tgt": "P_1"}]),
+        "FRIENDS_WITH",
+        "Person",
+        "src",
+        "Person",
+        "tgt",
+    )
+
+    # Existing edge type must still be findable.
+    post = _rows(reloaded.cypher("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN count(*) AS n"))
+    assert post == [{"n": 5}], f"adding a new edge type broke MATCH on the existing edge type: {post}"
+
+    # And the new edge is also findable.
+    new_edges = _rows(reloaded.cypher("MATCH (a:Person)-[:FRIENDS_WITH]->(b:Person) RETURN count(*) AS n"))
+    assert new_edges == [{"n": 1}], f"new edge type lost: {new_edges}"
+
+    # And the unanchored read is consistent (this never broke pre-fix
+    # but covering it lets a single test catch any regression in either
+    # the cache-fast-path or the metadata-fallback branch).
+    by_type = _rows(reloaded.cypher("MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS n ORDER BY t"))
+    assert by_type == [
+        {"t": "FRIENDS_WITH", "n": 1},
+        {"t": "WORKS_AT", "n": 5},
+    ], f"per-type edge counts diverged after register: {by_type}"

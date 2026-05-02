@@ -530,6 +530,20 @@ impl DirGraph {
     /// Register a connection type (interned) for O(1) lookups.
     /// Called when edges are added to the graph.
     pub fn register_connection_type(&mut self, connection_type: String) {
+        // If the cache has never been populated (disk-loaded graphs skip
+        // `build_connection_types_cache` at load — only the v3 / file
+        // loader calls it), backfill it from `connection_type_metadata`
+        // before adding the new key. Otherwise the new key would land
+        // in an empty set, flipping `has_connection_type` from "fall
+        // through to metadata" mode (which sees every existing type) to
+        // "use cache" mode (which returns false for every type except
+        // this one). Manifested in 0.9.4 as: load disk graph →
+        // add_connections of any new edge type → all subsequent
+        // typed-anchored MATCH queries on existing edge types return 0
+        // rows.
+        if self.connection_types.is_empty() && !self.connection_type_metadata.is_empty() {
+            self.build_connection_types_cache();
+        }
         let key = self.interner.get_or_intern(&connection_type);
         self.connection_types.insert(key);
     }

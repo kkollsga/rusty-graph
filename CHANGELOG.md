@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-05-02
+
+### Disk-mode regression fix — `register_connection_type` flipped the conn-type cache into a half-built state
+
+On a disk graph that's been loaded from disk (`kglite.load(path)`),
+the very first `add_connections` call after load broke MATCH queries
+on every other edge type. `MATCH ()-[:OF_DISCOVERY]->()` returned 0
+rows even though the edges were still on disk and unanchored
+`MATCH ()-[r]->() RETURN type(r)` still listed them. Surfaced on
+the Sodir prospect graph's load-then-enhance flow: the moment the
+re-enhance pass added its first new edge type, every subsequent
+FK-edge join (`OF_DISCOVERY`, `OF_FIELD`, `OF_PROSPECT`, `IN_PLAY`,
+`HAS_DEPOSIT_PROSPECT`, `HAS_PLAY`) silently produced 0 rows. The
+single-pass `build_sodir_graph.py --storage disk` flow was unaffected
+because the cache was in the right state during initial build.
+
+**Root cause.** `DirGraph.connection_types` is a `HashSet<InternedKey>`
+that powers the O(1) fast path of `has_connection_type`. The set is
+built from `connection_type_metadata.keys()` via
+`build_connection_types_cache()` — but that function was only called
+from `read_graph_v3` (the `.kgl` v3 loader), never from
+`load_disk_dir` (the disk-graph loader). On a freshly-loaded disk
+graph the set was therefore empty, and `has_connection_type` correctly
+fell through to the metadata-fallback branch which returns true for
+every edge type in the loaded metadata.
+
+`register_connection_type(NEW)` then unconditionally inserted NEW
+into the empty set. The next `has_connection_type(EXISTING)` call
+hit the fast path: "set non-empty? consult cache" — which now only
+contained NEW, so it returned false for every existing edge type.
+The pattern matcher's early-exit ("skip iteration when the conn type
+doesn't exist") fired for every typed MATCH on existing edges.
+
+**Fix.** Two complementary patches:
+
+1. `load_disk_dir` now calls `build_connection_types_cache()` after
+   loading metadata, mirroring the v3 loader. Keeps the cache
+   authoritative throughout the lifetime of any loaded disk graph.
+
+2. `register_connection_type` lazy-builds the cache from
+   `connection_type_metadata` when called against an empty set.
+   Closes the same hole defensively for any future code path that
+   could leave the cache empty before calling it.
+
+**Verification.** New `bench/cross_mode_pipeline.py` harness runs an
+enhance-style sequence (load → create_index → add_connections of a
+new edge type → SET → re-read baseline queries at every step) on
+legal + sodir × {memory, mapped, disk}. Pre-fix:
+
+    legal disk:  step3_after_add_connections → cites_total: 0 (baseline 592305)
+    legal disk:  step3_after_add_connections → section_of_total: 0 (baseline 23585)
+    sodir disk:  step3_after_add_connections → of_discovery_join: 0 (baseline 107)
+    sodir disk:  step3_after_add_connections → of_field_join: 0 (baseline 2280)
+    sodir disk:  step3_after_add_connections → of_prospect_join: 0 (baseline 21857)
+
+Post-fix all per-step counts match baseline across all three modes
+on both graphs. Re-running the Sodir `enhance(g)` on a loaded disk
+graph (which was the user-facing surface of this bug) now matches
+the standalone-build counts: 97 discoveries enriched, 139 fields,
+126 production profiles, 4345 prospects tagged, 48 plays calibrated,
+2406 prospects calibrated.
+
+Regression test:
+`tests/test_disk_mutation_roundtrip.py::test_register_new_conn_type_preserves_existing_type_lookups`
+loads a small disk graph with WORKS_AT edges, runs `add_connections`
+of a new FRIENDS_WITH type, and asserts MATCH on WORKS_AT still
+finds all 5 edges. Test fails with the fix reverted.
+
+### Test harness — pipeline-shaped consistency
+
+`bench/cross_mode_pipeline.py` (new). Closes the gap that let the
+sequence-of-operations bug class slip through the earlier single-op
+harnesses (`cross_mode_table.py`, `cross_mode_consistency.py`):
+record per-step row counts during a multi-op pipeline, compare
+each step to a fresh-load baseline, flag the exact step + query
+where any cell drifts. Same code shape that caught the bug in this
+release; held in `bench/` (gitignored) for ad-hoc use.
+
+585 cargo, 2338 pytest, 97/97 parity, lint clean.
+
 ## [0.9.4] — 2026-05-02
 
 ### Disk- and mapped-mode regression fix — Cypher SET silently no-oped on mmap-backed ColumnStores
