@@ -9,38 +9,35 @@ Usage:
     python examples/wikidata_disk.py
 """
 
-import random
+import time
 
 from kglite.datasets import wikidata
 
 WORKDIR = "/Volumes/EksternalHome/Data/Wikidata"
 
 
-g = wikidata.open(WORKDIR)
+def timed(label, fn):
+    t0 = time.perf_counter()
+    out = fn()
+    print(f"  [{(time.perf_counter() - t0) * 1000:>8.1f} ms]  {label}")
+    return out
+
+
+g = timed("load graph", lambda: wikidata.open(WORKDIR))
 
 info = g.graph_info()
 print(f"\nLoaded Wikidata: {info['node_count']:,} nodes, {info['edge_count']:,} edges.\n")
 
-# Hello-world: a "did you know?" about Albert Einstein (Q937). Each
-# run picks a different facet so the output stays interesting on
-# repeated invocations.
-einstein = list(g.cypher("MATCH (e {nid: 'Q937'}) RETURN e.title AS name, e.description AS desc"))[0]
-print(f"{einstein['name']} — {einstein['desc']}")
+einstein = timed(
+    "lookup Q937",
+    lambda: list(g.cypher("MATCH (e {nid: 'Q937'}) RETURN e.title AS name, e.description AS desc"))[0],
+)
+print(f"\n{einstein['name']} — {einstein['desc']}")
 
-facets = [
-    ("Notable works", "P800"),
-    ("Was influenced by", "P737"),
-    ("Awards received", "P166"),
-    ("Educated at", "P69"),
-    ("Employed by", "P108"),
-    ("Member of", "P463"),
-    ("Worked in", "P937"),
-    ("Doctoral advisor", "P184"),
-    ("Spouses", "P26"),
-    ("Children", "P40"),
-]
-label, prop = random.choice(facets)
-items = [r["t"] for r in g.cypher(f"MATCH ({{nid: 'Q937'}})-[:{prop}]->(x) RETURN x.title AS t LIMIT 5")]
-print(f"\nDid you know? {label}:")
-for it in items:
-    print(f"  • {it}")
+awards = timed(
+    "awards received (P166)",
+    lambda: list(g.cypher("MATCH ({nid: 'Q937'})-[:P166]->(a) RETURN a.title AS t LIMIT 5")),
+)
+print("Awards received:")
+for a in awards:
+    print(f"  • {a['t']}")
