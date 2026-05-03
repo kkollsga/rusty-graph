@@ -1,25 +1,20 @@
-"""Build a Wikidata disk graph from the N-Triples truthy dump.
+"""Build (or load) a disk graph from the Wikidata truthy dump.
+
+First run downloads the dump (~80 GB) into WORKDIR and builds the
+graph under WORKDIR/graph/. Subsequent runs cache-hit (or refetch if
+the upstream dump has changed and the cooldown has elapsed — see
+`kglite.datasets.wikidata.open` for the full lifecycle rules).
 
 Usage:
-    python examples/wikidata_disk.py build   # build from source
-    python examples/wikidata_disk.py         # load existing graph
-
-Adjust SOURCE / GRAPH below to match your paths.
+    python examples/wikidata_disk.py
 """
 
-import sys
+from kglite.datasets import wikidata
 
-import kglite
-
-SOURCE = "/Volumes/EksternalHome/Data/Wikidata/latest-truthy.nt.zst"
-GRAPH = "/Volumes/EksternalHome/Data/Wikidata/wikidata_disk_graph"
+WORKDIR = "/Volumes/EksternalHome/Data/Wikidata"
 
 
-if len(sys.argv) > 1 and sys.argv[1] == "build":
-    g = kglite.KnowledgeGraph(storage="disk", path=GRAPH)
-    g.load_ntriples(SOURCE, languages=["en"], verbose=True)
-else:
-    g = kglite.load(GRAPH)
+g = wikidata.open(WORKDIR)
 
 info = g.graph_info()
 print(f"Nodes: {info['node_count']:,}")
