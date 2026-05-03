@@ -33,6 +33,7 @@ impl CypherParser {
             distinct,
             having,
             lazy_eligible: false,
+            group_limit_hint: None,
         }))
     }
 
@@ -92,6 +93,7 @@ impl CypherParser {
             items,
             distinct,
             where_clause,
+            group_limit_hint: None,
         }))
     }
 

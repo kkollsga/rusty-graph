@@ -33,7 +33,7 @@ use join_order::{optimize_pattern_start_node, reorder_match_clauses, reorder_mat
 use rel_predicate_pushdown::extract_pushable_rel_predicates;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
-    push_distinct_into_match, push_limit_into_match,
+    push_distinct_into_match, push_limit_into_aggregate, push_limit_into_match,
 };
 
 /// Carries the per-call inputs every pass might need. Passing this once
@@ -82,6 +82,7 @@ pub const PASSES: &[(&str, PassFn)] = &[
     ),
     ("reorder_match_patterns", pass_reorder_match_patterns),
     ("push_limit_into_match", pass_push_limit_into_match),
+    ("push_limit_into_aggregate", pass_push_limit_into_aggregate),
     ("push_distinct_into_match", pass_push_distinct_into_match),
     ("fuse_anchored_edge_count", pass_fuse_anchored_edge_count),
     ("fuse_count_short_circuits", pass_fuse_count_short_circuits),
@@ -411,6 +412,19 @@ fn pass_reorder_match_patterns(query: &mut CypherQuery, ctx: &PassCtx) {
 /// drops in 0.8.27 — see CHANGELOG).
 fn pass_push_limit_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
     push_limit_into_match(query, ctx.graph)
+}
+
+/// **Pass:** `push_limit_into_aggregate` — Stamp `group_limit_hint`
+/// on a `RETURN/WITH` that has both group keys and aggregates when the
+/// next clause is a literal `LIMIT N`. The aggregator stops creating
+/// new groups after `N` distinct keys; rows for already-collected keys
+/// continue to feed their aggregates. WHY-BAIL: ORDER BY between
+/// projection and LIMIT changes which N rows survive (need every group
+/// to find the top N), so the pass leaves those queries to the
+/// materialised path. DISTINCT / HAVING also bail. The trailing LIMIT
+/// clause stays in the plan as a hard cap.
+fn pass_push_limit_into_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
+    push_limit_into_aggregate(query, ctx.graph)
 }
 
 /// **Pass:** `push_distinct_into_match` — Mark `RETURN DISTINCT` /

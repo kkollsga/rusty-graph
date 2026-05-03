@@ -118,6 +118,114 @@ pub(super) fn collect_or_equalities(
     }
 }
 
+/// Recognise `RETURN/WITH …group keys + aggregates… LIMIT N` (without
+/// an intervening `ORDER BY`) and stamp `group_limit_hint = N` on the
+/// projection clause. The aggregator then stops creating new groups
+/// after `N` distinct keys are seen — rows for already-collected keys
+/// continue to feed their aggregates so `collect()` / `sum()` / etc.
+/// complete correctly.
+///
+/// **Why-bail.** ORDER BY between the projection and LIMIT changes the
+/// answer (you need every group to find the top N), so the pass leaves
+/// those queries to the materialised path. DISTINCT on the projection
+/// is left alone for the same reason — the executor's DISTINCT-after-
+/// projection step needs all groups to dedup against. HAVING and
+/// having-style filters on the projection also bail.
+///
+/// **Triggering shape — Wikidata hub-anchor case (Bug 3).**
+///
+/// ```text
+/// MATCH (x)-[:P31]->(hub {nid: 'Q11424'})
+/// OPTIONAL MATCH (x)-[:P27]->(country)
+/// RETURN x.title AS x, collect(DISTINCT country.title) AS countries
+/// LIMIT 15
+/// ```
+///
+/// Pre-fix the materialised path expanded all 340k :P31 inbound rows,
+/// 340k OPTIONAL P27 expansions, 309k group buckets, then truncated to
+/// 15 — 547ms warm, 64s cold. Post-fix the aggregator stops at 15
+/// distinct `x` keys and only continues processing rows whose key is
+/// already in the set (≈ a few hundred rows for the duplicate `x`s
+/// in the first 15-key window).
+pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGraph) {
+    use super::super::ast::is_aggregate_expression;
+
+    // Look for two-clause windows: aggregating projection followed by LIMIT.
+    let mut i = 0;
+    while i + 1 < query.clauses.len() {
+        // Extract the literal LIMIT N — must be a positive Int64.
+        let limit_n = match &query.clauses[i + 1] {
+            Clause::Limit(l) => match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // The clause directly preceding LIMIT must be a RETURN or WITH
+        // that has at least one group key AND at least one aggregate.
+        // Pure-aggregate (no group keys) and pure-projection (no
+        // aggregates) shapes don't benefit from this rewrite.
+        let (has_group_key, has_agg) = match &query.clauses[i] {
+            Clause::Return(r) => {
+                if r.distinct || r.having.is_some() {
+                    (false, false)
+                } else {
+                    let g = r
+                        .items
+                        .iter()
+                        .any(|it| !is_aggregate_expression(&it.expression));
+                    let a = r
+                        .items
+                        .iter()
+                        .any(|it| is_aggregate_expression(&it.expression));
+                    (g, a)
+                }
+            }
+            Clause::With(w) => {
+                if w.distinct {
+                    (false, false)
+                } else {
+                    let g = w
+                        .items
+                        .iter()
+                        .any(|it| !is_aggregate_expression(&it.expression));
+                    let a = w
+                        .items
+                        .iter()
+                        .any(|it| is_aggregate_expression(&it.expression));
+                    (g, a)
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        if !has_group_key || !has_agg {
+            i += 1;
+            continue;
+        }
+
+        // Stamp the hint. The aggregator reads it; the LIMIT clause
+        // stays in the plan as a final safety net.
+        match &mut query.clauses[i] {
+            Clause::Return(r) => r.group_limit_hint = Some(limit_n),
+            Clause::With(w) => w.group_limit_hint = Some(limit_n),
+            _ => unreachable!(),
+        }
+
+        i += 1;
+    }
+}
+
 /// Example: MATCH (n:Person) WHERE n.age = 30
 /// Becomes: MATCH (n:Person {age: 30}) (WHERE removed if fully consumed)
 ///
@@ -887,12 +995,14 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
         items: with_items,
         distinct: false,
         where_clause: None,
+        group_limit_hint: None,
     });
     let new_return = Clause::Return(ReturnClause {
         items: new_return_items,
         distinct: false,
         having: None,
         lazy_eligible: false,
+        group_limit_hint: None,
     });
     query.clauses[r_idx] = new_with;
     query.clauses.insert(r_idx + 1, new_return);

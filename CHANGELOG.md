@@ -7,6 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-05-03
+
+### Cypher correctness fix — `collect()[slice]` over `OPTIONAL MATCH` raised a spurious aggregate-context error
+
+Cypher of the shape
+
+```cypher
+MATCH (n {id: $id})
+OPTIONAL MATCH (n)-[:T]-(x)
+WITH n, collect(DISTINCT x.title)[0..3] AS first_three
+RETURN n.title, first_three
+```
+
+failed at runtime with `Aggregate function 'collect' cannot be used
+outside of RETURN/WITH`, even though the `collect` call was clearly
+inside a `WITH` projection. The same expression on a non-`OPTIONAL`
+`MATCH` worked fine. Caused users to rewrite the query as
+`WITH ... collect(...) AS xs RETURN xs[0..3]`, which is identical
+semantically but unobvious as a workaround.
+
+**Root cause.** `aggregates_only_count` in
+`planner/fusion.rs` — the gate that decides whether the OPTIONAL-MATCH
+count fusion can absorb a projection — recursed into arithmetic and
+function-call nodes but fell through to `_ => true` on `ListSlice`,
+`IndexAccess`, `ListComprehension`, and `Case`. So
+`collect(x)[0..3]` (a `ListSlice` wrapping a `FunctionCall`) was
+wrongly classified as "all aggregates inside are count-shaped" and
+the count-fusion accepted it. The fused executor then ran
+`evaluate_expression` per row on the substituted-but-still-
+containing-`collect` projection, and the runtime correctly rejected
+the per-row aggregate call.
+
+**Fix.** `aggregates_only_count` now recurses into the same wrapper
+expression variants that `ast::is_aggregate_expression` walks — slice,
+index, list comprehension, case, expression-property-access,
+map-literal. `collect()[…]`, `collect()[i]`, `collect()` inside a
+`CASE`, and other "aggregate inside a wrapper" shapes all bail
+fusion correctly and route through the materialised aggregate
+evaluator.
+
+The same fix incidentally closes a related class of broken queries:
+`sum(x.prop)`, `min(...)`, `max(...)`, etc. wrapped by
+`ListSlice`/`IndexAccess`/etc. over an `OPTIONAL MATCH` were also
+silently broken pre-0.9.6 — never explicitly tested but caught by
+the new corpus entries.
+
+Differential corpus regressions (`tests/test_cypher_differential.py`):
+`collect_slice_over_optional`, `collect_index_over_optional`,
+`sum_over_optional`.
+
+### Cypher perf fix — `LIMIT N` not pushed into grouping aggregator
+
+Hub-anchored `OPTIONAL MATCH + collect/aggregate + LIMIT N` queries
+on the 124M-node Wikidata graph were unnecessarily slow:
+
+```cypher
+MATCH (x)-[:P31]->(hub {nid: 'Q11424'})        -- film hub, 340k inbound
+OPTIONAL MATCH (x)-[:P27]->(country)
+RETURN x.title AS x, collect(DISTINCT country.title) AS countries
+LIMIT 15
+```
+
+Materialised the full 340k MATCH expansion + 340k OPTIONAL P27
+expansions + 309k group buckets, then truncated to 15 at the very
+end. Cold: 64s. Warm: 547ms.
+
+**Root cause.** The materialised aggregator drained every group
+key before any downstream `LIMIT` clause looked at the rows.
+There was no path for a literal `LIMIT N` to inform the grouping
+loop that it could stop creating new groups after `N` distinct
+keys.
+
+**Fix.** New planner pass `push_limit_into_aggregate` (registered
+in `PASSES` between `push_limit_into_match` and
+`push_distinct_into_match`). When the projection clause has both
+group keys and aggregates AND the next clause is a literal
+`LIMIT N` (no intervening `ORDER BY`, no `DISTINCT`, no `HAVING`),
+the pass stamps a `group_limit_hint` on the `ReturnClause` /
+`WithClause`. The aggregator then uses a 2× safety margin during
+the surrogate-key grouping pass (NodeIndex→Value collisions can
+collapse groups during the resolve step) and truncates to the
+exact `N` after resolve. Rows for already-collected keys
+continue to feed their aggregates so `collect()` / `sum()`
+complete correctly for the surviving groups.
+
+ORDER BY between projection and LIMIT correctly disables the
+optimisation — needed every group to find the top N. The
+existing LIMIT clause stays in the plan as a hard safety cap.
+
+**Verification on the 124M-node graph (warm steady state):**
+
+| State | Latency | Profile shape |
+|-------|---------|---------------|
+| Pre-fix  | 547 ms | `Return rows_in=340688 rows_out=309004 → Limit 15` |
+| Post-fix | 257 ms | `Return rows_in=340688 rows_out=15 → Limit 15` |
+
+The remaining 257ms is genuine MATCH + OPTIONAL fanout work
+(340k inbound `:P31` + 340k OPTIONAL `:P27` expansions). True
+streaming through MATCH itself would need a larger refactor and
+is left for a future release.
+
+Differential corpus regressions: `limit_into_aggregate_collect`,
+`limit_into_aggregate_count`, `limit_with_order_by_no_pushdown`.
+
+### Investigated, not fixed — first-MATCH cold-mmap warmup spike
+
+User reported ~700ms latency on the first `cypher` call after
+process start against the same 124M-node graph; subsequent queries
+sub-100ms. Reproduced locally at ~1010ms on the same graph; <5ms
+on a 16M-node graph regardless of whether we'd touched it that
+session. Not a code bug — the first MATCH page-faults the
+`id_indices`, `node_slots`, and column-store mmap regions for the
+queried type, and the cost scales with graph size + how cold the
+OS page cache is.
+
+Existing mitigation: `KGLITE_PREFETCH=1` env var triggers
+`madvise(MADV_WILLNEED)` against hot regions at load time, paid
+upfront instead of on the first user query. Recommended for MCP
+servers that load multi-GB graphs at startup and want predictable
+first-query latency.
+
+585 cargo, 2345 pytest, 97/97 parity, lint clean.
+
 ## [0.9.5] — 2026-05-02
 
 ### Disk-mode regression fix — `register_connection_type` flipped the conn-type cache into a half-built state

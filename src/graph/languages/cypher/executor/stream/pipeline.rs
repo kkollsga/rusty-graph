@@ -21,7 +21,7 @@
 
 use super::super::super::ast::{
     is_aggregate_expression, Clause, Expression, LimitClause, OrderByClause, OrderItem,
-    ReturnClause, WhereClause, WithClause,
+    ReturnClause, WhereClause,
 };
 use super::super::super::result::ResultSet;
 use super::super::CypherExecutor;
@@ -65,19 +65,16 @@ pub(crate) fn try_run_streaming<'q>(
     }
 
     let (return_clause_owned, is_with, with_where) = match &clauses[0] {
-        Clause::With(WithClause {
-            items,
-            distinct,
-            where_clause,
-        }) => {
+        Clause::With(w) => {
             // WITH delegates to the same agg machinery as RETURN.
             let rc = ReturnClause {
-                items: items.clone(),
-                distinct: *distinct,
+                items: w.items.clone(),
+                distinct: w.distinct,
                 having: None,
                 lazy_eligible: false,
+                group_limit_hint: w.group_limit_hint,
             };
-            (rc, true, where_clause.clone())
+            (rc, true, w.where_clause.clone())
         }
         Clause::Return(rc) => (rc.clone(), false, None),
         _ => return Ok(StreamingOutcome::Bailed(result_set)),

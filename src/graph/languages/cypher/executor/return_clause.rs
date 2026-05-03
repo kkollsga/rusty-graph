@@ -83,6 +83,7 @@ impl<'a> CypherExecutor<'a> {
                     distinct: clause.distinct,
                     having: clause.having.clone(),
                     lazy_eligible: clause.lazy_eligible,
+                    group_limit_hint: clause.group_limit_hint,
                 };
                 &expanded
             } else {
@@ -242,6 +243,25 @@ impl<'a> CypherExecutor<'a> {
         let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, Vec<usize>)> = Vec::new();
         let mut surrogate_index: HashMap<Vec<GroupKeyPart>, usize> = HashMap::new();
 
+        // Group-limit hint set by `push_limit_into_aggregate`. When `Some(N)`
+        // and we already have `N` distinct groups, skip rows whose key
+        // would create an `N+1`th group. Rows for already-collected keys
+        // still feed the aggregate (so `collect()` etc. complete
+        // correctly for the kept groups). Safe only without ORDER BY —
+        // the planner pass enforces that.
+        //
+        // NodeProp surrogate keys are deduped by NodeIndex *before* the
+        // value resolution pass below; under the surrogate scheme the
+        // limit overshoots harmlessly when two NodeIndexes resolve to
+        // the same property value (the re-bucket pass collapses them).
+        // We therefore allow up to `2 * limit` surrogate groups before
+        // bailing — chosen as a small safety margin so the post-resolve
+        // dedup still has enough material to land exactly `limit` final
+        // groups without false caps. The trailing `truncate(limit)` at
+        // emission time enforces the hard cap.
+        let group_limit = clause.group_limit_hint;
+        let surrogate_cap = group_limit.map(|n| n.saturating_mul(2).max(n + 8));
+
         for (row_idx, row) in result_set.rows.iter().enumerate() {
             let key_parts: Vec<GroupKeyPart> = strategies
                 .iter()
@@ -267,6 +287,13 @@ impl<'a> CypherExecutor<'a> {
             if let Some(&idx) = surrogate_index.get(&key_parts) {
                 surrogate_groups[idx].1.push(row_idx);
             } else {
+                if let Some(cap) = surrogate_cap {
+                    if surrogate_groups.len() >= cap {
+                        // Group set is "frozen" — drop rows that would
+                        // open a new group. Existing groups keep filling.
+                        continue;
+                    }
+                }
                 let idx = surrogate_groups.len();
                 surrogate_index.insert(key_parts.clone(), idx);
                 surrogate_groups.push((key_parts, vec![row_idx]));
@@ -312,6 +339,18 @@ impl<'a> CypherExecutor<'a> {
                 let idx = groups.len();
                 group_index_map.insert(resolved_key.clone(), idx);
                 groups.push((resolved_key, row_indices));
+            }
+        }
+
+        // Hard cap from `group_limit_hint` — the surrogate-stage cap
+        // overshoots by 2× to absorb NodeIndex→Value collisions; this
+        // truncate enforces the user's literal LIMIT N. The trailing
+        // Limit clause is retained for correctness when the planner
+        // pass declines (e.g. ORDER BY present), so this is a strict
+        // belt-and-braces enforcement.
+        if let Some(n) = group_limit {
+            if groups.len() > n {
+                groups.truncate(n);
             }
         }
 
@@ -1057,6 +1096,7 @@ impl<'a> CypherExecutor<'a> {
             distinct: clause.distinct,
             having: None,
             lazy_eligible: false,
+            group_limit_hint: clause.group_limit_hint,
         };
         let mut projected = self.execute_return(&return_clause, result_set)?;
 

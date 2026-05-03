@@ -567,6 +567,7 @@ pub(super) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
                 items: r.items,
                 distinct: r.distinct,
                 where_clause: r.having.map(|pred| WhereClause { predicate: pred }),
+                group_limit_hint: r.group_limit_hint,
             },
             _ => unreachable!(),
         };
@@ -628,6 +629,17 @@ pub(super) fn is_fusable_with_clause(with: &WithClause) -> bool {
 /// Any other aggregate (sum/avg/min/max/collect/...) bails fusion;
 /// the materialized executor handles those via its general aggregate
 /// evaluator.
+///
+/// The recursion set must mirror `ast::is_aggregate_expression` —
+/// pre-0.9.6 this matched only `FunctionCall`, arithmetic ops, and
+/// `Negate`, and fell through to `_ => true` for everything else.
+/// `collect(x)[0..3]` (a `ListSlice` wrapping a `FunctionCall`) hit
+/// the fall-through arm and was wrongly classified as "all aggregates
+/// are count", which let the OPTIONAL-MATCH fusion accept it. The
+/// fused executor then ran `evaluate_expression` per-row on the
+/// substituted (still-containing-collect) expression and the runtime
+/// rejected the per-row aggregate call with "Aggregate function
+/// 'collect' cannot be used outside of RETURN/WITH".
 fn aggregates_only_count(expr: &Expression) -> bool {
     use super::super::ast::is_aggregate_expression;
     match expr {
@@ -648,7 +660,38 @@ fn aggregates_only_count(expr: &Expression) -> bool {
         | Expression::Modulo(l, r)
         | Expression::Concat(l, r) => aggregates_only_count(l) && aggregates_only_count(r),
         Expression::Negate(inner) => aggregates_only_count(inner),
-        // Leaves / non-arithmetic forms can't introduce a non-count
+        // Wrapper expressions that pass aggregates through unchanged —
+        // a slice/index/list-comprehension/case over `collect(x)` is
+        // still aggregating `collect`, not derivable from `count`.
+        Expression::IndexAccess { expr, index } => {
+            aggregates_only_count(expr) && aggregates_only_count(index)
+        }
+        Expression::ListSlice { expr, start, end } => {
+            aggregates_only_count(expr)
+                && start.as_deref().is_none_or(aggregates_only_count)
+                && end.as_deref().is_none_or(aggregates_only_count)
+        }
+        Expression::ListComprehension {
+            list_expr,
+            map_expr,
+            ..
+        } => {
+            aggregates_only_count(list_expr)
+                && map_expr.as_deref().is_none_or(aggregates_only_count)
+        }
+        Expression::Case {
+            when_clauses,
+            else_expr,
+            ..
+        } => {
+            when_clauses
+                .iter()
+                .all(|(_, result)| aggregates_only_count(result))
+                && else_expr.as_deref().is_none_or(aggregates_only_count)
+        }
+        Expression::ExprPropertyAccess { expr, .. } => aggregates_only_count(expr),
+        Expression::MapLiteral(entries) => entries.iter().all(|(_, e)| aggregates_only_count(e)),
+        // Leaves / non-aggregate-bearing forms can't introduce a non-count
         // aggregate, so they're trivially fine.
         _ => true,
     }

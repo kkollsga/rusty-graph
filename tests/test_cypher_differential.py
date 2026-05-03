@@ -140,6 +140,72 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(:Person) RETURN p.name AS n, count(r) AS k",
         None,
     ),
+    # ── fuse_optional_match_aggregate (0.9.6 bug — collect()[slice] over OPTIONAL) ──
+    # `aggregates_only_count` fell through `_ => true` for ListSlice/IndexAccess,
+    # so `collect(x)[0..3]` was wrongly admitted to the count-only fusion.
+    # The fused executor then ran `evaluate_expression` per-row on the
+    # substituted (still-containing-collect) expression and the runtime
+    # rejected the per-row aggregate call. The query below trips the same
+    # admission gate; the `disabled_passes` half of the differential
+    # harness exercises the materialised aggregator's correct path so any
+    # future regression flags as a memory↔fused divergence.
+    (
+        "collect_slice_over_optional",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) "
+        "WITH p, collect(DISTINCT q.name)[0..3] AS first_three "
+        "RETURN p.name AS n, first_three ORDER BY n",
+        None,
+    ),
+    (
+        "collect_index_over_optional",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) "
+        "WITH p, collect(DISTINCT q.name)[0] AS first "
+        "RETURN p.name AS n, first ORDER BY n",
+        None,
+    ),
+    (
+        "sum_over_optional",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) "
+        "WITH p, sum(q.age) AS total "
+        "RETURN p.name AS n, total ORDER BY n",
+        None,
+    ),
+    # ── push_limit_into_aggregate (0.9.6 perf fix — Bug 3 in the user's
+    # 124M-node Wikidata report). The aggregator now stops creating
+    # new groups once `LIMIT N` distinct keys have been collected;
+    # rows for already-collected keys continue to feed their
+    # aggregates so collect() / sum() complete correctly. The query
+    # below trips the same admission gate; the differential harness
+    # confirms the optimised path matches the materialised-then-
+    # truncated semantics.
+    (
+        "limit_into_aggregate_collect",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) "
+        "WITH p, collect(DISTINCT q.name) AS friends "
+        "RETURN p.name AS n, friends LIMIT 3",
+        None,
+    ),
+    (
+        "limit_into_aggregate_count",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) WITH p, count(q) AS k RETURN p.name AS n, k LIMIT 3",
+        None,
+    ),
+    # ORDER BY between projection and LIMIT MUST disable the
+    # optimisation; the differential harness checks that the result
+    # is still the proper top-3 by ascending count.
+    (
+        "limit_with_order_by_no_pushdown",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) "
+        "WITH p, count(q) AS k "
+        "RETURN p.name AS n, k ORDER BY k ASC, n ASC LIMIT 3",
+        None,
+    ),
     # ── fuse_match_return_aggregate ──
     ("group_by_city", "social_graph", "MATCH (p:Person) RETURN p.city AS city, count(p) AS n", None),
     ("group_by_with_sum", "social_graph", "MATCH (p:Person) RETURN p.city AS city, sum(p.salary) AS total", None),

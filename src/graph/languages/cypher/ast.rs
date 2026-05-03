@@ -502,6 +502,15 @@ pub struct ReturnClause {
     /// Only set when every item is `Variable` or `PropertyAccess`, no
     /// DISTINCT/HAVING, and no downstream operator consumes row values.
     pub lazy_eligible: bool,
+    /// Planner-set: when grouping aggregation is followed by a literal
+    /// `LIMIT N` *without* an intervening `ORDER BY`, the aggregator can
+    /// stop creating new groups once `N` distinct keys have been seen
+    /// (rows for already-collected keys still feed their aggregates so
+    /// `collect()` etc. complete correctly). Cuts the materialised
+    /// hub-anchored OPTIONAL+aggregate+LIMIT shape from O(fanout) to
+    /// O(N + duplicates of first N keys). Set by the
+    /// `push_limit_into_aggregate` planner pass.
+    pub group_limit_hint: Option<usize>,
 }
 
 /// A single item in RETURN: expression AS alias
@@ -521,6 +530,12 @@ pub struct WithClause {
     pub items: Vec<ReturnItem>,
     pub distinct: bool,
     pub where_clause: Option<WhereClause>,
+    /// Mirrors `ReturnClause::group_limit_hint`. Same trigger and same
+    /// semantics: the aggregator stops creating new groups after `N`
+    /// distinct keys when `WITH ... LIMIT N` (no `ORDER BY`) is the
+    /// pipeline shape. Forwarded to the synthetic `ReturnClause` that
+    /// `execute_with` builds.
+    pub group_limit_hint: Option<usize>,
 }
 
 // ============================================================================
