@@ -41,6 +41,16 @@ WIKIDATA_URL = f"https://dumps.wikimedia.org/wikidatawiki/entities/{WIKIDATA_FIL
 SOURCE_META_FILENAME = "wikidata_source.json"
 GRAPH_SUBDIR = "graph"
 
+# Process-local cache of loaded disk graphs — keyed by (canonical
+# workdir path, entity_limit_millions). Re-running `open(workdir)` in
+# the same process (typical Jupyter "rerun-cell" workflow) returns the
+# already-loaded instance instead of allocating a fresh ~400 MB
+# in-memory state for every call. Invalidated when disk_graph_meta.json
+# mtime advances (rebuild happened) or `force_rebuild=True` is passed.
+# Memory-mode opens skip this cache — they're meant to be reproducible
+# rebuilds.
+_PROCESS_CACHE: dict[tuple[str, int | None], tuple[KnowledgeGraph, float]] = {}
+
 
 def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows stdlib `tarfile.open`/`gzip.open` precedent)
     workdir: str | Path,
@@ -113,12 +123,27 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
     graph_meta = graph_dir / "disk_graph_meta.json"
     source_meta = graph_dir / SOURCE_META_FILENAME
 
+    # Process-cache hit: return the same KnowledgeGraph instance we
+    # handed back on a prior call this process, as long as the
+    # underlying disk artifacts haven't been rebuilt (mtime check)
+    # and the caller didn't pass `force_rebuild`. Saves the
+    # ~400 MB in-memory reload on Jupyter cell re-runs.
+    cache_key = (str(graph_dir.resolve()), entity_limit_millions)
+    if not force_rebuild and graph_meta.exists():
+        meta_mtime = graph_meta.stat().st_mtime
+        cached = _PROCESS_CACHE.get(cache_key)
+        if cached is not None and cached[1] == meta_mtime:
+            if verbose:
+                print(f"  Wikidata graph at {graph_dir} already loaded in this process. Reusing.")
+            return cached[0]
+
     if force_rebuild and graph_dir.exists():
         import shutil
 
         if verbose:
             print(f"  force_rebuild=True — deleting cached graph at {graph_dir}.")
         shutil.rmtree(graph_dir)
+        _PROCESS_CACHE.pop(cache_key, None)
     elif graph_meta.exists():
         graph_age = _age_days(_file_mtime_utc(graph_meta))
         if graph_age < cooldown_days:
@@ -126,7 +151,9 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
                 print(
                     f"  Wikidata graph at {graph_dir} is {graph_age:.1f}d old (< {cooldown_days}d cooldown). Loading."
                 )
-            return load(str(graph_dir))
+            g = load(str(graph_dir))
+            _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
+            return g
 
         # Cooldown elapsed — check whether the remote dump is newer than
         # the one this graph was built from.
@@ -135,7 +162,9 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
         if remote_mtime is None:
             if verbose:
                 print(f"  Remote unreachable. Loading existing graph (built from {embedded_mtime}).")
-            return load(str(graph_dir))
+            g = load(str(graph_dir))
+            _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
+            return g
         if embedded_mtime is None or remote_mtime > embedded_mtime:
             if verbose:
                 print(f"  Remote dump is newer than the cached graph (built from {embedded_mtime}). Rebuilding.")
@@ -143,10 +172,15 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
         else:
             if verbose:
                 print("  Remote dump unchanged since last build. Loading existing graph.")
-            return load(str(graph_dir))
+            g = load(str(graph_dir))
+            _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
+            return g
 
     dump_path, dump_mtime = _ensure_dump(workdir, cooldown_days, verbose)
-    return _build_graph(workdir, dump_path, dump_mtime, languages, entity_limit_millions, verbose, progress)
+    g = _build_graph(workdir, dump_path, dump_mtime, languages, entity_limit_millions, verbose, progress)
+    if graph_meta.exists():
+        _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
+    return g
 
 
 def fetch_truthy(
