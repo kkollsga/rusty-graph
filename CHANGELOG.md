@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-05-04
+
+### Jupyter ergonomics — `wikidata.open()` is now process-cached
+
+`wikidata.open(workdir)` previously did a fresh disk-graph load
+(~350 MB in-memory state on the 124M-node truthy graph) on every
+call, even when the same workdir had already been opened in the
+same process. Repeating the call in a Jupyter notebook (the typical
+"rerun-cell" workflow) accumulated RSS until the kernel ran out of
+room and started swapping or hung after a dozen iterations.
+
+`open()` now holds a process-local cache keyed by
+`(canonical workdir path, entity_limit_millions)` →
+`(KnowledgeGraph, disk_graph_meta.mtime)`. Cache hits return the
+same `KnowledgeGraph` instance the prior call handed back. The
+cache invalidates automatically when:
+
+- the on-disk graph is rebuilt (mtime advances)
+- `force_rebuild=True` is passed
+- the user calls the new `wikidata.cache_clear()` (mirrors
+  `functools.lru_cache`'s pattern; returns count of entries
+  dropped)
+
+Memory-mode opens skip the cache entirely — they're meant to be
+reproducible rebuilds.
+
+Verified: 3 × `wikidata.open(WORKDIR)` in one process → 426 MB
+once, then flat. Same instance returned (`g1 is g2 is g3`).
+
+### Examples — `examples/wikidata_disk.py` rewritten
+
+Replaces the 259-line build-plus-bench harness with a 35-line
+realistic walkthrough: download/load the dump via
+`wikidata.datasets.wikidata.open()`, print graph size + a
+"name+type lookup → awards" demo for Albert Einstein. Each step
+shows its wall time so users see what each operation costs. Full
+benchmark version preserved in `dev-documentation/`.
+
+### Known issue (not fixed in 0.9.7)
+
+`MATCH ({nid: $param})-[:T]->()` on the 124M-node Wikidata graph
+runs ~12,000× slower than the literal-form
+`MATCH ({nid: 'Q937'})-[:T]->()` (~65 seconds vs ~5 ms) and
+allocates ~3 GB of RSS per call. The index-lookup planner pass
+treats `Expression::Parameter` as a non-indexable predicate when
+the property name is the global id alias. Workaround: inline the
+literal value (Cypher injection-safe when the value came from the
+graph itself) or fold into a single multi-MATCH query that anchors
+once on a typed node pattern. Tracked for a future release.
+
+585 cargo, 2345 pytest, 97/97 parity, lint clean.
+
 ## [0.9.6] — 2026-05-03
 
 ### Cypher correctness fix — `collect()[slice]` over `OPTIONAL MATCH` raised a spurious aggregate-context error
