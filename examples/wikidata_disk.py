@@ -23,19 +23,19 @@ def timed(label, fn):
 
 
 def einstein_facts(g):
-    """Hello-world: identity lookup + awards for Albert Einstein (Q937)."""
-    e = timed(
-        "lookup Q937",
-        lambda: list(g.cypher("MATCH (e {nid: 'Q937'}) RETURN e.title AS name, e.description AS desc"))[0],
-    )
-    awards = timed(
-        "awards (P166)",
-        lambda: list(g.cypher("MATCH ({nid: 'Q937'})-[:P166]->(a) RETURN a.title AS t LIMIT 5")),
-    )
-    print(f"\n  {e['name']} — {e['desc']}")
+    """Find Einstein by name+type (no Q-code memorised), grab his awards."""
+    query = """
+        MATCH (e:human {title: 'Albert Einstein'})
+        OPTIONAL MATCH (e)-[:P166]->(a)
+        WITH e, collect(a.title)[0..5] AS awards
+        RETURN e.nid AS qid, e.title AS name, e.description AS desc, awards
+        LIMIT 1
+    """
+    e = timed("find 'Albert Einstein' + awards", lambda: list(g.cypher(query))[0])
+    print(f"\n  {e['qid']}  {e['name']} — {e['desc']}")
     print("  Awards received:")
-    for a in awards:
-        print(f"    • {a['t']}")
+    for a in e["awards"]:
+        print(f"    • {a}")
 
 
 g = timed("load graph", lambda: wikidata.open(WORKDIR))
