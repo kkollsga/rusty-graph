@@ -183,6 +183,22 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
     return g
 
 
+def cache_clear() -> int:
+    """Drop every graph held by the process-local `wikidata.open` cache.
+
+    Use when you want a genuinely fresh load — typically in tests
+    that need isolation, or after manually editing on-disk artifacts
+    in ways `disk_graph_meta.json` mtime doesn't reflect.
+
+    Returns the number of cached graphs that were released. Note
+    Python may keep the underlying `KnowledgeGraph` alive until its
+    other references (notebook variables, closures) drop too.
+    """
+    n = len(_PROCESS_CACHE)
+    _PROCESS_CACHE.clear()
+    return n
+
+
 def fetch_truthy(
     workdir: str | Path,
     *,
