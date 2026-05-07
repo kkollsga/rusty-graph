@@ -1475,6 +1475,97 @@ impl<'a> CypherExecutor<'a> {
                         lazy_return_items: None,
                     });
                 }
+
+                // Group at SOURCE — semantic dual of the target case. The
+                // persistent histogram is keyed by edge target so we can't
+                // just look up; instead, do one sequential pass over
+                // `for_each_edge_of_conn_type` (O(matching edges) on disk
+                // via conn_type_index_*, NOT a full edge_endpoints scan) and
+                // accumulate counts keyed by source. For Wikidata's typical
+                // edge types (P166, P527, P57, ...) that's 200k–10M entries
+                // — a couple hundred ms vs the 30s timeout the prior slow
+                // node-centric path was hitting on `MATCH (h:human)-[:P166]
+                // ->(award) ...`.
+                let group_is_source = matches!(
+                    (group_elem_idx, edge_direction),
+                    (0, Some(EdgeDirection::Outgoing)) | (2, Some(EdgeDirection::Incoming))
+                );
+                if group_is_source {
+                    self.check_deadline()?;
+                    // No persistent source-keyed histogram exists, so we
+                    // accept a sequential scan of edge_endpoints to build
+                    // the equivalent on the fly. `count_edges_grouped_by_peer`
+                    // with Direction::Incoming is the source-keyed dual of
+                    // the target-keyed call, and it's already MADV_SEQUENTIAL
+                    // tuned (~14s for Wikidata's 13.8 GB edge_endpoints,
+                    // bounded by the deadline).
+                    //
+                    // The earlier-considered `for_each_edge_of_conn_type` path
+                    // (using `conn_type_index_sources` + per-source CSR walks)
+                    // is asymptotically O(distinct sources × log fan-out)
+                    // but its random reads on cold mmap pages thrash the page
+                    // cache — measured at >100s on the same query that the
+                    // sequential variant runs in 14s. Sequential I/O wins
+                    // even when total bytes are higher (see
+                    // `feedback_disk_io_patterns.md`).
+                    let counts = self.graph.graph.count_edges_grouped_by_peer(
+                        conn_key,
+                        Direction::Incoming,
+                        self.deadline,
+                    )?;
+                    // Same per-source type filter as the target branch — sorted
+                    // `type_indices[T]` + binary search.
+                    let type_index_view =
+                        group_node_type.and_then(|nt| self.graph.type_indices.get(nt));
+                    let source_passes_type = |src: u32| -> bool {
+                        match &type_index_view {
+                            None => true,
+                            Some(view) => view
+                                .binary_search_idx(petgraph::graph::NodeIndex::new(src as usize)),
+                        }
+                    };
+                    let heap: BinaryHeap<Reverse<(i64, u32)>> = if descending {
+                        let mut h = BinaryHeap::with_capacity(limit + 1);
+                        for (&src, &count) in &counts {
+                            if !source_passes_type(src) {
+                                continue;
+                            }
+                            h.push(Reverse((count, src)));
+                            if h.len() > limit {
+                                h.pop();
+                            }
+                        }
+                        h
+                    } else {
+                        let mut h = BinaryHeap::with_capacity(limit + 1);
+                        for (&src, &count) in &counts {
+                            if !source_passes_type(src) {
+                                continue;
+                            }
+                            h.push(Reverse((-count, src)));
+                            if h.len() > limit {
+                                h.pop();
+                            }
+                        }
+                        h
+                    };
+                    let top: Vec<_> = heap.into_sorted_vec();
+                    let mut rows = Vec::with_capacity(top.len());
+                    for Reverse((score, src)) in &top {
+                        let count = if descending { *score } else { -*score };
+                        let node_idx = petgraph::graph::NodeIndex::new(*src as usize);
+                        rows.push(build_row(node_idx, count)?);
+                    }
+                    return Ok(ResultSet {
+                        rows,
+                        columns: return_clause
+                            .items
+                            .iter()
+                            .map(return_item_column_name)
+                            .collect(),
+                        lazy_return_items: None,
+                    });
+                }
             }
 
             // Node-centric top-K path (for typed group nodes or group=source patterns)

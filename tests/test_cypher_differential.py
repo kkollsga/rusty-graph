@@ -233,8 +233,21 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "edge_groupby_typed_target_no_orderby",
         "social_graph",
-        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
-        "RETURN c.name AS company, count(p) AS workers",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN c.name AS company, count(p) AS workers",
+        None,
+    ),
+    # Group at SOURCE side (P2 fix). The persistent peer histogram is keyed
+    # by edge target only, so the source-side dual computes counts on the fly
+    # via `count_edges_grouped_by_peer(.., Direction::Incoming)`. Same type
+    # filter via binary_search_idx applies. Locks in the new fast path's
+    # equivalence with the naive walk for both type-anchored and unanchored
+    # source.
+    (
+        "edge_groupby_source_typed",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c) "
+        "RETURN p.name AS person, count(c) AS jobs "
+        "ORDER BY jobs DESC, person LIMIT 5",
         None,
     ),
     # ── fuse_match_with_aggregate + fuse_match_with_aggregate_top_k (0.8.32 bug) ──

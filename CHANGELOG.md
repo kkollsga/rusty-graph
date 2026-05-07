@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Differential-test queries `edge_groupby_typed_target_top_k` and
   `edge_groupby_typed_target_no_orderby` added to the corpus to gate
   both branches.
+- **Group-by-source aggregations now use a fast path too.** Queries
+  shaped `MATCH (h:T)-[:E]->(other) RETURN h, count(other) ORDER BY
+  count(other) DESC LIMIT k` (e.g. "humans with most awards") were
+  hitting the slow node-centric scan, which on Wikidata's
+  `:human` (13.4M nodes) timed out at 30s/75s with random mmap reads
+  thrashing the page cache. The fast path now detects "group is
+  semantic source" via `(group_elem_idx, edge_direction)` —
+  `(0, Outgoing)` for the user-written form, `(2, Incoming)` for the
+  post-reversal form — and computes source-keyed counts on the fly via
+  `count_edges_grouped_by_peer(.., Direction::Incoming)`, a sequential
+  scan of `edge_endpoints`. Sequential I/O is the right shape for this
+  workload (see `feedback_disk_io_patterns.md`). On Wikidata,
+  `humans-with-most-awards` drops from 30-75s timeout to 54s answer —
+  bounded by the sequential edge-scan I/O ceiling, not by query-engine
+  inefficiency. Smaller graphs (social_graph) see sub-millisecond
+  results. Differential test
+  `edge_groupby_source_typed` added.
 
 ## [0.9.11] — 2026-05-07
 
