@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 
-import yaml  # type: ignore[import-untyped]
+# `yaml` (PyYAML) is part of the [mcp] extra; lazy-imported inside
+# load_manifest() so the dataclasses below can be imported without
+# the optional dep installed (CI runs without the extras).
 
 _VALID_TOOL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _TOOL_KINDS = ("cypher", "python")
@@ -81,7 +83,12 @@ def find_sibling_manifest(graph_path: Path) -> Path | None:
 
 
 def load_manifest(yaml_path: Path) -> Manifest:
-    """Parse and validate a manifest YAML file. Raises :class:`ManifestError`."""
+    """Parse and validate a manifest YAML file. Raises :class:`ManifestError`.
+
+    Requires PyYAML (installed via ``pip install "kglite[mcp]"``).
+    """
+    import yaml  # type: ignore[import-untyped]
+
     text = yaml_path.read_text()
     try:
         raw = yaml.safe_load(text)
