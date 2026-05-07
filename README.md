@@ -247,26 +247,32 @@ for the full procedure list.
 ## Examples
 
 The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
-directory has runnable, self-contained scripts covering each of the
+directory has runnable, self-contained artifacts covering each of the
 use cases above:
 
+- **[`conference_graph_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/conference_graph_mcp.yaml)**
+  — annotated MCP manifest. Drop next to a `.kgl` file and
+  `kglite-mcp-server` auto-loads it: `source_root:` registers
+  sandboxed file-access tools, inline Cypher templates become typed
+  MCP tools, and a trust-gated `python:` hook adds custom logic. The
+  zero-Python-fork starting point for any new project.
+- **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
+  — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
+  covering laws, regulations, and court decisions with citation
+  relationships. The imperative-API alternative when you're building
+  the graph itself, not configuring a server on top.
 - **[`code_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/code_graph.py)**
   — build a code knowledge graph from a source directory via
   `code_tree.build`. Produces `Function`, `Class`, `Module`, `File`
   nodes with `CALLS`, `DEFINES`, `IMPORTS` edges.
-- **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
-  — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
-  covering laws, regulations, and court decisions with citation
-  relationships. Good template for adapting to your own domain.
-- **[`mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)**
-  — fork-this template for the bundled MCP server. The same surface
-  ships as the `kglite-mcp-server` console script
-  (`pip install "kglite[mcp]"`); copy this file when you want to
-  register custom tools alongside `graph_overview` / `cypher_query`.
 - **[`spatial_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/spatial_graph.py)**
   — declarative CSV→graph loading via a JSON blueprint; regions,
   facilities, and sensors with lat/lon coordinates and pipeline-path
   traversal queries.
+- **[`mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)**
+  — fork template for the bundled MCP server. Reach for this only
+  when the manifest can't express what you need (custom CSV-export,
+  FastMCP middleware, replacing bundled tools).
 
 For Wikidata- and Sodir-scale builds, see the [Public datasets](#public-datasets)
 section above — `kglite.datasets.wikidata.open(...)` and

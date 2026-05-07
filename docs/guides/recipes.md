@@ -14,11 +14,29 @@ graph.cypher("""
 
 ## Top-K Nodes by Centrality
 
+Two equivalent forms — pick by who's calling. Agent / manifest /
+Cypher-tool contexts want the `CALL` form because everything reaches
+KGLite through `cypher()` there:
+
+```python
+graph.cypher("""
+    CALL pagerank() YIELD node, score
+    RETURN node.title AS title, score
+    ORDER BY score DESC LIMIT 10
+""")
+```
+
+For Python-only callers, the inherent method is shorter and skips the
+parser:
+
 ```python
 top_nodes = graph.pagerank(top_k=10)
 for node in top_nodes:
     print(f"{node['title']}: {node['score']:.3f}")
 ```
+
+The same `CALL <algo>() YIELD ...` shape works for the other graph
+algorithms — see {doc}`graph-algorithms` for the full list.
 
 ## 2-Hop Neighborhood
 
