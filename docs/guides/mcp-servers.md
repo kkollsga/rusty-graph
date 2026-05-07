@@ -1,6 +1,10 @@
 # MCP Servers
 
-Expose a KGLite graph to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP). The agent gets Cypher access to your graph through tool calls — no API to learn, no infrastructure to manage.
+> [Model Context Protocol](https://modelcontextprotocol.io/) is the
+> protocol Claude / Cursor / agentic CLIs use to call tools. Your
+> KGLite graph becomes a server that speaks it over stdin/stdout, and
+> the agent gets Cypher access to your data through ordinary tool
+> calls — no API to learn, no infrastructure to manage.
 
 KGLite ships the server as a console script. For most graphs the
 out-of-the-box `kglite-mcp-server` is everything you need. For
@@ -36,6 +40,23 @@ The server speaks MCP over stdio and exposes two tools out of the box:
 
 Optional: `--embedder all-MiniLM-L6-v2` to register a
 `sentence-transformers` model so `text_score()` works inside Cypher.
+
+### 2½. Five tools from one yaml line
+
+Drop a sibling YAML file next to your graph and you get three more
+tools without writing any Python:
+
+```yaml
+# my_graph_mcp.yaml
+source_root: ./data
+```
+
+That auto-registers `read_source`, `grep`, and `list_source` over the
+`./data` directory (sandboxed, ripgrep-backed, gitignore-aware) — five
+tools total. Cypher narrows the search at the graph level; the agent
+follows up with `read_source` for the top hits or `grep` for context
+the graph didn't lift. Full reference is in
+[Customising with a manifest](#customising-with-a-manifest) below.
 
 ### 3. Register with Claude Desktop
 
@@ -226,6 +247,27 @@ tools:
 Anything else fails fast at load time with the offending key
 listed.
 
+### Common boot errors
+
+The manifest is validated before `mcp.run()` is called, so most
+configuration mistakes surface as a one-line `ERROR:` to stderr at
+startup with a non-zero exit code. The recurring ones:
+
+| Error message | What it means | Fix |
+|---|---|---|
+| `ERROR: <path>: unknown top-level keys: ['foo']` | Typo or unsupported key in manifest. | Compare against the [top-level field list](#top-level-fields). |
+| `ERROR: <path>: source root './data' resolves to '/abs/.../data' which is not an existing directory` | The path is relative-to-yaml; it didn't land on a real directory. | Check the path; create the directory; or use `source_roots:` if you have multiple. |
+| `ERROR: <path>: cypher tool 'foo': cypher references $params ['bar'] not declared in parameters.properties` | A `$param` in the Cypher template isn't in the JSON Schema. | Add it under `parameters.properties` (and to `required:` if it's mandatory). |
+| `ERROR: <path>: cypher tool 'foo': invalid parameters schema: ...` | The `parameters:` block isn't valid JSON Schema (Draft 2020-12). | Check `type`, nested types in `properties`, and `required:` list. |
+| `ERROR: <path>: manifest declares N python tool(s) but '--trust-tools' was not passed on the CLI` | Python hooks declared, but the operator hasn't authorised them. | Add `--trust-tools` to the CLI invocation after auditing the manifest's `python:` entries. |
+| `ERROR: <path>: manifest declares N python tool(s) but trust.allow_python_tools is not set in the manifest` | The reverse: CLI passed `--trust-tools` but yaml doesn't opt in. | Add `trust:\n  allow_python_tools: true` to the yaml. |
+| `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
+| `ERROR: python tool 'foo': function 'bar' not found in <path>` | The yaml `function:` name doesn't match anything in the .py file. | Check the function name. Class methods aren't supported — use module-level functions. |
+
+Exit code 3 is reserved for manifest / validation errors; exit 1 for
+graph-file-not-found; exit 2 for missing `[mcp]` extras. Wrapping
+scripts can branch on those.
+
 ## End-to-end example: a conference catalog graph
 
 A graph indexing conference sessions, speakers, and companies, with
@@ -312,6 +354,8 @@ When deciding between manifest vs fork:
 | Custom MCP middleware / hooks | ❌ | ✅ |
 | Replacing `cypher_query` / `graph_overview` | ❌ | ✅ |
 | FastMCP transport other than stdio | ❌ | ✅ |
+| Cypher tool returning >15 rows / >2k chars inline | ❌ (manifest tier caps) | ✅ |
+| `FORMAT CSV` export from a manifest tool | ❌ (use bundled `cypher_query`) | ✅ |
 
 Most projects never need to fork.
 
