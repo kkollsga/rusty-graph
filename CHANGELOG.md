@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-05-07
+
+### Fixed — `add_nodes` no longer clobbers the title alias on follow-up calls
+
+A repeated `add_nodes(...)` on an existing node type without
+`node_title_field` (the canonical pattern when layering
+timeseries onto static rows, the example in the docstring)
+silently rebound `title_field_aliases[node_type]` to the
+`unique_id_field`. Later Cypher queries for `s.id` then resolved
+to the stored title, returning the title string in place of the
+id. The only visible signal was `title_alias="id"` in
+`describe()` output.
+
+The alias map is now written only when the caller explicitly
+passes `node_title_field`. Reported by a Google Cloud Next
+conference graph build (1,143 sessions, 16k edges) where the
+"static rows once, timeseries on top" pattern hit it.
+
+### Added — `describe(sample_truncate=…)` to control title truncation in the XML
+
+Sample values, sample node titles, and sample edge attributes
+emitted by `describe()` get truncated at 40 chars by default to
+keep prompts compact. Pass `describe(sample_truncate=None)` to
+emit them in full when you want full titles in an LLM context
+and have the budget for it; pass an integer for a custom
+threshold. The knob only affects rendering — stored data is
+always full-precision and accessible via Cypher.
+
+### Docs
+
+- New "End-to-end walkthrough" section at the top of the Data
+  Loading guide — shape tables → `add_nodes` → `add_connections`
+  → Cypher → save/load — so the README's "DataFrames in" pitch
+  lands on a single connected story instead of scattered
+  reference snippets.
+- AI Agents guide now documents the `id_alias` / `title_alias`
+  attributes on `<type>` elements and the new `sample_truncate`
+  knob.
+
+## [0.9.7] — 2026-05-04
+
 ## [0.9.7] — 2026-05-04
 
 ### Jupyter ergonomics — `wikidata.open()` is now process-cached

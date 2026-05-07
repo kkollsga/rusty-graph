@@ -94,3 +94,24 @@ graph.cypher("""
 - **Inventory mode** (`describe()`): node types as compact descriptors `TypeName[size,complexity,flags]` sorted by count, connection map, Cypher extensions. Core/supporting type tiers hide child types behind `+N` suffixes. For small graphs (≤15 types), full detail is inlined automatically. The `<extensions>` block carries `<algorithms>` and `<rules>` hint lines pointing the agent at the available `CALL` procedures (graph algorithms + structural validators).
 - **Focused mode** (`describe(types=['Field'])`): detailed properties with types, connection topology, timeseries/spatial config, supporting children, and sample nodes.
 - **Cypher reference** (`describe(cypher=True)`): full language reference including all supported clauses, operators, built-in functions, predicates, and procedures (including the six structural validators). Drill into a single procedure with `describe(cypher=['orphan_node'])`.
+
+### Reading the XML
+
+A few attributes worth knowing when you paste `describe()` into a prompt:
+
+- **`id_alias="…"` / `title_alias="…"`** on a `<type>` element. Set
+  when `add_nodes(...)` was called with a `unique_id_field` other
+  than `"id"` (e.g. `"npdid"`) or a `node_title_field` other than
+  `"title"` (e.g. `"prospect_name"`). The alias tells the agent
+  that `n.npdid` and `n.id` resolve to the same field, so it can
+  use whichever name appears in the source data without wondering
+  which one Cypher will accept. Both forms work in `MATCH` /
+  `WHERE`. Result rows always come back keyed under the canonical
+  `id` / `title`.
+- **`sample_truncate`** (call-site knob). Sample values, sample
+  node titles, and sample edge attributes get truncated at 40
+  chars by default to keep prompts compact. Pass
+  `describe(sample_truncate=None)` to emit them in full when you
+  have the context budget, or e.g. `sample_truncate=120` for a
+  middle ground. The knob only affects rendering; stored data is
+  always full-precision and accessible via Cypher.

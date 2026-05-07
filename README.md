@@ -38,8 +38,10 @@ Wikidata or petroleum-domain graph in one line.
   large for RAM. Same API across modes.
 - **Query with Cypher** — `MATCH`, `MERGE`, `OPTIONAL MATCH`,
   aggregations, parameters, semantic search via `text_score()`.
-- **DataFrames in, DataFrames out** — bulk-load from pandas, query
-  results as DataFrames.
+- **DataFrames in, DataFrames out** — bulk-load nodes and edges
+  from pandas with `add_nodes` / `add_connections`, query results
+  back as DataFrames. End-to-end walkthrough in the
+  [Data Loading guide](https://kglite.readthedocs.io/en/latest/guides/data-loading.html).
 
 ## Quick Start
 

@@ -187,3 +187,61 @@ class TestDescribeAliases:
         xml = graph_default_fields.describe()
         assert 'id_alias="' not in xml
         assert 'title_alias="' not in xml
+
+
+class TestRepeatedAddNodesPreservesAlias:
+    """A second add_nodes(..., node_title_field=None) on an existing
+    type must not silently rebind the title alias to unique_id_field
+    (which made `s.id` resolve to the title slot)."""
+
+    def test_followup_without_title_field_does_not_clobber_id(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame([{"id": "x1", "title": "Hello", "x": 1}]),
+            "S",
+            "id",
+            "title",
+        )
+
+        # Second pass adds timeseries data, no node_title_field.
+        ts = pd.DataFrame(
+            [
+                {"id": "x1", "ts": "2024-01-01", "y": 10},
+                {"id": "x1", "ts": "2024-01-02", "y": 20},
+            ]
+        )
+        g.add_nodes(
+            ts,
+            "S",
+            "id",
+            timeseries={"time": "ts", "channels": ["y"], "resolution": "day"},
+            conflict_handling="update",
+        )
+
+        rows = list(g.cypher("MATCH (s:S) RETURN s.id AS id, s.title AS title"))
+        assert len(rows) == 1
+        assert rows[0]["id"] == "x1", "id field was clobbered with title"
+        assert rows[0]["title"] == "Hello"
+
+    def test_followup_preserves_existing_non_default_title_alias(self):
+        """If the first call registered title_alias='prospect_name', a
+        follow-up without node_title_field must keep that alias intact."""
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"npdid": [1], "prospect_name": ["Alpha"], "status": ["active"]}),
+            "Prospect",
+            "npdid",
+            "prospect_name",
+        )
+        g.add_nodes(
+            pd.DataFrame({"npdid": [1], "extra": ["foo"]}),
+            "Prospect",
+            "npdid",
+            conflict_handling="update",
+        )
+
+        xml = g.describe()
+        assert 'title_alias="prospect_name"' in xml, xml
+        rows = list(g.cypher("MATCH (n:Prospect) RETURN n.npdid AS id, n.prospect_name AS name"))
+        assert rows[0]["id"] == 1
+        assert rows[0]["name"] == "Alpha"

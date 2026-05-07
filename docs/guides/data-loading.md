@@ -2,6 +2,100 @@
 
 > For most use cases, use [Cypher queries](cypher.md). The fluent API is for bulk operations from DataFrames or complex data pipelines.
 
+## End-to-end walkthrough — DataFrames in, queries out
+
+This is the full path from raw `pandas` tables to a queryable graph
+on disk. Most domain graphs land somewhere on this template.
+
+### 1. Shape your tables
+
+Two flat tables — one row per node, one row per edge — is enough.
+The columns you'll point `add_nodes` / `add_connections` at:
+
+```python
+import pandas as pd
+import kglite
+
+users = pd.DataFrame({
+    "user_id": [1001, 1002, 1003],
+    "name":    ["Alice", "Bob",   "Carol"],
+    "country": ["US",    "UK",    "US"],
+})
+
+products = pd.DataFrame({
+    "sku":   ["P-101", "P-102", "P-103"],
+    "title": ["Laptop", "Phone", "Tablet"],
+    "price": [999.99,  699.99,  349.99],
+})
+
+orders = pd.DataFrame({
+    "user_id":  [1001, 1001, 1002, 1003],
+    "sku":      ["P-101", "P-103", "P-102", "P-101"],
+    "date":     ["2024-01-15", "2024-02-10", "2024-01-20", "2024-03-04"],
+    "quantity": [1, 2, 1, 1],
+})
+```
+
+### 2. Load nodes
+
+```python
+graph = kglite.KnowledgeGraph()
+
+graph.add_nodes(users,    "User",    "user_id", "name")
+graph.add_nodes(products, "Product", "sku",     "title")
+```
+
+`unique_id_field` (3rd arg) is what makes a row identifiable;
+`node_title_field` (4th, optional) is the human-readable label.
+Both get [aliased](#property-mapping) so queries can use either
+the original column name or the canonical `id` / `title`.
+
+### 3. Load edges
+
+```python
+graph.add_connections(
+    orders,
+    connection_type="ORDERED",
+    source_type="User",      source_id_field="user_id",
+    target_type="Product",   target_id_field="sku",
+    columns=["date", "quantity"],   # extra props go on the edge
+)
+```
+
+The two `(type, id_field)` pairs tell `add_connections` how to
+look up endpoints in the existing nodes. Any other columns ride
+along as edge properties.
+
+### 4. Query
+
+```python
+# How many distinct products has each user ordered?
+graph.cypher("""
+    MATCH (u:User)-[:ORDERED]->(p:Product)
+    RETURN u.name AS user, count(DISTINCT p) AS unique_products
+    ORDER BY unique_products DESC
+""")
+
+# Total revenue by country, layering arithmetic on edge + node props.
+graph.cypher("""
+    MATCH (u:User)-[r:ORDERED]->(p:Product)
+    RETURN u.country, sum(r.quantity * p.price) AS revenue
+    ORDER BY revenue DESC
+""")
+```
+
+### 5. Save & reload
+
+```python
+graph.save("orders.kgl")
+g2 = kglite.load("orders.kgl")
+```
+
+That's the whole loop — three `add_*` calls, one Cypher query.
+Everything below this section is reference detail for when the
+template needs to bend (timeseries, dates, batch updates, RDF,
+declarative blueprints).
+
 ## Adding Nodes
 
 ```python

@@ -1811,6 +1811,7 @@ class KnowledgeGraph:
         cypher: bool | list[str] | None = None,
         fluent: bool | list[str] | None = None,
         max_pairs: int | None = None,
+        sample_truncate: int | None = 40,
     ) -> str:
         """Return an XML description of this graph for AI agents.
 
@@ -1873,6 +1874,12 @@ class KnowledgeGraph:
                 marker reports the hidden tail. Raise to drill into
                 wide fan-out connection types (e.g. Wikidata ``P31`` has
                 191k distinct pairs).
+            sample_truncate: Max chars for string values in ``vals=``
+                attributes, sample-node ids/titles, and sample-edge
+                attributes. Defaults to 40. Pass ``None`` to disable
+                truncation entirely — useful when you want full titles
+                in an LLM prompt and have context-window budget for it.
+                Has no effect on stored data; only the rendered XML.
 
         Raises:
             ValueError: If any type/connection/topic is not found.

@@ -484,6 +484,64 @@ class TestDescribe:
         assert ext.find("spatial") is None
 
 
+# ── sample_truncate flag ────────────────────────────────────────────────
+
+
+class TestDescribeSampleTruncate:
+    """`describe(sample_truncate=…)` controls XML-level title/value truncation."""
+
+    @staticmethod
+    def _graph_with_long_title():
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame([{"id": "x1", "title": "A" * 100, "kind": "long"}]),
+            "S",
+            "id",
+            "title",
+        )
+        return g, "A" * 100
+
+    def test_default_truncates_at_40_chars(self):
+        g, full = self._graph_with_long_title()
+        xml = g.describe(types=["S"])
+        assert full not in xml
+        assert "..." in xml
+
+    def test_none_disables_truncation(self):
+        g, full = self._graph_with_long_title()
+        xml = g.describe(types=["S"], sample_truncate=None)
+        assert full in xml
+
+    def test_custom_threshold(self):
+        g, _ = self._graph_with_long_title()
+        xml = g.describe(types=["S"], sample_truncate=20)
+        # rendered title should be exactly 20 chars (17 + "...")
+        import re
+
+        match = re.search(r'title="([^"]+)"', xml)
+        assert match is not None
+        rendered = match.group(1)
+        assert len(rendered) == 20
+        assert rendered.endswith("...")
+
+    def test_short_strings_unaffected(self):
+        """Strings already under the threshold are emitted verbatim."""
+        import pandas as pd
+
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame([{"id": "x1", "title": "Short"}]),
+            "S",
+            "id",
+            "title",
+        )
+        for trunc in (40, None, 5):
+            xml = g.describe(types=["S"], sample_truncate=trunc)
+            assert 'title="Short"' in xml, f"trunc={trunc} dropped short title"
+
+
 # ── Tiered describe() ────────────────────────────────────────────────────
 
 

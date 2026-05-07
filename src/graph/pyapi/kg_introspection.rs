@@ -1439,8 +1439,15 @@ impl KnowledgeGraph {
     /// into wide fan-out connection types (e.g. Wikidata `P31` has 191k distinct
     /// pairs); the head-by-count distribution is emitted first regardless.
     ///
+    /// `sample_truncate` controls truncation of long string values in the
+    /// `vals=`, sample-node, and edge-attribute fields. Defaults to 40
+    /// (current behavior). Pass `None` to disable truncation entirely —
+    /// useful when you want full titles in an LLM prompt and have
+    /// context-window budget for it.
+    ///
     /// When `type_search`, `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
-    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None))]
+    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None, sample_truncate=Some(40)))]
+    #[allow(clippy::too_many_arguments)]
     fn describe(
         &self,
         types: Option<Vec<String>>,
@@ -1449,6 +1456,7 @@ impl KnowledgeGraph {
         cypher: Option<&Bound<'_, PyAny>>,
         fluent: Option<&Bound<'_, PyAny>>,
         max_pairs: Option<usize>,
+        sample_truncate: Option<usize>,
     ) -> PyResult<String> {
         let conn_detail = extract_detail_param(connections, "connections")?;
         let cypher_detail = extract_cypher_param(cypher)?;
@@ -1461,6 +1469,7 @@ impl KnowledgeGraph {
             &fluent_detail,
             type_search.as_deref(),
             max_pairs,
+            sample_truncate,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }

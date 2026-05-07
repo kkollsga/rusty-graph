@@ -438,17 +438,19 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
 }
 
 /// Compact display string for a Value (used in agent description `vals` attributes).
-/// Truncates long strings to keep output concise.
-pub(super) fn value_display_compact(v: &Value) -> String {
+///
+/// `truncate_at = Some(n)` truncates string values longer than `n` chars to
+/// `n - 3` chars + `"..."`. `None` (or `Some(0)`) emits the value unchanged —
+/// the escape hatch for callers who pass `describe(sample_truncate=None)`.
+pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> String {
     match v {
-        Value::String(s) => {
-            if s.chars().count() > 40 {
-                let truncated: String = s.chars().take(37).collect();
+        Value::String(s) => match truncate_at {
+            Some(n) if n >= 4 && s.chars().count() > n => {
+                let truncated: String = s.chars().take(n - 3).collect();
                 format!("{}...", truncated)
-            } else {
-                s.clone()
             }
-        }
+            _ => s.clone(),
+        },
         Value::Int64(i) => i.to_string(),
         Value::Float64(f) => format!("{}", f),
         Value::Boolean(b) => {

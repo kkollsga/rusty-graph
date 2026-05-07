@@ -16,6 +16,7 @@ kglite.EmbeddingModel
 kglite.KnowledgeGraph.embed_texts
 kglite.KnowledgeGraph.search_text
 kglite.KnowledgeGraph.vector_search
+kglite.KnowledgeGraph.describe
 
 # Overloaded methods: stubtest compares against runtime's single dispatch signature.
 # The overloads are correct for type-checking but structurally differ from runtime.
@@ -33,12 +34,14 @@ kglite.datasets.wikidata.KnowledgeGraph.search_text
 kglite.datasets.wikidata.KnowledgeGraph.vector_search
 kglite.datasets.wikidata.KnowledgeGraph.sample
 kglite.datasets.wikidata.KnowledgeGraph.embeddings
+kglite.datasets.wikidata.KnowledgeGraph.describe
 kglite.datasets.sodir.wrapper.KnowledgeGraph
 kglite.datasets.sodir.wrapper.KnowledgeGraph.embed_texts
 kglite.datasets.sodir.wrapper.KnowledgeGraph.search_text
 kglite.datasets.sodir.wrapper.KnowledgeGraph.vector_search
 kglite.datasets.sodir.wrapper.KnowledgeGraph.sample
 kglite.datasets.sodir.wrapper.KnowledgeGraph.embeddings
+kglite.datasets.sodir.wrapper.KnowledgeGraph.describe
 
 # `from typing import Any` at module top-level surfaces `Any` as a public
 # attribute under stubtest. Internal-only re-export, not part of the API.

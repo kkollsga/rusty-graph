@@ -429,6 +429,7 @@ fn write_connections_detail(
     graph: &DirGraph,
     topics: &[String],
     max_pairs: usize,
+    truncate_at: Option<usize>,
 ) -> Result<(), String> {
     // Validate all connection types exist
     let conn_stats = compute_connection_type_stats(graph);
@@ -522,7 +523,10 @@ fn write_connections_detail(
                 let vals_attr = if unique > 0 && unique <= MAX_PROP_VALUES {
                     let mut vals: Vec<Value> = stats.value_set.into_iter().collect();
                     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let vals_str: Vec<String> = vals.iter().map(value_display_compact).collect();
+                    let vals_str: Vec<String> = vals
+                        .iter()
+                        .map(|v| value_display_compact(v, truncate_at))
+                        .collect();
                     format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
                 } else {
                     String::new()
@@ -550,7 +554,7 @@ fn write_connections_detail(
                     format!(
                         "{}:{}",
                         n.node_type_str(&graph.interner),
-                        value_display_compact(&n.title())
+                        value_display_compact(&n.title(), truncate_at)
                     )
                 })
                 .unwrap_or_default();
@@ -560,7 +564,7 @@ fn write_connections_detail(
                     format!(
                         "{}:{}",
                         n.node_type_str(&graph.interner),
-                        value_display_compact(&n.title())
+                        value_display_compact(&n.title(), truncate_at)
                     )
                 })
                 .unwrap_or_default();
@@ -582,7 +586,7 @@ fn write_connections_detail(
                 attrs.push_str(&format!(
                     " {}=\"{}\"",
                     xml_escape(key),
-                    xml_escape(&value_display_compact(v))
+                    xml_escape(&value_display_compact(v, truncate_at))
                 ));
             }
             xml.push_str(&format!("      <edge {}/>\n", attrs));
@@ -710,6 +714,7 @@ fn write_type_detail(
     caps: &TypeCapabilities,
     indent: &str,
     neighbors_cache: Option<&HashMap<String, NeighborsSchema>>,
+    truncate_at: Option<usize>,
 ) {
     let count = graph
         .type_indices
@@ -801,8 +806,10 @@ fn write_type_detail(
                 }
                 if let Some(ref vals) = prop.values {
                     if !vals.is_empty() {
-                        let val_strs: Vec<String> =
-                            vals.iter().map(value_display_compact).collect();
+                        let val_strs: Vec<String> = vals
+                            .iter()
+                            .map(|v| value_display_compact(v, truncate_at))
+                            .collect();
                         attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
                     }
                 }
@@ -977,8 +984,8 @@ fn write_type_detail(
             for node in samples {
                 let mut attrs = format!(
                     "id=\"{}\" title=\"{}\"",
-                    xml_escape(&value_display_compact(&node.id())),
-                    xml_escape(&value_display_compact(&node.title()))
+                    xml_escape(&value_display_compact(&node.id(), truncate_at)),
+                    xml_escape(&value_display_compact(&node.title(), truncate_at))
                 );
                 // Include up to 4 non-null custom properties
                 let mut prop_count = 0;
@@ -990,7 +997,7 @@ fn write_type_detail(
                         attrs.push_str(&format!(
                             " {}=\"{}\"",
                             xml_escape(k),
-                            xml_escape(&value_display_compact(v))
+                            xml_escape(&value_display_compact(v, truncate_at))
                         ));
                         prop_count += 1;
                     }
@@ -1253,7 +1260,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
 }
 
 /// Build inventory with inline detail for simple graphs (≤15 types).
-fn build_inventory_with_detail(graph: &DirGraph) -> String {
+fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> String {
     let mut caps = compute_type_capabilities(graph);
     bubble_capabilities(&mut caps, &graph.parent_types);
     let mut xml = String::with_capacity(4096);
@@ -1287,7 +1294,15 @@ fn build_inventory_with_detail(graph: &DirGraph) -> String {
     let all_neighbors = compute_all_neighbors_schemas(graph);
     for nt in type_names {
         let tc = caps.get(nt).unwrap_or(&empty_caps);
-        write_type_detail(&mut xml, graph, nt, tc, "    ", Some(&all_neighbors));
+        write_type_detail(
+            &mut xml,
+            graph,
+            nt,
+            tc,
+            "    ",
+            Some(&all_neighbors),
+            truncate_at,
+        );
     }
     xml.push_str("  </types>\n");
 
@@ -1301,7 +1316,11 @@ fn build_inventory_with_detail(graph: &DirGraph) -> String {
 }
 
 /// Build focused detail for specific requested types.
-fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, String> {
+fn build_focused_detail(
+    graph: &DirGraph,
+    types: &[String],
+    truncate_at: Option<usize>,
+) -> Result<String, String> {
     // Validate all types exist
     for t in types {
         if !graph.type_indices.contains_key(t) {
@@ -1338,7 +1357,7 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
 
     for t in types {
         let tc = caps.get(t).unwrap_or(&empty_caps);
-        write_type_detail(&mut xml, graph, t, tc, "  ", None);
+        write_type_detail(&mut xml, graph, t, tc, "  ", None, truncate_at);
     }
 
     xml.push_str("</graph>");
@@ -1539,6 +1558,7 @@ pub fn compute_description(
     fluent: &FluentDetail,
     type_search: Option<&str>,
     max_pairs: Option<usize>,
+    sample_truncate: Option<usize>,
 ) -> Result<String, String> {
     // Default cap matches pre-parameter behavior — 50 pairs is enough
     // to cover the dominant (src_type, tgt_type) relationships while
@@ -1575,7 +1595,7 @@ pub fn compute_description(
             ConnectionDetail::Off => {}
             ConnectionDetail::Overview => write_connections_overview(&mut result, graph),
             ConnectionDetail::Topics(ref topics) => {
-                write_connections_detail(&mut result, graph, topics, max_pairs)?;
+                write_connections_detail(&mut result, graph, topics, max_pairs, sample_truncate)?;
             }
         }
         match cypher {
@@ -1597,11 +1617,13 @@ pub fn compute_description(
 
     // Normal describe — inventory or focused detail
     let result = match types {
-        Some(requested) if !requested.is_empty() => build_focused_detail(graph, requested)?,
+        Some(requested) if !requested.is_empty() => {
+            build_focused_detail(graph, requested, sample_truncate)?
+        }
         _ => {
             let scale = graph_scale(graph);
             match scale {
-                GraphScale::Small => build_inventory_with_detail(graph),
+                GraphScale::Small => build_inventory_with_detail(graph, sample_truncate),
                 GraphScale::Medium => build_inventory(graph),
                 GraphScale::Large => build_large_inventory(graph),
                 GraphScale::Extreme => build_extreme_inventory(graph),

@@ -86,7 +86,11 @@ pub fn add_nodes(
             .id_field_aliases
             .insert(node_type.clone(), unique_id_field.clone());
     }
-    if title_field != "title" {
+    // Only register the title alias when the caller explicitly named one.
+    // Otherwise a follow-up add_nodes(..., node_title_field=None) would
+    // silently rebind the alias to unique_id_field, making `s.id` resolve
+    // to the stored title.
+    if should_update_title && title_field != "title" {
         graph
             .title_field_aliases
             .insert(node_type.clone(), title_field.clone());
