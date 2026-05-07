@@ -96,29 +96,32 @@ Everything below this section is reference detail for when the
 template needs to bend (timeseries, dates, batch updates, RDF,
 declarative blueprints).
 
-## Adding Nodes
+## `add_nodes` — parameter reference
+
+The walkthrough covered the four positional arguments. The optional
+keyword arguments worth knowing:
+
+| Parameter | Purpose |
+|---|---|
+| `columns=[...]` | Whitelist DataFrame columns to ingest. Default `None` = all columns. |
+| `skip_columns=[...]` | Inverse: drop these columns before ingest. |
+| `column_types={'col': 'datetime'}` | Force a column's storage type. Most common values: `'datetime'`, `'point'`, `'embedding'`. |
+| `conflict_handling='update'` | What to do when a row's id already exists. See [Loading in passes](#loading-in-passes) for the full table. |
+| `timeseries={...}` | Inline timeseries declaration — see the [Timeseries guide](timeseries.md). |
+| `nullable_int_downcast=True` | Convert pandas nullable ints (`Int64`) to native `int64` even when the column has no nulls. |
+
+Every call returns a report dict:
 
 ```python
-import pandas as pd
-
-products_df = pd.DataFrame({
-    'product_id': [101, 102, 103],
-    'title': ['Laptop', 'Phone', 'Tablet'],
-    'price': [999.99, 699.99, 349.99],
-    'stock': [45, 120, 30]
-})
-
-report = graph.add_nodes(
-    data=products_df,
-    node_type='Product',
-    unique_id_field='product_id',
-    node_title_field='title',
-    columns=['product_id', 'title', 'price', 'stock'],       # whitelist columns (None = all)
-    column_types={'launch_date': 'datetime'},                  # explicit type hints
-    conflict_handling='update'  # 'update' | 'replace' | 'skip' | 'preserve'
-)
-print(f"Created {report['nodes_created']} nodes in {report['processing_time_ms']}ms")
+report = graph.add_nodes(products_df, 'Product', 'sku', 'title')
+print(report)
+# {'operation': 'add_nodes', 'nodes_created': 3, 'nodes_updated': 0,
+#  'nodes_skipped': 0, 'has_errors': False, 'processing_time_ms': 0.4, ...}
 ```
+
+A `UserWarning` fires automatically when the report has skipped
+rows or `has_errors=True` — silent partial successes are surfaced
+without you needing to inspect the report.
 
 ## Property Mapping
 
@@ -140,28 +143,154 @@ graph.select('User').where({'id': 1001})                   # Also OK — canonic
 # {'id': 1001, 'title': 'Alice', 'type': 'User', ...}  — NOT 'user_id' or 'name'
 ```
 
-## Creating Connections
+## `add_connections` — parameter reference
+
+Past the six required positional arguments
+(`data, connection_type, source_type, source_id_field, target_type,
+target_id_field`), the keyword surface:
+
+| Parameter | Purpose |
+|---|---|
+| `columns=[...]` | Whitelist DataFrame columns to attach as edge properties. |
+| `skip_columns=[...]` | Inverse: drop these columns. |
+| `conflict_handling='update'` | What to do when an edge with the same endpoints already exists. Same modes as `add_nodes`. |
+| `query=...` | Alternative to `data=df`: a Cypher query whose `RETURN` columns supply the source/target ids. Lets you stamp edges from results of a query. |
+| `extra_properties={...}` | Static properties to attach to every edge (handy with `query=`). |
+
+`source_type` and `target_type` each refer to a single node type.
+To connect same-type nodes (org charts, taxonomies), set both to
+the same value — see the [Hierarchies](#hierarchies-explicit-edges-vs-set_parent_type)
+section for when this is the right move.
+
+## Loading in passes
+
+Real graphs rarely come from one DataFrame. Two patterns dominate:
+
+**Static rows, then timeseries.** Load the structural columns
+once, then layer timeseries observations on top. Common for
+sessions with daily registration counts, sensors with hourly
+readings, products with weekly inventory.
 
 ```python
-purchases_df = pd.DataFrame({
-    'user_id': [1001, 1001, 1002],
-    'product_id': [101, 103, 102],
-    'date': ['2023-01-15', '2023-02-10', '2023-01-20'],
-    'quantity': [1, 2, 1]
-})
+# Pass 1 — one row per node, all static columns
+graph.add_nodes(sessions_df, "Session", "session_id", "title")
 
-graph.add_connections(
-    data=purchases_df,
-    connection_type='PURCHASED',
-    source_type='User',
-    source_id_field='user_id',
-    target_type='Product',
-    target_id_field='product_id',
-    columns=['date', 'quantity']
+# Pass 2 — many rows per node, just (id, time, value) shape.
+# Notice: no node_title_field. Titles set in pass 1 are preserved.
+graph.add_nodes(
+    snapshots_df,
+    "Session",
+    "session_id",
+    timeseries={"time": "snapshot_date", "channels": ["registrants"]},
+    conflict_handling="update",
 )
 ```
 
-> `source_type` and `target_type` each refer to a single node type. To connect nodes of the same type, set both to the same value (e.g., `source_type='Person', target_type='Person'`).
+**Schema, then enrichment.** Initial pass establishes the node
+inventory; later passes add columns from joins, scores, or
+external lookups. Same shape — call `add_nodes` again with the
+same `node_type` and `unique_id_field`.
+
+```python
+graph.add_nodes(users_df,        "User", "user_id", "name")
+graph.add_nodes(pagerank_scores, "User", "user_id")  # adds .pagerank
+graph.add_nodes(geocoded,        "User", "user_id")  # adds .lat / .lon
+```
+
+### What carries over between calls
+
+A second `add_nodes(..., node_type="X", ...)` doesn't reset the
+type — it merges:
+
+| | Carried from prior calls |
+|---|---|
+| Existing node titles | ✅ Preserved unless you pass `node_title_field` again |
+| `id_alias` / `title_alias` | ✅ Preserved (no need to re-pass `node_title_field` to keep the alias) |
+| Properties on existing nodes | Merged per `conflict_handling` (below) |
+| Spatial / temporal / embedding configs | ✅ Preserved; new ones merge in |
+| `column_types` declared once | ⚠️ Re-declare for any new columns; must not contradict prior types |
+
+### Conflict handling cheatsheet
+
+`conflict_handling=` controls what happens when a row's id matches
+an existing node:
+
+| Mode | Behavior on existing nodes | When to use |
+|---|---|---|
+| `"update"` *(default)* | Merge properties; new values overwrite, nulls leave existing alone | Layering enrichment; the usual choice |
+| `"preserve"` | Merge properties; existing values win | Backfilling defaults without trampling earlier truth |
+| `"replace"` | Reset properties to the new row | A reload that should fully redefine the node |
+| `"skip"` | Don't touch existing nodes; only insert new ids | Idempotent appends |
+| `"sum"` | Add numeric values; same as `"update"` for non-numeric | Accumulating counters across batches |
+
+Inspect `graph.last_report()` after each pass to confirm the
+expected `nodes_created` / `nodes_updated` split.
+
+## Hierarchies — explicit edges vs `set_parent_type`
+
+These two APIs sound similar but solve different problems.
+Picking the wrong one usually doesn't break anything — it just
+makes `describe()` and your queries less ergonomic than they
+could be.
+
+**Use an explicit edge** when one *instance* is the parent of
+another, typically same-type:
+
+```python
+# Org chart — Company nodes parent other Company nodes.
+companies_df = pd.DataFrame({"id": ["alphabet", "google", "youtube"], ...})
+parent_of    = pd.DataFrame({
+    "parent": ["alphabet", "alphabet", "google"],
+    "child":  ["google",   "calico",   "youtube"],
+})
+graph.add_nodes(companies_df, "Company", "id", "name")
+graph.add_connections(parent_of, "PARENT_OF",
+                      "Company", "parent", "Company", "child")
+
+# Now Cypher walks the tree:
+graph.cypher("""
+    MATCH (root:Company {id: 'alphabet'})-[:PARENT_OF*]->(c:Company)
+    RETURN c.name
+""")
+```
+
+This is what you want for org charts, threaded comments, taxonomy
+trees with arbitrary depth, geographic containment chains — any
+relationship where the same type points at itself and depth is
+unbounded.
+
+**Use `set_parent_type`** when a *whole node type* is a
+structural child of another type — the child instances exist only
+because their parent does, and an LLM seeing `describe()` is
+better off thinking of them as "facets of the parent" than as
+peer types:
+
+```python
+graph.add_nodes(fields_df,             "Field",             "id", "name")
+graph.add_nodes(production_profiles,   "ProductionProfile", "id")
+graph.add_nodes(reserves,              "FieldReserves",     "id")
+
+# Tell describe() these are supporting children of Field
+graph.set_parent_type("ProductionProfile", "Field")
+graph.set_parent_type("FieldReserves",     "Field")
+```
+
+This affects only `describe()` output: the supporting types drop
+out of the top-level inventory and reappear inside the `<type
+name="Field">` block with their capabilities (timeseries, spatial,
+…) bubbled up to the parent. Cypher still treats them as
+ordinary node types — `MATCH (p:ProductionProfile) ...` works
+exactly as before.
+
+| Question | Answer |
+|---|---|
+| "Is Company A above Company B in the org chart?" | Edge: `PARENT_OF` |
+| "How deep is this taxonomy tree?" | Edge (variable-length `*` works on edges, not type-tiers) |
+| "Show the agent that `ProductionProfile` is really part of `Field`" | `set_parent_type` |
+| "Hide noisy supporting types from the inventory but keep them queryable" | `set_parent_type` |
+
+You can use both at once — they don't interact. Edges shape
+queries; `set_parent_type` shapes the LLM's mental model.
 
 ## Working with Dates
 

@@ -2,25 +2,39 @@
 
 Expose a KGLite graph to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP). The agent gets Cypher access to your graph through tool calls — no API to learn, no infrastructure to manage.
 
-```python
-python mcp_server.py --graph my_graph.kgl
-```
-
-KGLite ships with a ready-to-use server at `examples/mcp_server.py`. This guide covers how it works, how to customize it, and patterns from production servers.
+KGLite ships the server as a console script. For most graphs the
+out-of-the-box `kglite-mcp-server` is everything you need; the rest
+of this guide is for when you want to fork it and add domain-specific
+tools.
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install with the MCP extra
 
 ```bash
-pip install kglite mcp
+pip install "kglite[mcp]"
 ```
 
-### 2. Run the example server
+This pulls in the official `mcp` Python package alongside KGLite and
+registers the `kglite-mcp-server` console script.
+
+### 2. Point it at a graph file
 
 ```bash
-python examples/mcp_server.py --graph my_graph.kgl
+kglite-mcp-server --graph /path/to/my_graph.kgl
 ```
+
+The server speaks MCP over stdio and exposes two tools out of the
+box:
+
+- `graph_overview(...)` — wraps `describe()` for progressive schema
+  disclosure (types, connections, Cypher reference).
+- `cypher_query(query, timeout_ms=...)` — runs any Cypher query;
+  inline result up to 15 rows, append `FORMAT CSV` for a localhost-
+  served file export.
+
+Optional: `--embedder all-MiniLM-L6-v2` to register a
+`sentence-transformers` model so `text_score()` works inside Cypher.
 
 ### 3. Register with Claude Desktop
 
@@ -30,27 +44,26 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "my-graph": {
-      "command": "python",
-      "args": ["/path/to/mcp_server.py", "--graph", "/path/to/my_graph.kgl"]
+      "command": "kglite-mcp-server",
+      "args": ["--graph", "/abs/path/to/my_graph.kgl"]
     }
   }
 }
 ```
 
-For Claude Code, add to `.claude/settings.json`:
+For Claude Code, add to `.claude/settings.json` with the same shape.
+The agent can now call `graph_overview()` to learn the schema and
+`cypher_query()` to query.
 
-```json
-{
-  "mcpServers": {
-    "my-graph": {
-      "command": "python",
-      "args": ["/path/to/mcp_server.py", "--graph", "/path/to/my_graph.kgl"]
-    }
-  }
-}
-```
+### Forking the bundled server
 
-The agent can now call `graph_overview()` to learn the schema and `cypher_query()` to query.
+When the two built-in tools aren't enough — you want domain-specific
+helpers, custom security guardrails, or extra logging — copy
+[`examples/mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)
+and edit it. That file is a thin wrapper around `kglite.mcp_server.main`;
+replacing the body with your own `FastMCP` setup gets you the same
+runtime as the bundled CLI but with full control over the tool surface.
+The patterns documented in the rest of this guide all apply.
 
 ## Core Tools
 
@@ -403,4 +416,8 @@ if __name__ == "__main__":
     mcp.run(transport="stdio")
 ```
 
-See `examples/mcp_server.py` for a full-featured server with CSV export, code graph tools, and optional embedder support.
+See [`examples/mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)
+for a full-featured server with CSV export and optional embedder
+support — that file is the canonical place to fork when you want to
+register custom tools alongside the bundled `graph_overview` /
+`cypher_query`.

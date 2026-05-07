@@ -264,18 +264,31 @@ impl KnowledgeGraph {
             }
             report_dict.set_item("has_errors", has_errors)?;
 
-            if result.connections_skipped > 0 {
+            // Emit a warning whenever the report flags skips or errors —
+            // silent skips on bulk edge loads were a recurring footgun.
+            if has_errors {
                 let total = result.connections_created + result.connections_skipped;
-                let detail = result.errors.join("; ");
-                let msg = std::ffi::CString::new(format!(
-                    "add_connections('{}'): {} of {} rows skipped. {}",
-                    connection_type, result.connections_skipped, total, detail
-                ))
-                .unwrap_or_default();
+                let detail = if result.errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", result.errors.join("; "))
+                };
+                let msg = if result.connections_skipped > 0 {
+                    format!(
+                        "add_connections('{}'): {} of {} rows skipped.{}",
+                        connection_type, result.connections_skipped, total, detail
+                    )
+                } else {
+                    format!(
+                        "add_connections('{}'): completed with errors.{}",
+                        connection_type, detail
+                    )
+                };
+                let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
                 let _ = PyErr::warn(
                     py,
                     py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
-                    msg.as_c_str(),
+                    cmsg.as_c_str(),
                     1,
                 );
             }

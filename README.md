@@ -152,7 +152,12 @@ Cursor, or any MCP-capable agent.
 ```python
 xml = graph.describe()                            # schema for the agent's context
 prompt = f"You have a knowledge graph:\n{xml}\nAnswer via graph.cypher()."
-# Or: python examples/mcp_server.py path/to/graph.kgl
+```
+
+```bash
+# Or serve the whole graph over MCP — installed as a console script.
+pip install "kglite[mcp]"
+kglite-mcp-server --graph path/to/graph.kgl
 ```
 
 ### Codebase analysis
@@ -248,9 +253,10 @@ use cases above:
   covering laws, regulations, and court decisions with citation
   relationships. Good template for adapting to your own domain.
 - **[`mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)**
-  — drop-in MCP server that exposes any `.kgl` file to an LLM (Claude,
-  Cursor, …) as a Cypher query tool, with schema disclosure and
-  code-graph–aware helpers.
+  — fork-this template for the bundled MCP server. The same surface
+  ships as the `kglite-mcp-server` console script
+  (`pip install "kglite[mcp]"`); copy this file when you want to
+  register custom tools alongside `graph_overview` / `cypher_query`.
 - **[`spatial_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/spatial_graph.py)**
   — declarative CSV→graph loading via a JSON blueprint; regions,
   facilities, and sensors with lat/lon coordinates and pipeline-path

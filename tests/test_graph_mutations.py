@@ -256,6 +256,52 @@ class TestMutationErrors:
         assert result[0]["cnt"] == 0
 
 
+class TestBulkLoadWarnings:
+    """Bulk loads should emit UserWarning whenever the report flags
+    skips OR errors — silent partial successes were a footgun."""
+
+    def test_warn_on_skipped_rows(self, graph):
+        import warnings
+
+        df = pd.DataFrame({"id": [None, "x2"], "name": ["A", "B"]})
+        with warnings.catch_warnings(record=True) as wlist:
+            warnings.simplefilter("always")
+            graph.add_nodes(df, "T", "id", "name")
+        kinds = {w.category for w in wlist}
+        assert UserWarning in kinds
+        msgs = " | ".join(str(w.message) for w in wlist)
+        assert "skipped" in msgs
+
+    def test_warn_on_errors_without_skips(self, graph):
+        """Type mismatch on a follow-up call is recorded as an error
+        but does not skip rows. Pre-0.9.9 this was silent."""
+        import warnings
+
+        graph.add_nodes(pd.DataFrame({"id": [1], "title": ["A"], "x": [1]}), "T", "id", "title")
+        with warnings.catch_warnings(record=True) as wlist:
+            warnings.simplefilter("always")
+            graph.add_nodes(
+                pd.DataFrame({"id": [2], "title": ["B"], "x": ["str-not-int"]}),
+                "T",
+                "id",
+                "title",
+            )
+        user_warnings = [w for w in wlist if w.category is UserWarning]
+        assert len(user_warnings) >= 1, "expected a UserWarning when has_errors=True"
+        assert any("error" in str(w.message).lower() for w in user_warnings)
+
+    def test_warn_on_skipped_connections(self, graph):
+        import warnings
+
+        graph.add_nodes(pd.DataFrame({"id": ["a"], "name": ["A"]}), "Person", "id", "name")
+        conn = pd.DataFrame({"from": ["missing"], "to": ["a"]})
+        with warnings.catch_warnings(record=True) as wlist:
+            warnings.simplefilter("always")
+            graph.add_connections(conn, "KNOWS", "Person", "from", "Person", "to")
+        user_warnings = [w for w in wlist if w.category is UserWarning]
+        assert any("KNOWS" in str(w.message) and "skipped" in str(w.message) for w in user_warnings)
+
+
 # ---------------------------------------------------------------------------
 # Bulk Operations
 # ---------------------------------------------------------------------------

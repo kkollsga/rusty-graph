@@ -470,19 +470,30 @@ impl KnowledgeGraph {
             }
             report_dict.set_item("has_errors", has_errors)?;
 
-            // Emit Python warning if rows were skipped
-            if result.nodes_skipped > 0 {
+            // Emit a Python warning whenever the report carries any
+            // skips or errors. Silent skips on bulk loads were a
+            // recurring footgun — surface them at warn level so the
+            // user sees them without needing to inspect last_report().
+            if has_errors {
                 let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
-                let detail = result.errors.join("; ");
-                let msg = std::ffi::CString::new(format!(
-                    "add_nodes: {} of {} rows skipped. {}",
-                    result.nodes_skipped, total, detail
-                ))
-                .unwrap_or_default();
+                let detail = if result.errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", result.errors.join("; "))
+                };
+                let msg = if result.nodes_skipped > 0 {
+                    format!(
+                        "add_nodes: {} of {} rows skipped.{}",
+                        result.nodes_skipped, total, detail
+                    )
+                } else {
+                    format!("add_nodes: completed with errors.{}", detail)
+                };
+                let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
                 let _ = PyErr::warn(
                     py,
                     py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
-                    msg.as_c_str(),
+                    cmsg.as_c_str(),
                     1,
                 );
             }

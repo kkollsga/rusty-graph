@@ -38,6 +38,10 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+kglite-mcp-server = "kglite.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"

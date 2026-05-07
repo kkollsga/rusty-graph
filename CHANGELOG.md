@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-05-07
+
+### Added
+
+- **`kglite-mcp-server` console script.** The MCP server that
+  exposes any `.kgl` graph as a Cypher tool now ships as part
+  of the package — `pip install "kglite[mcp]"` and run
+  `kglite-mcp-server --graph my.kgl`. Same surface as
+  `examples/mcp_server.py`, which is now a thin wrapper around
+  the new `kglite.mcp_server.main` entry point and lives on as
+  the fork-this template for adding custom tools.
+
+### Changed
+
+- `add_nodes` and `add_connections` now emit a `UserWarning`
+  whenever the report flags **any** errors, not just when rows
+  were skipped. Previously, follow-up loads with type mismatches
+  set `has_errors=True` on the report but stayed silent; you had
+  to inspect `last_report()` to notice. Silent partial successes
+  were a recurring footgun.
+
+### Docs
+
+- New "Loading in passes" section in the Data Loading guide
+  covering the second-`add_nodes` contract (static-then-
+  timeseries, schema-then-enrichment), what carries over between
+  calls, and a `conflict_handling` cheatsheet.
+- New "Hierarchies" section disambiguating `set_parent_type`
+  (type-level disclosure for `describe()`) from explicit
+  `PARENT_OF`-style edges (instance-level tree structure that
+  Cypher `*` walks). They look similar; they aren't.
+- MCP Servers guide rewritten to lead with the bundled CLI:
+  `pip install "kglite[mcp]"` → `kglite-mcp-server --graph X.kgl`.
+  Claude Desktop / Claude Code configs use `"command":
+  "kglite-mcp-server"` directly. Tutorial body is now framed as
+  the customisation path for forks of `examples/mcp_server.py`.
+- `add_nodes` / `add_connections` reference sections in the Data
+  Loading guide reframed as parameter tables (no longer redundant
+  with the walkthrough).
+
 ## [0.9.8] — 2026-05-07
 
 ### Fixed — `add_nodes` no longer clobbers the title alias on follow-up calls
