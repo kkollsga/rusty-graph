@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-05-07
+
 ### Added
 
 - **YAML manifest for `kglite-mcp-server`.** Drop a
@@ -46,7 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   framed as the escape hatch for needs the manifest can't cover
   (custom CSV-export logic, FastMCP middleware, alternative
   transports). Includes a complete manifest example for a
-  conference-data graph.
+  conference-catalog graph.
+- `KnowledgeGraph.explain_mcp()` (the agent-facing XML quickstart)
+  rewritten for the bundled CLI + manifest path. Previously
+  recommended forking a server file and pointed agents at the wrong
+  install / import.
+- New `examples/conference_graph_mcp.yaml` — copy-paste-ready
+  reference manifest demonstrating all three tiers (`source_root`,
+  inline cypher, python hooks) with comments explaining each.
 
 ## [0.9.9] — 2026-05-07
 
