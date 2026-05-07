@@ -12,10 +12,10 @@
 # the yaml's directory; ../ traversal is allowed.
 
 # ── Server identity (optional) ───────────────────────────────────────
-name: GCN-2026 Graph
+name: Conference Graph
 instructions: |
-  Google Cloud Next 2026 conference graph — 1,143 sessions across
-  Apr 21–24, 1,812 speakers, 526 companies. Use cypher_query for
+  Conference catalog — sessions, speakers, companies, plus
+  similarity edges between sessions. Use cypher_query for
   structured questions, read_source / grep / list_source for raw
   data in ./data, similar_sessions for embedding-based recs,
   session_detail for fields not lifted to the graph.
@@ -68,5 +68,5 @@ tools:
   # schema directly — no synthesis layer.
   - name: session_detail
     description: Full source JSON for a session by id (fields not lifted to the graph).
-    python: ./gcn_tools.py
+    python: ./tools.py
     function: session_detail

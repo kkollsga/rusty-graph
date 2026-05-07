@@ -1743,7 +1743,7 @@ trust:
 tools:
   - name: session_detail
     description: Full source JSON for a session by id.
-    python: ./gcn_tools.py
+    python: ./tools.py
     function: session_detail
 ]]></yaml>
       <trust_gate>

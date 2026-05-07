@@ -162,13 +162,13 @@ class TestPythonTool:
         m = load_manifest(
             _write(
                 tmp_path,
-                "tools:\n  - name: session_detail\n    python: ./gcn_tools.py\n    function: session_detail\n",
+                "tools:\n  - name: session_detail\n    python: ./tools.py\n    function: session_detail\n",
             )
         )
         tool = m.tools[0]
         assert isinstance(tool, PythonTool)
         assert tool.name == "session_detail"
-        assert tool.python == "./gcn_tools.py"
+        assert tool.python == "./tools.py"
         assert tool.function == "session_detail"
 
     def test_missing_function_rejected(self, tmp_path: Path) -> None:
@@ -241,7 +241,7 @@ class TestPublishedExample:
         example = repo_root / "examples" / "conference_graph_mcp.yaml"
         assert example.is_file(), f"missing example manifest at {example}"
         m = load_manifest(example)
-        assert m.name == "GCN-2026 Graph"
+        assert m.name == "Conference Graph"
         assert m.source_roots == ["./data"]
         assert m.trust.allow_python_tools is True
         names = [t.name for t in m.tools]

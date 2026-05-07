@@ -173,12 +173,12 @@ trust:
 tools:
   - name: session_detail
     description: Full source JSON for a session by id.
-    python: ./gcn_tools.py
+    python: ./tools.py
     function: session_detail
 ```
 
 ```python
-# gcn_tools.py
+# tools.py
 import json
 from pathlib import Path
 
@@ -213,7 +213,7 @@ File paths resolve relative to the manifest, same contract as
 ### Top-level fields
 
 ```yaml
-name: GCN-2026 Graph                  # FastMCP server display name (optional)
+name: My Graph                        # FastMCP server display name (optional)
 instructions: |                       # Replaces default instructions (optional)
   Custom prompt shown to the agent at server-info time.
 source_root: ./data                   # OR source_roots: [./data, ../alt]
@@ -226,16 +226,17 @@ tools:
 Anything else fails fast at load time with the offending key
 listed.
 
-## End-to-end example: GCN-2026 conference graph
+## End-to-end example: a conference catalog graph
 
-A real graph indexing 1,143 sessions across 4 days. Manifest
-co-locates with the graph + the source data:
+A graph indexing conference sessions, speakers, and companies, with
+embedding-derived similarity edges between sessions. Manifest
+co-locates with the graph file and the source data:
 
 ```
-gcn2026/
-├── googlenext2026.kgl
-├── googlenext2026_mcp.yaml      ← auto-detected
-├── gcn_tools.py                 ← custom python hook
+conference/
+├── conference.kgl
+├── conference_mcp.yaml          ← auto-detected
+├── tools.py                     ← custom python hook
 └── data/
     ├── sessions/
     │   └── classified.json
@@ -243,11 +244,11 @@ gcn2026/
 ```
 
 ```yaml
-# googlenext2026_mcp.yaml
-name: GCN-2026 Graph
+# conference_mcp.yaml
+name: Conference Graph
 instructions: |
-  Google Cloud Next 2026 conference data — 1,143 sessions across
-  Apr 21–24, 1,812 speakers, 526 companies. Use cypher_query for
+  Conference catalog — sessions, speakers, companies, plus
+  similarity edges between sessions. Use cypher_query for
   structured questions, read_source/grep for raw JSON in ./data,
   similar_sessions for embedding-based recommendations,
   session_detail for fields not lifted to the graph.
@@ -273,14 +274,14 @@ tools:
 
   - name: session_detail
     description: Raw source JSON for a session by id.
-    python: ./gcn_tools.py
+    python: ./tools.py
     function: session_detail
 ```
 
 Run with:
 
 ```bash
-kglite-mcp-server --graph googlenext2026.kgl --trust-tools
+kglite-mcp-server --graph conference.kgl --trust-tools
 ```
 
 Tools registered (visible in any MCP-aware agent):

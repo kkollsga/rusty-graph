@@ -102,9 +102,8 @@ id. The only visible signal was `title_alias="id"` in
 `describe()` output.
 
 The alias map is now written only when the caller explicitly
-passes `node_title_field`. Reported by a Google Cloud Next
-conference graph build (1,143 sessions, 16k edges) where the
-"static rows once, timeseries on top" pattern hit it.
+passes `node_title_field`. Surfaced by a real-world graph build
+where the "static rows once, timeseries on top" pattern hit it.
 
 ### Added — `describe(sample_truncate=…)` to control title truncation in the XML
 
