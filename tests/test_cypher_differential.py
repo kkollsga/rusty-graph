@@ -209,6 +209,23 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # ── fuse_match_return_aggregate ──
     ("group_by_city", "social_graph", "MATCH (p:Person) RETURN p.city AS city, count(p) AS n", None),
     ("group_by_with_sum", "social_graph", "MATCH (p:Person) RETURN p.city AS city, sum(p.salary) AS total", None),
+    # Edge-driven group-by where the target node carries a `:Type` label.
+    # Pre-fix the planner reversed the pattern to start at :Company, which
+    # bailed the FusedMatchReturnAggregate fast path (group_elem_idx=0 with
+    # Incoming edge), forcing the slow node-centric scan. On Wikidata this
+    # was timeout 122s vs corrected 169ms. The optimised path uses
+    # `lookup_peer_counts` keyed by edge target plus `binary_search_idx`
+    # against `type_indices[T]` for the type filter; the naive Cypher path
+    # iterates everything and produces the same result, so this differential
+    # entry doubles as a regression gate for the bypass.
+    (
+        "edge_groupby_typed_target_top_k",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+        "RETURN c.name AS company, count(p) AS workers "
+        "ORDER BY workers DESC, company LIMIT 3",
+        None,
+    ),
     # ── fuse_match_with_aggregate + fuse_match_with_aggregate_top_k (0.8.32 bug) ──
     # Secondary sort key (city, n) breaks ties so the row identities are
     # deterministic — without it, both modes return correct counts but

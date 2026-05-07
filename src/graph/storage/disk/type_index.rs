@@ -183,6 +183,25 @@ impl<'a> TypeNodesRef<'a> {
             TypeNodesRef::Mmap(s) => s.iter().any(|u| (*u as usize) == idx.index()),
         }
     }
+
+    /// O(log n) membership test. Relies on the sortedness invariant of
+    /// `TypeIndexStore`: entries are inserted in `node_indices()` iteration
+    /// order (0, 1, …, n-1), and filtering by type produces a naturally
+    /// sorted subsequence. `write_type_indices_bin` preserves that order
+    /// across save + reload.
+    ///
+    /// If a caller has mutated an `Overlay` slice with `push` (or via the
+    /// `entry_or_default` path) without re-sorting, this method may give
+    /// false negatives — see the `contains` fallback above.
+    pub fn binary_search_idx(&self, idx: NodeIndex) -> bool {
+        match self {
+            TypeNodesRef::Overlay(s) => s.binary_search(&idx).is_ok(),
+            TypeNodesRef::Mmap(s) => {
+                let want = idx.index() as u32;
+                s.binary_search(&want).is_ok()
+            }
+        }
+    }
 }
 
 pub enum TypeNodesIter<'a> {

@@ -1362,9 +1362,17 @@ impl<'a> CypherExecutor<'a> {
                 PatternElement::Edge(ep) => ep.connection_type.as_ref(),
                 _ => None,
             };
+            let edge_direction = match &pattern.elements[1] {
+                PatternElement::Edge(ep) => Some(ep.direction),
+                _ => None,
+            };
             let group_node_props = match &pattern.elements[group_elem_idx] {
                 PatternElement::Node(np) => &np.properties,
                 _ => &None,
+            };
+            let group_node_type = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(np) => np.node_type.as_deref(),
+                _ => None,
             };
             if let (false, 3, Some(ct_str), None) = (
                 distinct_count,
@@ -1373,27 +1381,25 @@ impl<'a> CypherExecutor<'a> {
                 group_node_props.as_ref(),
             ) {
                 let conn_key = InternedKey::from_str(ct_str);
-                // Determine scan direction: if group is the TARGET (elem 2), scan
-                // outgoing edges and group by target. If group is SOURCE (elem 0),
-                // scan incoming edges and group by source.
-                let scan_dir = if group_elem_idx == 0 {
-                    // Group = source node (a). We want count of edges FROM a.
-                    // Scan outgoing, peer = target → not what we want.
-                    // Actually: scan outgoing edges, each edge's source = the node
-                    // we iterated from. We want to count by source. But CSR outgoing
-                    // is indexed by source — each node's outgoing edges are contiguous.
-                    // We can just count the range length per node.
-                    // However, the global scan counts by PEER (target), not by source.
-                    // For group=source, we need to count outgoing per-source = CSR range size.
-                    // That's cheaper: just offsets[i+1] - offsets[i] for the type range.
-                    // For simplicity, skip edge-centric for group=source and use node-centric.
-                    None
-                } else {
-                    // Group = target node (b). Scan outgoing, accumulate by target (peer).
-                    Some(Direction::Outgoing)
-                };
+                // Determine whether `group` is the SEMANTIC TARGET of the edge.
+                // The persistent peer-count histogram is keyed by edge target,
+                // so the fast path applies whenever group=target — regardless
+                // of whether the planner reversed the pattern.
+                //
+                //   user wrote                  →  after `optimize_pattern_start_node`
+                //   (a)-[:E]->(b:T)             →  (b:T)<-[:E]-(a)
+                //   group_elem_idx = 2          →  group_elem_idx = 0
+                //   edge.direction = Outgoing   →  edge.direction = Incoming
+                //
+                // In both shapes `b` is the semantic target. lookup_peer_counts
+                // serves both. group=source (e.g. RETURN a, count(b)) needs a
+                // different histogram; that case still falls back to slow path.
+                let group_is_target = matches!(
+                    (group_elem_idx, edge_direction),
+                    (2, Some(EdgeDirection::Outgoing)) | (0, Some(EdgeDirection::Incoming))
+                );
 
-                if let Some(dir) = scan_dir {
+                if group_is_target {
                     self.check_deadline()?;
                     // Fast path: persistent per-(conn_type, peer) histogram
                     // answers in O(distinct-peers). Falls back to edge_endpoints
@@ -1405,14 +1411,32 @@ impl<'a> CypherExecutor<'a> {
                     } else {
                         self.graph.graph.count_edges_grouped_by_peer(
                             conn_key,
-                            dir,
+                            Direction::Outgoing,
                             self.deadline,
                         )?
+                    };
+                    // Optional per-peer type filter. When the group node carries
+                    // a `:Type` label, restrict peers to that type via O(log n)
+                    // binary search on `type_indices[T]` (sorted by construction
+                    // — see `TypeNodesRef::binary_search_idx`). Pure CPU work;
+                    // avoids the random mmap reads of `node_type_of` on disk-
+                    // backed graphs that dominated the pre-fix wall time.
+                    let type_index_view =
+                        group_node_type.and_then(|nt| self.graph.type_indices.get(nt));
+                    let peer_passes_type = |peer: u32| -> bool {
+                        match &type_index_view {
+                            None => true,
+                            Some(view) => view
+                                .binary_search_idx(petgraph::graph::NodeIndex::new(peer as usize)),
+                        }
                     };
                     // Top-K from the counts HashMap
                     let heap: BinaryHeap<Reverse<(i64, u32)>> = if descending {
                         let mut h = BinaryHeap::with_capacity(limit + 1);
                         for (&peer, &count) in &counts {
+                            if !peer_passes_type(peer) {
+                                continue;
+                            }
                             h.push(Reverse((count, peer)));
                             if h.len() > limit {
                                 h.pop();
@@ -1423,6 +1447,9 @@ impl<'a> CypherExecutor<'a> {
                         // For ASC we need a max-heap — use negative trick
                         let mut h = BinaryHeap::with_capacity(limit + 1);
                         for (&peer, &count) in &counts {
+                            if !peer_passes_type(peer) {
+                                continue;
+                            }
                             h.push(Reverse((-count, peer)));
                             if h.len() > limit {
                                 h.pop();
