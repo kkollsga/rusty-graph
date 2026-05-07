@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.11] — 2026-05-07
+
+### Docs
+
+- **Getting Started rewritten** to lead with bulk-load
+  (`add_nodes` / `add_connections` from DataFrames) instead of
+  three single-row `cypher("CREATE ...")` statements. The old
+  ordering misrepresented the day-1 workflow — every real project
+  loads data through the columnar path. Single-CREATE demoted to
+  an "Ad-hoc inserts" callout. Adds the missing
+  `pip install "kglite[mcp]"` line and a preview of the bundled
+  CLI + `source_root:` one-liner.
+- **New audience-ranked guide index** at `docs/guides/index.md`
+  groups the 14 how-to guides by intent: load-bearing path
+  (data-loading → cypher → mcp-servers), domain-specific
+  (code-tree, spatial, timeseries, etc.), power-user, and
+  "if you want to know why". Sidebar toctree reordered to match.
+- **MCP Servers guide polished**: 3-line "What's MCP?" intro
+  with link to modelcontextprotocol.io; "Five tools from one yaml
+  line" preview pulled into the Quick Start so the source_root:
+  ROI lands before the Claude Desktop config; new "Common boot
+  errors" subsection with eight error→fix mappings + exit-code
+  reference; two new rows in the manifest-vs-fork decision table
+  for the 15-row output cap and FORMAT CSV constraints.
+- **README examples reordered**: `conference_graph_mcp.yaml`
+  promoted to the first example as the canonical zero-Python
+  starter post-0.9.10. `legal_graph.py` reframed as the
+  imperative-API alternative; `mcp_server.py` demoted to
+  fork-only-when-manifest-can't.
+- **`recipes.md` "Top-K Nodes by Centrality"** now shows the
+  `CALL pagerank() YIELD node, score` Cypher form alongside the
+  inherent `graph.pagerank(top_k=10)` Python form — manifest /
+  MCP / agent contexts all reach KGLite through `cypher()`, so
+  the Cypher form is the agent-friendly default.
+
 ## [0.9.10] — 2026-05-07
 
 ### Added
