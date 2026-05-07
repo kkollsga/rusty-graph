@@ -93,7 +93,7 @@ class TestApplyManifest:
         yaml_path.write_text("\n")
         manifest = Manifest(yaml_path=yaml_path)
         mcp = _CaptureMcp()
-        summary = _apply_manifest(mcp, manifest)
+        summary = _apply_manifest(mcp, None, manifest)
         assert mcp.tools == {}
         assert summary["source_roots"] == []
 
@@ -108,7 +108,7 @@ class TestApplyManifest:
             trust=TrustConfig(),
         )
         mcp = _CaptureMcp()
-        summary = _apply_manifest(mcp, manifest)
+        summary = _apply_manifest(mcp, None, manifest)
         assert set(mcp.tools) == {"read_source", "grep", "list_source"}
         assert summary["source_roots"] == [str(data_dir.resolve())]
 
@@ -118,7 +118,7 @@ class TestApplyManifest:
         manifest = Manifest(yaml_path=yaml_path, source_roots=["./missing"])
         mcp = _CaptureMcp()
         with pytest.raises(ManifestError, match="not an existing directory"):
-            _apply_manifest(mcp, manifest)
+            _apply_manifest(mcp, None, manifest)
 
 
 class TestLoadManifestFromArgs:
@@ -174,7 +174,7 @@ class TestEndToEndManifest:
         yaml_path.write_text("source_root: ./data\n")
         manifest = load_manifest(yaml_path)
         mcp = _CaptureMcp()
-        _apply_manifest(mcp, manifest)
+        _apply_manifest(mcp, None, manifest)
         # Verify the registered read_source actually reads files in the resolved root.
         out = mcp.tools["read_source"](file_path="hello.txt")
         assert "hi" in out
@@ -190,7 +190,7 @@ class TestEndToEndManifest:
         yaml_path.write_text("source_root: ../scrape\n")
         manifest = load_manifest(yaml_path)
         mcp = _CaptureMcp()
-        summary = _apply_manifest(mcp, manifest)
+        summary = _apply_manifest(mcp, None, manifest)
         assert summary["source_roots"] == [str(scrape.resolve())]
         out = mcp.tools["read_source"](file_path="snapshot.json")
         assert '"ok": true' in out

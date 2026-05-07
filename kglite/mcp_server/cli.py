@@ -41,7 +41,9 @@ import threading
 
 import kglite
 from kglite.mcp_server import source_access
+from kglite.mcp_server.cypher_tools import register_cypher_tools
 from kglite.mcp_server.manifest import (
+    CypherTool,
     Manifest,
     ManifestError,
     find_sibling_manifest,
@@ -90,18 +92,21 @@ def _resolve_source_roots(raw_roots: list[str], yaml_path: Path) -> list[str]:
     return resolved
 
 
-def _apply_manifest(mcp, manifest: Manifest) -> dict:
+def _apply_manifest(mcp, graph, manifest: Manifest) -> dict:
     """Wire manifest-declared tools onto the MCP server.
 
-    Returns a summary dict suitable for logging. Future commits will add
-    cypher / python tool registration here; this commit only handles the
-    source-access tier.
+    Returns a summary dict suitable for logging.
     """
     summary: dict = {"source_roots": [], "cypher_tools": 0, "python_tools": 0}
     if manifest.source_roots:
         resolved = _resolve_source_roots(manifest.source_roots, manifest.yaml_path)
         source_access.register(mcp, resolved)
         summary["source_roots"] = resolved
+
+    cypher_specs = [t for t in manifest.tools if isinstance(t, CypherTool)]
+    if cypher_specs:
+        summary["cypher_tools"] = register_cypher_tools(mcp, graph, cypher_specs)
+
     return summary
 
 
@@ -271,16 +276,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if manifest is not None:
         try:
-            summary = _apply_manifest(mcp, manifest)
+            summary = _apply_manifest(mcp, graph, manifest)
         except ManifestError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 3
+        parts = []
         if summary["source_roots"]:
-            print(
-                f"kglite-mcp-server: {manifest.yaml_path} — registered read_source / grep / "
-                f"list_source over {summary['source_roots']}",
-                file=sys.stderr,
-            )
+            parts.append(f"source roots: {summary['source_roots']}")
+        if summary["cypher_tools"]:
+            parts.append(f"{summary['cypher_tools']} cypher tool(s)")
+        if parts:
+            print(f"kglite-mcp-server: {manifest.yaml_path} — {'; '.join(parts)}", file=sys.stderr)
 
     mcp.run(transport="stdio")
     return 0
