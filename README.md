@@ -160,6 +160,12 @@ pip install "kglite[mcp]"
 kglite-mcp-server --graph path/to/graph.kgl
 ```
 
+Drop a `<basename>_mcp.yaml` next to the graph to auto-extend the
+tool surface — `source_root:` for read/grep/list over your source
+files, inline Cypher templates as named tools, optional Python hooks
+behind `--trust-tools`. No fork required for most customisation. See
+[the MCP guide](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html).
+
 ### Codebase analysis
 
 Parse Python, Rust, TypeScript, Go, Java, C#, and C++ into a graph of

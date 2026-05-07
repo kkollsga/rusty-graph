@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **YAML manifest for `kglite-mcp-server`.** Drop a
+  `<graph_basename>_mcp.yaml` next to your graph file (or pass
+  `--mcp-config FILE`) and the bundled CLI auto-loads it at
+  startup. Three tiers, all optional:
+  - `source_root: ./data` (or `source_roots: [./a, ../b]`)
+    auto-registers `read_source` / `grep` / `list_source` tools
+    sandboxed to those directories. Backed by the
+    [`mcp-methods`](https://github.com/kkollsga/mcp-methods)
+    Rust-extension package — ripgrep crates, gitignore-aware,
+    parallel walker, with internal grep so agents can search
+    files too large to dump into context. Paths resolve relative
+    to the yaml's directory; `../` is allowed.
+  - `tools: cypher: |` blocks register parameterised Cypher as
+    named MCP tools. JSON Schema `parameters:` drives the
+    synthesised input schema, every `$param` reference is
+    validated at server startup against the schema, and
+    function signatures get built dynamically so FastMCP's
+    introspection produces clean tool schemas on the wire.
+  - `tools: python: ./tools.py` + `function: name` loads custom
+    Python hooks. Two-signal trust gate: requires both
+    `trust.allow_python_tools: true` in the yaml AND
+    `--trust-tools` on the CLI. Either alone refuses to load.
+- **`mcp-methods` and `PyYAML` added to the `[mcp]` extras** —
+  `pip install "kglite[mcp]"` now pulls them automatically.
+- **`--mcp-config FILE`** explicit-override flag and
+  **`--trust-tools`** Python-hook authorisation flag added to
+  `kglite-mcp-server`.
+- **`name:` and `instructions:` manifest fields** override the
+  default FastMCP server-info values when set.
+
+### Docs
+
+- MCP Servers guide rewritten around the manifest as the primary
+  customisation path. Forking `examples/mcp_server.py` is now
+  framed as the escape hatch for needs the manifest can't cover
+  (custom CSV-export logic, FastMCP middleware, alternative
+  transports). Includes a complete manifest example for a
+  conference-data graph.
+
 ## [0.9.9] — 2026-05-07
 
 ### Added
