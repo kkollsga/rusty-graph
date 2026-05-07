@@ -37,7 +37,13 @@ class _CaptureMcp:
 
 
 def _args(**overrides) -> argparse.Namespace:
-    base = argparse.Namespace(graph="graph.kgl", embedder=None, name="x", mcp_config=None)
+    base = argparse.Namespace(
+        graph="graph.kgl",
+        embedder=None,
+        name="x",
+        mcp_config=None,
+        trust_tools=False,
+    )
     for k, v in overrides.items():
         setattr(base, k, v)
     return base

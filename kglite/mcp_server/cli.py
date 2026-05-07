@@ -46,9 +46,11 @@ from kglite.mcp_server.manifest import (
     CypherTool,
     Manifest,
     ManifestError,
+    PythonTool,
     find_sibling_manifest,
     load_manifest,
 )
+from kglite.mcp_server.python_tools import register_python_tools
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -68,6 +70,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to a manifest YAML file. Defaults to <graph_basename>_mcp.yaml next to the graph file when present."
+        ),
+    )
+    parser.add_argument(
+        "--trust-tools",
+        action="store_true",
+        help=(
+            "Allow loading python: tool hooks declared in the manifest. Required "
+            "alongside `trust.allow_python_tools: true` in the yaml — both signals "
+            "must be present, otherwise python tools are refused."
         ),
     )
     return parser
@@ -92,10 +103,12 @@ def _resolve_source_roots(raw_roots: list[str], yaml_path: Path) -> list[str]:
     return resolved
 
 
-def _apply_manifest(mcp, graph, manifest: Manifest) -> dict:
+def _apply_manifest(mcp, graph, manifest: Manifest, *, trust_tools: bool = False) -> dict:
     """Wire manifest-declared tools onto the MCP server.
 
-    Returns a summary dict suitable for logging.
+    Returns a summary dict suitable for logging. ``trust_tools`` is the
+    operator's ``--trust-tools`` flag — combined with the manifest's
+    ``trust.allow_python_tools`` it gates loading of python: hooks.
     """
     summary: dict = {"source_roots": [], "cypher_tools": 0, "python_tools": 0}
     if manifest.source_roots:
@@ -106,6 +119,16 @@ def _apply_manifest(mcp, graph, manifest: Manifest) -> dict:
     cypher_specs = [t for t in manifest.tools if isinstance(t, CypherTool)]
     if cypher_specs:
         summary["cypher_tools"] = register_cypher_tools(mcp, graph, cypher_specs)
+
+    python_specs = [t for t in manifest.tools if isinstance(t, PythonTool)]
+    if python_specs:
+        summary["python_tools"] = register_python_tools(
+            mcp,
+            python_specs,
+            manifest_dir=manifest.yaml_path.parent,
+            trust_flag=trust_tools,
+            allow_python_tools=manifest.trust.allow_python_tools,
+        )
 
     return summary
 
@@ -276,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if manifest is not None:
         try:
-            summary = _apply_manifest(mcp, graph, manifest)
+            summary = _apply_manifest(mcp, graph, manifest, trust_tools=args.trust_tools)
         except ManifestError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 3
@@ -285,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
             parts.append(f"source roots: {summary['source_roots']}")
         if summary["cypher_tools"]:
             parts.append(f"{summary['cypher_tools']} cypher tool(s)")
+        if summary["python_tools"]:
+            parts.append(f"{summary['python_tools']} python tool(s)")
         if parts:
             print(f"kglite-mcp-server: {manifest.yaml_path} — {'; '.join(parts)}", file=sys.stderr)
 
