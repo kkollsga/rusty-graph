@@ -226,6 +226,17 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY workers DESC, company LIMIT 3",
         None,
     ),
+    # Same shape, no ORDER BY+LIMIT — exercises the non-top-K branch of
+    # FusedMatchReturnAggregate, which carried the same `group_elem_idx`-only
+    # bail as the top-K branch (P1.5 fix). Companion test to the entry above:
+    # both paths must agree with the naive walk.
+    (
+        "edge_groupby_typed_target_no_orderby",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+        "RETURN c.name AS company, count(p) AS workers",
+        None,
+    ),
     # ── fuse_match_with_aggregate + fuse_match_with_aggregate_top_k (0.8.32 bug) ──
     # Secondary sort key (city, n) breaks ties so the row identities are
     # deterministic — without it, both modes return correct counts but

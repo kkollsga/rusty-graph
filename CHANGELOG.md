@@ -9,21 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Edge-driven group-by + top-K with a typed target node now uses the
-  fast `lookup_peer_counts` path.** Queries shaped
-  `MATCH (a)-[:E]->(b:T) RETURN b, count(a) ORDER BY count(a) DESC LIMIT k`
-  were correctly routed to `FusedMatchReturnAggregate` but the executor's
-  fast-path branch bailed when the planner reversed the pattern to start
-  at the typed node — the resulting `group_elem_idx == 0` short-circuit
-  forced the slow node-centric scan. The fast path now detects "group is
-  semantic target" via `(group_elem_idx, edge_direction)` and applies a
-  binary-search type filter against `type_indices[T]` (sorted by
-  construction). On Wikidata: museums-by-works dropped from 15 s to
-  108 ms (140×); most-eponymed-globally from 122 s timeout to 169 ms
-  (~720×); top-influencers from 122 s timeout to 26 ms (~4700×). No
-  on-disk format change; all-Wikidata graph rebuild not required.
-  Differential-test query `edge_groupby_typed_target_top_k` added to the
-  corpus.
+- **Edge-driven group-by aggregations with a typed target node now use
+  the fast `lookup_peer_counts` path.** Queries shaped
+  `MATCH (a)-[:E]->(b:T) RETURN b, count(a) [ORDER BY count(a) DESC LIMIT k]`
+  were correctly routed to `FusedMatchReturnAggregate` but BOTH executor
+  branches (top-K and non-top-K) bailed when the planner reversed the
+  pattern to start at the typed node — the resulting `group_elem_idx == 0`
+  short-circuit forced the slow node-centric scan. The fast path now
+  detects "group is semantic target" via `(group_elem_idx, edge_direction)`
+  and applies a binary-search type filter against `type_indices[T]`
+  (sorted by construction).
+  On Wikidata:
+    - museums-by-works (with ORDER BY): 15 s → 108 ms (140×)
+    - most-eponymed-globally: 122 s timeout → 169 ms (~720×)
+    - top-influencers: 122 s timeout → 26 ms (~4700×)
+    - typed-target without ORDER BY (LIMIT only): 13.3 s → 110 ms (~120×)
+    - untyped-target without ORDER BY (LIMIT only): 14.3 s → 535 ms (~27×)
+  No on-disk format change; all-Wikidata graph rebuild not required.
+  Differential-test queries `edge_groupby_typed_target_top_k` and
+  `edge_groupby_typed_target_no_orderby` added to the corpus to gate
+  both branches.
 
 ## [0.9.11] — 2026-05-07
 

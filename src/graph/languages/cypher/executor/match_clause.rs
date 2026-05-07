@@ -1584,18 +1584,34 @@ impl<'a> CypherExecutor<'a> {
                 PatternElement::Edge(ep) => ep.connection_type.as_ref(),
                 _ => None,
             };
+            let edge_direction_nontopk = match &pattern.elements[1] {
+                PatternElement::Edge(ep) => Some(ep.direction),
+                _ => None,
+            };
             let group_node_props_nontopk = match &pattern.elements[group_elem_idx] {
                 PatternElement::Node(np) => &np.properties,
                 _ => &None,
             };
-            // Same `distinct_count` gate as the top-K branch — the histogram
-            // counts edges, not distinct peers.
-            let edge_centric_rows = if let (false, 3, Some(ct_str), None, 2) = (
+            let group_node_type_nontopk = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(np) => np.node_type.as_deref(),
+                _ => None,
+            };
+            // Same direction-aware "group is target" predicate as the top-K
+            // branch (see comment there for the post-reversal case). Pre-fix
+            // this read `, 2` against group_elem_idx, which silently bailed
+            // typed-target queries to the slow node-centric scan. The fast
+            // path's `lookup_peer_counts` is keyed by edge target, so it
+            // serves both AST shapes.
+            let group_is_target_nontopk = matches!(
+                (group_elem_idx, edge_direction_nontopk),
+                (2, Some(EdgeDirection::Outgoing)) | (0, Some(EdgeDirection::Incoming))
+            );
+            let edge_centric_rows = if let (false, 3, Some(ct_str), None, true) = (
                 distinct_count,
                 pattern.elements.len(),
                 edge_conn_type,
                 group_node_props_nontopk.as_ref(),
-                group_elem_idx,
+                group_is_target_nontopk,
             ) {
                 let conn_key = InternedKey::from_str(ct_str);
                 self.check_deadline()?;
@@ -1609,6 +1625,21 @@ impl<'a> CypherExecutor<'a> {
                         Direction::Outgoing,
                         self.deadline,
                     )?
+                };
+                // Optional per-peer type filter — same shape as the top-K
+                // branch. Drops peers whose type doesn't match the group
+                // node's `:Type` label before any row is materialised; for
+                // 295k peers + a downstream LIMIT this avoids 13s of
+                // build_row work that would be thrown away.
+                let type_index_view_nontopk =
+                    group_node_type_nontopk.and_then(|nt| self.graph.type_indices.get(nt));
+                let peer_passes_type_nontopk = |peer: u32| -> bool {
+                    match &type_index_view_nontopk {
+                        None => true,
+                        Some(view) => {
+                            view.binary_search_idx(petgraph::graph::NodeIndex::new(peer as usize))
+                        }
+                    }
                 };
 
                 // 0.8.12 phase-4: multi-key ORDER BY LIMIT was kept in the
@@ -1626,7 +1657,10 @@ impl<'a> CypherExecutor<'a> {
                         use std::collections::BinaryHeap;
                         let threshold: i64 = if descending {
                             let mut h: BinaryHeap<Reverse<i64>> = BinaryHeap::with_capacity(k + 1);
-                            for &c in counts.values() {
+                            for (&peer, &c) in &counts {
+                                if !peer_passes_type_nontopk(peer) {
+                                    continue;
+                                }
                                 h.push(Reverse(c));
                                 if h.len() > k {
                                     h.pop();
@@ -1635,7 +1669,10 @@ impl<'a> CypherExecutor<'a> {
                             h.peek().map(|Reverse(c)| *c).unwrap_or(i64::MIN)
                         } else {
                             let mut h: BinaryHeap<i64> = BinaryHeap::with_capacity(k + 1);
-                            for &c in counts.values() {
+                            for (&peer, &c) in &counts {
+                                if !peer_passes_type_nontopk(peer) {
+                                    continue;
+                                }
                                 h.push(c);
                                 if h.len() > k {
                                     h.pop();
@@ -1645,6 +1682,9 @@ impl<'a> CypherExecutor<'a> {
                         };
                         let mut rows = Vec::new();
                         for (&peer, &count) in &counts {
+                            if !peer_passes_type_nontopk(peer) {
+                                continue;
+                            }
                             let keep = if descending {
                                 count >= threshold
                             } else {
@@ -1661,6 +1701,9 @@ impl<'a> CypherExecutor<'a> {
                     } else {
                         let mut rows = Vec::with_capacity(counts.len());
                         for (peer, count) in counts {
+                            if !peer_passes_type_nontopk(peer) {
+                                continue;
+                            }
                             self.check_deadline()?;
                             let node_idx = petgraph::graph::NodeIndex::new(peer as usize);
                             rows.push(build_row(node_idx, count)?);
