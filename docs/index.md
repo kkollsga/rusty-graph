@@ -32,8 +32,10 @@ getting-started
 :maxdepth: 2
 :caption: How-to Guides
 
-guides/cypher
+guides/index
 guides/data-loading
+guides/cypher
+guides/mcp-servers
 guides/datasets
 guides/blueprints
 guides/querying
@@ -44,7 +46,6 @@ guides/timeseries
 guides/graph-algorithms
 guides/import-export
 guides/ai-agents
-guides/mcp-servers
 guides/code-tree
 guides/recipes
 ```

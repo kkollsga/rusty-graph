@@ -1,0 +1,47 @@
+# Guides
+
+KGLite has fourteen how-to guides. Most projects only need three.
+
+## Start here (the load-bearing path)
+
+Every project that loads its own data and queries it goes through these
+three, in this order:
+
+| | |
+|---|---|
+| {doc}`data-loading` | Shape DataFrames, bulk-load with `add_nodes` / `add_connections`, conflict handling, hierarchies. The day-1 "I have a CSV, now what?" answer. |
+| {doc}`cypher` | The query surface — MATCH/WHERE/RETURN, aggregations, subqueries, mutations. Every other guide leans on this one. |
+| {doc}`mcp-servers` | Ship the graph to Claude / Cursor / any MCP-capable agent. The bundled `kglite-mcp-server` CLI + the YAML manifest for adding custom tools without forking. |
+
+## Add as needed
+
+Domain-specific surfaces — pull them in when your data has the shape:
+
+| Guide | Read this if… |
+|---|---|
+| {doc}`code-tree` | …your "data" is a codebase. Parse Python / Rust / TS / Go / Java / C# / C++ into a graph of functions, classes, calls. |
+| {doc}`spatial` | …your nodes have coordinates. R-tree indexing, distance-based filters, GeoJSON I/O. |
+| {doc}`timeseries` | …property values change over time. Snapshot history, valid_at / valid_during temporal filters. |
+| {doc}`semantic-search` | …you want fuzzy / meaning-based lookup. `text_score()` in Cypher, embedding model registration. |
+| {doc}`graph-algorithms` | …you need PageRank, community detection, shortest paths, centrality. |
+| {doc}`traversal-hierarchy` | …your graph has parent-child / ancestor structure. `set_parent_type`, `*` walks, hierarchical Cypher. |
+| {doc}`datasets` | …you want pre-built graphs of public sources (Wikidata, Sodir). One-call lifecycle wrappers. |
+
+## Power-user / less common
+
+| Guide | When |
+|---|---|
+| {doc}`querying` | The fluent-API alternative to Cypher (`select` / `where` / `traverse` / `collect`). Useful for programmatic graph construction. |
+| {doc}`blueprints` | Declarative graph schemas — nodes/edges defined once in a CSV-driven config. Best for repeated builds of the same shape. |
+| {doc}`import-export` | Round-trip with Neo4j, JSON, N-Triples; CSV bulk export. |
+| {doc}`ai-agents` | `describe()` XML schema for system prompts. Read this if you're building agent stacks beyond MCP. |
+| {doc}`recipes` | Short snippets for "how do I do X" patterns that span multiple guides. |
+
+## If you want to know *why*
+
+Background reading — not required, but the design decisions explain
+why APIs look the way they do:
+
+- {doc}`/core-concepts` — storage modes (memory / mapped / disk), return types, the fluent / Cypher split.
+- {doc}`/explanation/architecture` — Rust core + PyO3 bindings + petgraph, where each subsystem lives.
+- {doc}`/explanation/design-decisions` — single-label nodes, columnar storage, Cypher subset choices.
