@@ -2665,7 +2665,7 @@ impl<'a> CypherExecutor<'a> {
         group_key_indices: &[usize],
         count_indices: &[usize],
     ) -> Result<Option<Vec<ResultRow>>, String> {
-        if pattern.elements.len() != 3 || group_elem_idx != 2 {
+        if pattern.elements.len() != 3 {
             return Ok(None);
         }
         // Histogram fast path counts every edge of the given type — it
@@ -2680,12 +2680,32 @@ impl<'a> CypherExecutor<'a> {
         if edge_pat.edge_filter.is_some() {
             return Ok(None);
         }
+        // Same direction-aware "group is target" predicate as the RETURN-
+        // aggregate fast paths above. Pre-fix this only matched the user-
+        // written shape (group_elem_idx == 2 with Outgoing edge), so the
+        // post-`optimize_pattern_start_node` form (group_elem_idx == 0
+        // with Incoming) silently bailed even though `lookup_peer_counts`
+        // (target-keyed) serves both shapes.
+        let group_is_target = matches!(
+            (group_elem_idx, edge_pat.direction),
+            (2, EdgeDirection::Outgoing) | (0, EdgeDirection::Incoming)
+        );
+        if !group_is_target {
+            return Ok(None);
+        }
         let edge_conn_type = edge_pat.connection_type.as_deref();
         let Some(ct_str) = edge_conn_type else {
             return Ok(None);
         };
+        // The element index of the SOURCE side (non-group) of the pattern,
+        // which is also the side whose props/type the type-anchor logic
+        // below cares about. Mirrors the planner-reversal duality.
+        let source_elem_idx = if group_elem_idx == 2 { 0 } else { 2 };
         // Target must have no property constraint; it's the group key.
-        let (tgt_props, src_type, src_props) = match (&pattern.elements[0], &pattern.elements[2]) {
+        let (tgt_props, src_type, src_props) = match (
+            &pattern.elements[source_elem_idx],
+            &pattern.elements[group_elem_idx],
+        ) {
             (PatternElement::Node(src), PatternElement::Node(tgt)) => {
                 (&tgt.properties, src.node_type.as_deref(), &src.properties)
             }

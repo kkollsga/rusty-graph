@@ -1748,7 +1748,7 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
         }
 
         // Check MATCH: exactly 1 pattern with 3 elements (node-edge-node)
-        let (first_var, second_var, edge_has_props, second_has_props) =
+        let (first_var, second_var, edge_has_props, second_has_props, edge_var) =
             if let Clause::Match(m) = &query.clauses[i] {
                 if m.patterns.len() != 1 || m.patterns[0].elements.len() != 3 {
                     i += 1;
@@ -1762,8 +1762,11 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                         continue;
                     }
                 };
-                let edge_has_props = match &pat.elements[1] {
-                    PatternElement::Edge(ep) => ep.properties.is_some() || ep.var_length.is_some(),
+                let (edge_has_props, edge_var) = match &pat.elements[1] {
+                    PatternElement::Edge(ep) => (
+                        ep.properties.is_some() || ep.var_length.is_some(),
+                        ep.variable.clone(),
+                    ),
                     _ => {
                         i += 1;
                         continue;
@@ -1776,7 +1779,13 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                         continue;
                     }
                 };
-                (first_var, second_var, edge_has_props, second_has_props)
+                (
+                    first_var,
+                    second_var,
+                    edge_has_props,
+                    second_has_props,
+                    edge_var,
+                )
             } else {
                 i += 1;
                 continue;
@@ -1863,8 +1872,19 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                                         has_count = true;
                                         continue;
                                     }
+                                    // Same gate as fuse_match_return_aggregate:
+                                    // accept count(<other-node>) OR
+                                    // count(<edge-var>). For c7-style queries
+                                    // like `MATCH (n)<-[r]-() WITH n, count(r)`
+                                    // with an anonymous endpoint, the only
+                                    // bound non-group variable IS the edge
+                                    // variable.
                                     if let Some(Expression::Variable(var)) = args.first() {
-                                        if other_var.as_deref() == Some(var.as_str()) {
+                                        let matches_other =
+                                            other_var.as_deref() == Some(var.as_str());
+                                        let matches_edge =
+                                            edge_var.as_deref() == Some(var.as_str());
+                                        if matches_other || matches_edge {
                                             has_count = true;
                                             if *distinct {
                                                 saw_distinct = true;

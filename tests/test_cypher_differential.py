@@ -281,6 +281,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY edges DESC, company LIMIT 3",
         None,
     ),
+    # MATCH...WITH variant — exercises `try_fast_with_aggregate_via_histogram`
+    # in the executor. Pre-fix this also bailed on group_elem_idx != 2,
+    # forcing the per-source enumeration path (3 places in match_clause.rs
+    # had the same position-only check; this is the third, after the two
+    # in execute_fused_match_return_aggregate). The shape now fuses for
+    # both AST orderings.
+    (
+        "edge_groupby_match_with_aggregate_typed_target",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+        "WITH c, count(p) AS workers "
+        "RETURN c.name AS company, workers ORDER BY workers DESC, company LIMIT 3",
+        None,
+    ),
     # ── fuse_match_with_aggregate + fuse_match_with_aggregate_top_k (0.8.32 bug) ──
     # Secondary sort key (city, n) breaks ties so the row identities are
     # deterministic — without it, both modes return correct counts but

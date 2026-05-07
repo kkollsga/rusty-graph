@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Differential-test queries `edge_groupby_typed_target_top_k` and
   `edge_groupby_typed_target_no_orderby` added to the corpus to gate
   both branches.
+- **`MATCH...WITH count(...)` aggregations now use the fast path
+  post-pattern-reversal too.** The third instance of the same
+  position-only `group_elem_idx == 2` bug was in
+  `try_fast_with_aggregate_via_histogram` (the executor's fast path
+  for `FusedMatchWithAggregate`). After
+  `optimize_pattern_start_node` reverses `(a)-[:E]->(b:T) WITH b,
+  count(a)` to start at the typed node, group_elem_idx becomes 0
+  and the histogram path silently bailed despite
+  `lookup_peer_counts` serving both shapes. Same direction-aware
+  predicate fix as the RETURN-aggregate paths, plus
+  `count(<edge-var>)` now fuses through the WITH-aggregate gate too.
+  c7's `MATCH (n)<-[r]-() WITH n, count(r)` now reaches
+  `FusedMatchWithAggregate` (still bounded by the absence of a
+  global-in-degree histogram for untyped edges; that's a follow-up
+  workstream). Differential test
+  `edge_groupby_match_with_aggregate_typed_target` added.
 - **`count(<edge-variable>)` now fuses into `FusedMatchReturnAggregate`.**
   `MATCH (paper)<-[r:CITES]-(citing) RETURN paper.title, count(r)` is
   the natural shape for the Wikidata citation graph, but the gate at
