@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Differential-test queries `edge_groupby_typed_target_top_k` and
   `edge_groupby_typed_target_no_orderby` added to the corpus to gate
   both branches.
+- **`count(<edge-variable>)` now fuses into `FusedMatchReturnAggregate`.**
+  `MATCH (paper)<-[r:CITES]-(citing) RETURN paper.title, count(r)` is
+  the natural shape for the Wikidata citation graph, but the gate at
+  `fuse_match_return_aggregate` only accepted `count(<other-node-var>)`
+  — `count(r)` for the edge variable bailed silently. Semantically
+  equivalent for a 3-element pattern (each edge is one peer binding),
+  so the fix accepts both. On Wikidata: most-cited scholarly articles
+  drops from 198s timeout to 28s (~7×, bounded by `lookup_peer_counts`
+  HashMap construction over P2860's hundreds-of-millions of edges).
+  Differential test `edge_groupby_count_edge_variable` added.
 - **`ORDER BY <agg-expr>` now fuses equivalently to `ORDER BY <alias>`.**
   `fuse_match_return_aggregate`'s top-K absorption matched only
   `ORDER BY <alias-name>` (a Variable expression matching a RETURN

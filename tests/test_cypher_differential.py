@@ -266,6 +266,21 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY count(p) DESC, company LIMIT 3",
         None,
     ),
+    # Aggregate on the EDGE variable (not a node variable). Pre-fix the
+    # gate at fuse_match_return_aggregate only accepted count(<other-node>);
+    # count(<edge_var>) silently fell out of fusion despite being
+    # semantically equivalent for a 3-element pattern (each edge is one
+    # other-node binding). Wikidata citation queries are typically
+    # written as `(paper)<-[r:P2860]-(citing) ... count(r)`, the natural
+    # form, and were dropping into the slow path before this fix.
+    (
+        "edge_groupby_count_edge_variable",
+        "social_graph",
+        "MATCH (p:Person)-[r:WORKS_AT]->(c:Company) "
+        "RETURN c.name AS company, count(r) AS edges "
+        "ORDER BY edges DESC, company LIMIT 3",
+        None,
+    ),
     # ── fuse_match_with_aggregate + fuse_match_with_aggregate_top_k (0.8.32 bug) ──
     # Secondary sort key (city, n) breaks ties so the row identities are
     # deterministic — without it, both modes return correct counts but

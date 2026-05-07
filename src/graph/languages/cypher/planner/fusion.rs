@@ -947,7 +947,9 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
         }
 
         // Check MATCH: exactly 1 pattern with 3 or 5 elements
-        let (first_var, second_var, edge_has_props) = if let Clause::Match(m) = &query.clauses[i] {
+        let (first_var, second_var, edge_has_props, edge_var) = if let Clause::Match(m) =
+            &query.clauses[i]
+        {
             let n_elems = m.patterns[0].elements.len();
             if m.patterns.len() != 1 || (n_elems != 3 && n_elems != 5) {
                 i += 1;
@@ -961,8 +963,11 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                     continue;
                 }
             };
-            let edge_has_props = match &pat.elements[1] {
-                PatternElement::Edge(ep) => ep.properties.is_some() || ep.var_length.is_some(),
+            let (edge_has_props, edge_var) = match &pat.elements[1] {
+                PatternElement::Edge(ep) => (
+                    ep.properties.is_some() || ep.var_length.is_some(),
+                    ep.variable.clone(),
+                ),
                 _ => {
                     i += 1;
                     continue;
@@ -997,7 +1002,7 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                     i += 1;
                     continue;
                 }
-                (first_var, last_var, edge_has_props)
+                (first_var, last_var, edge_has_props, edge_var)
             } else {
                 // 3-element: (a)-[e]->(b)
                 let second_var = match &pat.elements[2] {
@@ -1007,7 +1012,7 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                         continue;
                     }
                 };
-                (first_var, second_var, edge_has_props)
+                (first_var, second_var, edge_has_props, edge_var)
             }
         } else {
             i += 1;
@@ -1115,11 +1120,29 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                                         has_count = true;
                                         continue;
                                     }
-                                    // count(var) — var must be the OTHER node.
-                                    // DISTINCT is allowed here: dedup peer
-                                    // NodeIndices per group.
+                                    // count(var) — var must be either:
+                                    //   (a) the OTHER node variable (e.g. for
+                                    //       `MATCH (a)-[:E]->(b) RETURN b,
+                                    //       count(a)`, group=b, other=a), or
+                                    //   (b) the edge variable, since for a
+                                    //       3-element pattern there's exactly
+                                    //       one edge per (other, group) pair —
+                                    //       count(r) ≡ count(other). The edge
+                                    //       variable was bailed pre-fix, so
+                                    //       queries written as `count(r)`
+                                    //       (the natural cite-count form for
+                                    //       `(paper)<-[r:CITES]-(citing) ...
+                                    //       count(r)`) silently fell out of
+                                    //       fusion despite being structurally
+                                    //       fusable.
+                                    // DISTINCT on either is allowed: dedup
+                                    // by NodeIndex / EdgeIndex per group.
                                     if let Some(Expression::Variable(var)) = args.first() {
-                                        if other_var.as_deref() == Some(var.as_str()) {
+                                        let matches_other =
+                                            other_var.as_deref() == Some(var.as_str());
+                                        let matches_edge =
+                                            edge_var.as_deref() == Some(var.as_str());
+                                        if matches_other || matches_edge {
                                             has_count = true;
                                             if *distinct {
                                                 saw_distinct = true;
