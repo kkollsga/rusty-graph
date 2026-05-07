@@ -40,6 +40,13 @@ import sys
 import threading
 
 import kglite
+from kglite.mcp_server import source_access
+from kglite.mcp_server.manifest import (
+    Manifest,
+    ManifestError,
+    find_sibling_manifest,
+    load_manifest,
+)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -54,7 +61,65 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="sentence-transformers model name to enable text_score(); optional",
     )
     parser.add_argument("--name", default="KGLite Graph", help="Server display name")
+    parser.add_argument(
+        "--mcp-config",
+        default=None,
+        help=(
+            "Path to a manifest YAML file. Defaults to <graph_basename>_mcp.yaml next to the graph file when present."
+        ),
+    )
     return parser
+
+
+def _resolve_source_roots(raw_roots: list[str], yaml_path: Path) -> list[str]:
+    """Resolve manifest source roots relative to the yaml file's directory.
+
+    Returns canonicalised absolute path strings. Raises :class:`ManifestError`
+    if any root does not resolve to an existing directory.
+    """
+    base = yaml_path.parent
+    resolved: list[str] = []
+    for raw in raw_roots:
+        candidate = (base / raw).resolve()
+        if not candidate.is_dir():
+            raise ManifestError(
+                f"source root {raw!r} resolves to {str(candidate)!r} which is not an existing directory",
+                yaml_path,
+            )
+        resolved.append(str(candidate))
+    return resolved
+
+
+def _apply_manifest(mcp, manifest: Manifest) -> dict:
+    """Wire manifest-declared tools onto the MCP server.
+
+    Returns a summary dict suitable for logging. Future commits will add
+    cypher / python tool registration here; this commit only handles the
+    source-access tier.
+    """
+    summary: dict = {"source_roots": [], "cypher_tools": 0, "python_tools": 0}
+    if manifest.source_roots:
+        resolved = _resolve_source_roots(manifest.source_roots, manifest.yaml_path)
+        source_access.register(mcp, resolved)
+        summary["source_roots"] = resolved
+    return summary
+
+
+def _load_manifest_from_args(args, graph_path: Path) -> Manifest | None:
+    """Locate and load the manifest. Returns ``None`` when no manifest is
+    in play. Raises :class:`ManifestError` on validation failure or when an
+    explicit ``--mcp-config`` path does not exist.
+    """
+    manifest_path: Path | None
+    if args.mcp_config:
+        manifest_path = Path(args.mcp_config)
+        if not manifest_path.is_file():
+            raise ManifestError(f"--mcp-config path does not exist: {manifest_path}")
+    else:
+        manifest_path = find_sibling_manifest(graph_path)
+    if manifest_path is None:
+        return None
+    return load_manifest(manifest_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
     if not graph_path.exists():
         print(f"ERROR: {graph_path} not found.", file=sys.stderr)
         return 1
+
+    try:
+        manifest = _load_manifest_from_args(args, graph_path)
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 3
 
     temp_dir = graph_path.parent / "temp"
     graph = kglite.load(str(graph_path))
@@ -121,13 +192,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── MCP server ────────────────────────────────────────────────────────
     schema = graph.schema()
-    mcp = FastMCP(
-        args.name,
-        instructions=(
-            f"Knowledge graph with {schema['node_count']} nodes and {schema['edge_count']} edges. "
-            "Call graph_overview() first to learn the schema, then cypher_query() to query."
-        ),
+    server_name = manifest.name if manifest and manifest.name else args.name
+    default_instructions = (
+        f"Knowledge graph with {schema['node_count']} nodes and {schema['edge_count']} edges. "
+        "Call graph_overview() first to learn the schema, then cypher_query() to query."
     )
+    instructions = manifest.instructions if manifest and manifest.instructions else default_instructions
+    mcp = FastMCP(server_name, instructions=instructions)
 
     @mcp.tool()
     def graph_overview(
@@ -197,6 +268,19 @@ def main(argv: list[str] | None = None) -> int:
             return header + ":\n" + "\n".join(rows)
         except Exception as e:
             return f"Cypher error: {e}"
+
+    if manifest is not None:
+        try:
+            summary = _apply_manifest(mcp, manifest)
+        except ManifestError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 3
+        if summary["source_roots"]:
+            print(
+                f"kglite-mcp-server: {manifest.yaml_path} — registered read_source / grep / "
+                f"list_source over {summary['source_roots']}",
+                file=sys.stderr,
+            )
 
     mcp.run(transport="stdio")
     return 0
