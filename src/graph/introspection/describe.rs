@@ -1671,114 +1671,89 @@ pub fn mcp_quickstart() -> String {
     format!(
         r##"<mcp_quickstart version="{version}">
 
-  <setup>
-    <install>pip install kglite fastmcp</install>
-    <server><![CDATA[
-import kglite
-from fastmcp import FastMCP
+  <install>pip install "kglite[mcp]"</install>
 
-graph = kglite.load("your_graph.kgl")
-mcp = FastMCP("my-graph", instructions="Knowledge graph. Call graph_overview first.")
+  <bundled_cli desc="Default path — no fork, no Python required">
+    <command>kglite-mcp-server --graph /abs/path/to/your_graph.kgl</command>
+    <bundled_tools>
+      <tool name="graph_overview">
+        Schema introspection with 3-tier progressive disclosure
+        (types, connections, Cypher reference). Wraps graph.describe().
+      </tool>
+      <tool name="cypher_query">
+        Execute any Cypher query. Returns up to 15 rows inline; append
+        FORMAT CSV for full export served over a localhost HTTP endpoint.
+      </tool>
+    </bundled_tools>
+    <flags>
+      --embedder MODEL_NAME    sentence-transformers model for text_score()
+      --mcp-config FILE        explicit manifest path (otherwise auto-detected)
+      --trust-tools            authorise loading python: hooks declared in manifest
+    </flags>
+  </bundled_cli>
 
-@mcp.tool()
-def graph_overview(
-    types: list[str] | None = None,
-    type_search: str | None = None,
-    connections: bool | list[str] | None = None,
-    cypher: bool | list[str] | None = None,
-    max_pairs: int | None = None,
-) -> str:
-    """Get graph schema, connection details, or Cypher language reference.
+  <manifest desc="Add custom tools via a YAML file — no fork required">
+    <discovery>
+      Drop &lt;graph_basename&gt;_mcp.yaml next to your graph file. The
+      bundled CLI auto-detects it at startup. Or pass --mcp-config FILE.
+    </discovery>
 
-    Four independent axes — call with no args first for the overview:
-      graph_overview()                            — inventory (adapts to graph scale)
-      graph_overview(types=["Field"])             — property schemas, samples
-      graph_overview(type_search="software")      — find types by name + neighborhood
-      graph_overview(connections=True)            — all connection types with properties
-      graph_overview(connections=["BELONGS_TO"])  — deep-dive: property stats, sample edges
-      graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
-      graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples
+    <source_root desc="Auto-register read_source / grep / list_source over a directory">
+      <yaml><![CDATA[
+source_root: ./data           # OR source_roots: [./data, ../shared]
+]]></yaml>
+      <effect>
+        Registers three tools sandboxed to the configured root(s):
+        - read_source(file_path, start_line?, end_line?, grep?, ...) — read a file (with optional internal grep filter for large files)
+        - grep(pattern, glob?, context?, max_results?, ...) — ripgrep across the source roots
+        - list_source(path?, depth?, glob?, dirs_only?) — directory tree
+        Paths resolve relative to the yaml file's directory; ../ is allowed.
+      </effect>
+    </source_root>
 
-    max_pairs: cap on (src_type, tgt_type) rows in connections=[...] deep-dives.
-    Defaults to 50. Raise it for wide fan-out types (e.g. Wikidata P31)."""
-    return graph.describe(
-        types=types,
-        type_search=type_search,
-        connections=connections,
-        cypher=cypher,
-        max_pairs=max_pairs,
-    )
+    <cypher_tools desc="Inline parameterised Cypher templates as named MCP tools">
+      <yaml><![CDATA[
+tools:
+  - name: similar_sessions
+    description: Top-k semantically similar sessions for a session id.
+    parameters:
+      type: object
+      properties:
+        session_id: {{type: string}}
+        top_k:      {{type: integer, default: 5}}
+      required: [session_id]
+    cypher: |
+      MATCH (s:Session {{id: $session_id}})-[r:SIMILAR_TO]->(t:Session)
+      RETURN t.id AS id, t.title AS title, r.score AS score
+      ORDER BY score DESC LIMIT $top_k
+]]></yaml>
+      <effect>
+        Registers `similar_sessions(session_id, top_k=5)` as an MCP tool.
+        $param refs are validated at server startup against the JSON Schema
+        — typos fail boot, not first agent call. Output capped at 15 rows;
+        use cypher_query for FORMAT CSV exports.
+      </effect>
+    </cypher_tools>
 
-@mcp.tool()
-def cypher_query(query: str) -> str:
-    """Run a Cypher query against the knowledge graph.
+    <python_hooks desc="Custom Python functions as MCP tools (trust-gated)">
+      <yaml><![CDATA[
+trust:
+  allow_python_tools: true
 
-    Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, aggregations,
-    path traversals, CREATE, SET, DELETE, and CALL procedures.
-    Append FORMAT CSV for compact CSV output (good for larger data transfers).
-    Returns up to 200 rows."""
-    result = graph.cypher(query)
-    if isinstance(result, str):
-        return result  # FORMAT CSV already returned a string
-    if len(result) == 0:
-        return "Query returned no results."
-    rows = [str(dict(row)) for row in result[:200]]
-    header = f"Returned {{len(result)}} row(s)"
-    if len(result) > 200:
-        header += " (showing first 200)"
-    return header + ":\n" + "\n".join(rows)
-
-@mcp.tool()
-def bug_report(query: str, result: str, expected: str, description: str) -> str:
-    """File a Cypher bug report to reported_bugs.md.
-
-    Writes a timestamped, version-tagged entry (newest first).
-    Use when a query returns incorrect or unexpected results."""
-    return graph.bug_report(query, result, expected, description)
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
-]]></server>
-  </setup>
-
-  <core_tools desc="Essential — include all three in every MCP server">
-    <tool name="graph_overview" method="graph.describe()" args="types, type_search, connections, cypher">
-      Schema introspection with 3-tier progressive disclosure.
-      The agent's entry point — always expose this.
-    </tool>
-    <tool name="cypher_query" method="graph.cypher()" args="query">
-      Execute Cypher queries. MATCH/WHERE/RETURN/CREATE/SET/DELETE,
-      aggregations, CALL procedures (pagerank, cluster, etc.).
-      Append FORMAT CSV for compact CSV output (good for larger data transfers).
-    </tool>
-    <tool name="bug_report" method="graph.bug_report()" args="query, result, expected, description">
-      File bug reports to reported_bugs.md. Input is sanitised.
-    </tool>
-  </core_tools>
-
-  <optional_tools desc="Add based on your use case">
-    <tool name="find_entity" method="graph.find()" args="name, node_type?, match_type?">
-      Search nodes by name. match_type: 'exact' (default), 'contains', 'starts_with'.
-      Useful for code graphs where entities have qualified names.
-    </tool>
-    <tool name="read_source" method="graph.source()" args="names, node_type?">
-      Resolve entity names to file paths and line ranges.
-      Returns source code locations for code navigation.
-    </tool>
-    <tool name="entity_context" method="graph.context()" args="name, node_type?, hops?">
-      Get neighborhood of a node — related entities within N hops.
-      Good for understanding how entities connect.
-    </tool>
-    <tool name="file_toc" method="graph.toc()" args="file_path">
-      Table of contents for a file — lists all entities sorted by line.
-      Only relevant for code-tree graphs.
-    </tool>
-    <tool name="grep_source" custom="true">
-      Text search across source files. Not built-in — implement with
-      your own file-reading logic or expose graph.cypher() with
-      CONTAINS/STARTS WITH/=~ for in-graph text search.
-    </tool>
-  </optional_tools>
+tools:
+  - name: session_detail
+    description: Full source JSON for a session by id.
+    python: ./gcn_tools.py
+    function: session_detail
+]]></yaml>
+      <trust_gate>
+        Both signals required: trust.allow_python_tools: true in the yaml
+        AND --trust-tools on the CLI. Either alone refuses to load. The
+        loaded function's signature, type hints, and docstring become the
+        MCP input schema directly.
+      </trust_gate>
+    </python_hooks>
+  </manifest>
 
   <register_with_claude>
     <claude_desktop desc="Add to Claude Desktop config">
@@ -1787,8 +1762,8 @@ if __name__ == "__main__":
 {{
   "mcpServers": {{
     "my-graph": {{
-      "command": "python",
-      "args": ["/absolute/path/to/mcp_server.py"]
+      "command": "kglite-mcp-server",
+      "args": ["--graph", "/abs/path/to/your_graph.kgl"]
     }}
   }}
 }}
@@ -1800,15 +1775,27 @@ if __name__ == "__main__":
 {{
   "mcpServers": {{
     "my-graph": {{
-      "command": "python",
-      "args": ["/absolute/path/to/mcp_server.py"]
+      "command": "kglite-mcp-server",
+      "args": ["--graph", "/abs/path/to/your_graph.kgl"]
     }}
   }}
 }}
 ]]></config>
     </claude_code>
-    <note>Restart Claude after editing config. The server appears as an MCP tool provider.</note>
+    <note>
+      Restart Claude after editing config. The server appears as an MCP
+      tool provider. For Python hooks, add "--trust-tools" to args after
+      auditing the manifest's python: entries.
+    </note>
   </register_with_claude>
+
+  <forking desc="Escape hatch — when the manifest can't express what you need">
+    Fork examples/mcp_server.py only when you need to replace the
+    bundled tools, swap the FastMCP transport, or register custom
+    middleware. For everything else (custom Cypher tools, source-file
+    access, Python hooks), the manifest path above is the answer. See
+    docs/guides/mcp-servers.md for the full reference.
+  </forking>
 
 </mcp_quickstart>
 "##,

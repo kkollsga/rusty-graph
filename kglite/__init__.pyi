@@ -1920,9 +1920,11 @@ class KnowledgeGraph:
     def explain_mcp() -> str:
         """Return a self-contained XML quickstart for setting up a KGLite MCP server.
 
-        Includes a ready-to-use server template with core tools (graph_overview,
-        cypher_query, bug_report), optional tools (find_entity, read_source, etc.),
-        and Claude Desktop / Claude Code registration config.
+        Covers the bundled ``kglite-mcp-server`` console script (the default
+        on-ramp — no fork required), the YAML manifest for adding custom
+        tools (``source_root:`` for file access, inline Cypher tools, and
+        trust-gated Python hooks), and Claude Desktop / Claude Code
+        registration config.
 
         Example::
 

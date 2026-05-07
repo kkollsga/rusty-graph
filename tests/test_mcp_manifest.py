@@ -233,6 +233,23 @@ class TestToolValidation:
             load_manifest(path)
 
 
+class TestPublishedExample:
+    def test_example_yaml_parses(self) -> None:
+        """examples/conference_graph_mcp.yaml is the public reference;
+        any schema change that breaks it will surprise users mid-upgrade."""
+        repo_root = Path(__file__).parent.parent
+        example = repo_root / "examples" / "conference_graph_mcp.yaml"
+        assert example.is_file(), f"missing example manifest at {example}"
+        m = load_manifest(example)
+        assert m.name == "GCN-2026 Graph"
+        assert m.source_roots == ["./data"]
+        assert m.trust.allow_python_tools is True
+        names = [t.name for t in m.tools]
+        assert "similar_sessions" in names
+        assert "top_sessions_by_registrants" in names
+        assert "session_detail" in names
+
+
 class TestTopLevelValidation:
     def test_unknown_top_level_key_rejected(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "bogus: 1\n")

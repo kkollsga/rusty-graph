@@ -1,0 +1,72 @@
+# Example manifest for kglite-mcp-server — copy and adapt.
+#
+# Place this file next to your .kgl graph as `<basename>_mcp.yaml`
+# (e.g. ./conference_graph.kgl + ./conference_graph_mcp.yaml). The
+# bundled CLI picks it up automatically:
+#
+#     pip install "kglite[mcp]"
+#     kglite-mcp-server --graph conference_graph.kgl --trust-tools
+#
+# Drop --trust-tools when you don't have python: hooks (or remove the
+# python: section below). All paths in this file resolve relative to
+# the yaml's directory; ../ traversal is allowed.
+
+# ── Server identity (optional) ───────────────────────────────────────
+name: GCN-2026 Graph
+instructions: |
+  Google Cloud Next 2026 conference graph — 1,143 sessions across
+  Apr 21–24, 1,812 speakers, 526 companies. Use cypher_query for
+  structured questions, read_source / grep / list_source for raw
+  data in ./data, similar_sessions for embedding-based recs,
+  session_detail for fields not lifted to the graph.
+
+# ── source_root: auto-registers read_source / grep / list_source ─────
+# These tools are sandboxed to the listed directories. Backed by the
+# mcp-methods Rust extension (ripgrep crates, gitignore-aware,
+# parallel walker). For multiple roots use:
+#     source_roots: [./data, ../shared/lookups]
+source_root: ./data
+
+# ── Trust gate for python: tools (only set when needed) ──────────────
+# This is HALF the trust signal. The operator must ALSO pass
+# --trust-tools on the CLI. Refusing either way is the default.
+trust:
+  allow_python_tools: true
+
+# ── Custom tools the agent can call by name ──────────────────────────
+tools:
+
+  # Inline Cypher: parameterised query as a typed MCP tool.
+  # $param refs are validated at server startup against the JSON
+  # Schema below, so typos fail boot rather than at first call.
+  - name: similar_sessions
+    description: Top-k semantically similar sessions for a session id.
+    parameters:
+      type: object
+      properties:
+        session_id:
+          type: string
+        top_k:
+          type: integer
+          default: 5
+      required: [session_id]
+    cypher: |
+      MATCH (s:Session {id: $session_id})-[r:SIMILAR_TO]->(t:Session)
+      RETURN t.id AS id, t.title AS title, r.score AS score
+      ORDER BY score DESC LIMIT $top_k
+
+  # Another Cypher tool, this one with no parameters.
+  - name: top_sessions_by_registrants
+    description: The 10 most-registered sessions across the conference.
+    cypher: |
+      MATCH (s:Session)
+      RETURN s.title AS title, s.registrants AS registrants
+      ORDER BY registrants DESC LIMIT 10
+
+  # Python hook: arbitrary Python function as an MCP tool. The
+  # function's signature, type hints, and docstring become the input
+  # schema directly — no synthesis layer.
+  - name: session_detail
+    description: Full source JSON for a session by id (fields not lifted to the graph).
+    python: ./gcn_tools.py
+    function: session_detail
