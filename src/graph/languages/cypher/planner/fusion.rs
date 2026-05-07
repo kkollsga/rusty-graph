@@ -1245,43 +1245,62 @@ pub(super) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
         // trim those candidates using the full multi-key spec. Only
         // K title evaluations happen in practice because the superset
         // is ≪ |distinct peers| for typical aggregate-by-count data.
-        let (sort_expr_idx, descending, multi_key) =
-            if let Clause::OrderBy(ob) = &query.clauses[i + 1] {
-                if ob.items.is_empty() {
-                    i += 1;
-                    continue;
+        let (sort_expr_idx, descending, multi_key) = if let Clause::OrderBy(ob) =
+            &query.clauses[i + 1]
+        {
+            if ob.items.is_empty() {
+                i += 1;
+                continue;
+            }
+            let sort_item = &ob.items[0];
+            if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
+                // Match the sort key against an aggregate RETURN item via either
+                // (a) alias reference: `ORDER BY n` where the RETURN has
+                //     `count(x) AS n` — the historical form, and
+                // (b) expression duplication: `ORDER BY count(x)` where the
+                //     RETURN has `count(x)` (with or without alias) — same
+                //     semantics, but missed by the alias-only matcher and so
+                //     left ORDER BY+LIMIT in the pipeline. The downstream
+                //     materialised every distinct peer's `build_row` (245k
+                //     for `:P138` on Wikidata) and gated the entire query
+                //     on that work — 8 s for the same query a 169 ms alias
+                //     form ran. Compare via `expression_to_column_name` so
+                //     deeply-nested or unparenthesised duplicates land too.
+                let sort_alias = match &sort_item.expression {
+                    Expression::Variable(v) => Some(v.clone()),
+                    _ => None,
+                };
+                let sort_expr_str = expression_to_column_name(&sort_item.expression);
+                let mut found_idx = None;
+                for (ri, item) in return_clause.items.iter().enumerate() {
+                    if !is_aggregate_expression(&item.expression) {
+                        continue;
+                    }
+                    let matches_alias = sort_alias
+                        .as_deref()
+                        .zip(item.alias.as_deref())
+                        .is_some_and(|(s, a)| s == a);
+                    let matches_expr = expression_to_column_name(&item.expression) == sort_expr_str;
+                    if matches_alias || matches_expr {
+                        found_idx = Some(ri);
+                        break;
+                    }
                 }
-                let sort_item = &ob.items[0];
-                if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
-                    let mut found_idx = None;
-                    for (ri, item) in return_clause.items.iter().enumerate() {
-                        let matches_alias =
-                            item.alias
-                                .as_ref()
-                                .is_some_and(|a| match &sort_item.expression {
-                                    Expression::Variable(v) => v == a,
-                                    _ => false,
-                                });
-                        if matches_alias && is_aggregate_expression(&item.expression) {
-                            found_idx = Some(ri);
-                            break;
-                        }
+                match found_idx {
+                    Some(idx) => (idx, !sort_item.ascending, ob.items.len() > 1),
+                    None => {
+                        i += 1;
+                        continue;
                     }
-                    match found_idx {
-                        Some(idx) => (idx, !sort_item.ascending, ob.items.len() > 1),
-                        None => {
-                            i += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    i += 1;
-                    continue;
                 }
             } else {
                 i += 1;
                 continue;
-            };
+            }
+        } else {
+            i += 1;
+            continue;
+        };
 
         let limit = if let Clause::Limit(l) = &query.clauses[i + 2] {
             match &l.count {

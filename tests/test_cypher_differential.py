@@ -250,6 +250,22 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY jobs DESC, person LIMIT 5",
         None,
     ),
+    # ORDER BY <agg-expr> form — historically the absorption pass only
+    # matched ORDER BY <alias>, so writing the same query as
+    # `ORDER BY count(p)` left ORDER BY+LIMIT in the pipeline and the
+    # executor materialised every distinct peer (~245k on Wikidata
+    # P138). Now both forms fuse equivalently. The differential check
+    # is structural (row-set equality), so this entry guards against
+    # divergence between the alias-form and the expression-form fast
+    # paths.
+    (
+        "edge_groupby_orderby_expression_form",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+        "RETURN c.name AS company, count(p) "
+        "ORDER BY count(p) DESC, company LIMIT 3",
+        None,
+    ),
     # ── fuse_match_with_aggregate + fuse_match_with_aggregate_top_k (0.8.32 bug) ──
     # Secondary sort key (city, n) breaks ties so the row identities are
     # deterministic — without it, both modes return correct counts but

@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Differential-test queries `edge_groupby_typed_target_top_k` and
   `edge_groupby_typed_target_no_orderby` added to the corpus to gate
   both branches.
+- **`ORDER BY <agg-expr>` now fuses equivalently to `ORDER BY <alias>`.**
+  `fuse_match_return_aggregate`'s top-K absorption matched only
+  `ORDER BY <alias-name>` (a Variable expression matching a RETURN
+  alias). Writing the same query as `ORDER BY count(x)` (an expression
+  duplicating a RETURN item's expression) left ORDER BY + LIMIT
+  unfused in the pipeline, so the fused MATCH-RETURN-aggregate
+  produced every distinct peer's row (245k for `:P138` on Wikidata)
+  before downstream OrderBy + Limit trimmed to k. On Wikidata this
+  cost 8 s vs the alias-form's 175 ms for the same query. Absorption
+  now also matches via `expression_to_column_name` so both forms
+  fuse. Differential test
+  `edge_groupby_orderby_expression_form` added.
 - **Group-by-source aggregations now use a fast path too.** Queries
   shaped `MATCH (h:T)-[:E]->(other) RETURN h, count(other) ORDER BY
   count(other) DESC LIMIT k` (e.g. "humans with most awards") were
