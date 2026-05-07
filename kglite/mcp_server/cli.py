@@ -1,9 +1,4 @@
-"""MCP server exposing a KGLite knowledge graph to an LLM.
-
-Run with the bundled CLI::
-
-    pip install "kglite[mcp]"
-    kglite-mcp-server --graph my_graph.kgl
+"""CLI entry point for ``kglite-mcp-server``.
 
 Tools registered with the MCP host:
 
@@ -205,7 +200,3 @@ def main(argv: list[str] | None = None) -> int:
 
     mcp.run(transport="stdio")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
