@@ -9,4 +9,5 @@ pub mod batch;
 pub mod maintain;
 pub mod set_ops;
 pub mod subgraph;
+pub mod subgraph_streaming;
 pub mod validation;

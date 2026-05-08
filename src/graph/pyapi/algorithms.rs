@@ -1210,4 +1210,62 @@ impl KnowledgeGraph {
 
         Ok(result_dict.into())
     }
+
+    /// [DEBUG] Phase 2 spike for `save_subset`: drives Pass A of the
+    /// streaming disk-to-disk subgraph filter and returns scan stats.
+    ///
+    /// Walks the source disk graph's `edge_endpoints.bin` sequentially,
+    /// filters by `edge_types`, and builds the kept-nodes bitset. No
+    /// output files are written. The leading underscore marks this as an
+    /// unstable API surface; the public `save_subset` ships in a later
+    /// phase.
+    ///
+    /// Errors when the source graph is not disk-backed — Memory and
+    /// Mapped graphs already have a fast `to_subgraph().save()` path and
+    /// the streaming pipeline is gated to disk only.
+    ///
+    /// Returns:
+    ///     {
+    ///         'kept_node_count':       u64,
+    ///         'kept_edge_count':       u64,
+    ///         'total_edge_count':      u64,
+    ///         'scan_duration_secs':    f64,
+    ///     }
+    #[pyo3(signature = (edge_types=None))]
+    fn _scan_edges_filtered(
+        &self,
+        py: Python<'_>,
+        edge_types: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::graph::mutation::subgraph_streaming::{pass_a_scan, SubsetSpec};
+        use crate::graph::storage::backend::GraphBackend;
+
+        let disk = match &self.inner.graph {
+            GraphBackend::Disk(dg) => dg.as_ref(),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "_scan_edges_filtered requires a disk-backed graph (storage='disk').",
+                ));
+            }
+        };
+
+        let edge_type_keys = edge_types.map(|names| {
+            names
+                .into_iter()
+                .map(|s| crate::graph::storage::interner::InternedKey::from_str(&s))
+                .collect::<Vec<_>>()
+        });
+        let spec = SubsetSpec {
+            edge_types: edge_type_keys,
+        };
+
+        let result = pass_a_scan(disk, &spec);
+
+        let dict = PyDict::new(py);
+        dict.set_item("kept_node_count", result.stats.kept_node_count)?;
+        dict.set_item("kept_edge_count", result.stats.kept_edge_count)?;
+        dict.set_item("total_edge_count", result.stats.total_edge_count)?;
+        dict.set_item("scan_duration_secs", result.stats.scan_duration_secs)?;
+        Ok(dict.into())
+    }
 }
