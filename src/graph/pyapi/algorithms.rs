@@ -1175,6 +1175,42 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Save the current selection as an independent subgraph file.
+    ///
+    /// Equivalent to `kg.to_subgraph().save(path)` but as a single call
+    /// that does not bind the intermediate in-memory graph to a local
+    /// variable. Output is a v3 binary file that reloads via
+    /// ``kglite.load(path)`` (or ``load(path, storage='disk')`` for disk
+    /// mode). All edges between selected nodes are included; node and
+    /// edge properties round-trip byte-for-byte.
+    ///
+    /// Args:
+    ///     path: Destination path for the subgraph file.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Articles + their authors, written to disk for later use.
+    ///     (
+    ///         kg.select('Article')
+    ///           .expand(hops=1, type='AUTHORED_BY')
+    ///           .save_subset('articles_with_authors.kgl')
+    ///     )
+    ///     ```
+    fn save_subset(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let inner = self.inner.clone();
+        let selection = self.selection.clone();
+        let path_owned = path.to_string();
+        py.detach(move || {
+            crate::graph::mutation::subgraph_streaming::save_subset(
+                &inner,
+                &selection,
+                std::path::Path::new(&path_owned),
+                None,
+            )
+        })
+        .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)
+    }
+
     /// Get statistics about the subgraph that would be extracted.
     ///
     /// Returns information about what would be included in a subgraph extraction

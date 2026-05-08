@@ -2764,6 +2764,25 @@ class KnowledgeGraph:
         """
         ...
 
+    def save_subset(self, path: str) -> None:
+        """Save the current selection as an independent subgraph file.
+
+        Equivalent to ``kg.to_subgraph().save(path)`` in a single call.
+        Output is a v3 binary file that reloads via ``kglite.load(path)``
+        (or ``load(path, storage='disk')`` for disk mode). All edges
+        between selected nodes are included; node and edge properties
+        round-trip byte-for-byte.
+
+        Args:
+            path: Destination path for the subgraph file.
+
+        Example:
+            >>> kg.select("Article").expand(hops=1, type="AUTHORED_BY").save_subset(
+            ...     "articles_with_authors.kgl"
+            ... )
+        """
+        ...
+
     # ====================================================================
     # Export
     # ====================================================================

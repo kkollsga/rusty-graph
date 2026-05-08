@@ -14,7 +14,7 @@
 //! per CLAUDE.md ("in-memory wins every time"). All I/O here is
 //! sequential — no per-node random edge lookups.
 
-use crate::graph::schema::InternedKey;
+use crate::graph::schema::{CowSelection, DirGraph, InternedKey};
 use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
@@ -367,6 +367,79 @@ pub fn pass_a_scan_to_file(
         kept_edges_path: kept_edges_path.to_path_buf(),
         kept_edge_records: kept_edge_count,
     })
+}
+
+// ── save_subset orchestrator ───────────────────────────────────────────────
+//
+// Phase 5+6 ship a working `save_subset(selection, path)` that produces a
+// fully independent on-disk graph. v1 uses the existing in-memory
+// `extract_subgraph` machinery — bounded by RAM, but correct for every
+// storage mode of the source. The streaming primitives in this module
+// (Bitset, RankIndex, Pass A, kept_edges.tmp) are wired and tested but
+// not yet on the hot path.
+//
+// v2 will swap the in-memory `extract_subgraph` step for a
+// streaming-disk-to-disk pipeline using the primitives above. The public
+// API stays unchanged — only the implementation flips.
+//
+// Why ship the in-memory baseline first: realistic 1-hop subsets on
+// Wikidata (Articles + Authors ≈ 15 M nodes / 10 M edges) fit in ~1 GB
+// of RAM via petgraph + Arc'd column stores, so the API is usable today
+// for the user's stated workflow. Larger subsets need streaming, which
+// is gated on the column-store materialization pieces still pending.
+
+/// Save a filtered subgraph to disk.
+///
+/// `selection` defines which nodes are kept (typically built via the
+/// fluent chain: `kg.select(...).expand(...)` returns a selection that
+/// gets handed here). All edges between kept nodes are included.
+///
+/// Output is a v3 binary file (single `.kgl` file for in-memory/mapped
+/// sources, directory for disk sources via `save_disk`). The file can be
+/// reloaded into any storage mode via `kglite.load(path, storage=...)`.
+///
+/// `_spec` is currently unused — the selection carries the filter. The
+/// parameter exists so v2 (Cypher integration) can lower into the same
+/// entry point without an API change.
+pub fn save_subset(
+    source: &DirGraph,
+    selection: &CowSelection,
+    out_path: &Path,
+    _spec: Option<&SubsetSpec>,
+) -> Result<(), String> {
+    use crate::graph::mutation::subgraph::extract_subgraph;
+    use std::sync::Arc;
+
+    // 1. Materialize the filtered subgraph in-memory. `extract_subgraph`
+    //    works for every source storage mode — its reads go through the
+    //    `GraphRead` trait which is implemented for memory/mapped/disk.
+    //    For disk sources, `node_weight` returns NodeData with
+    //    `PropertyStorage::Columnar { store: Arc<source_store>, row_id }`,
+    //    so the extracted graph holds Arc references into the source's
+    //    column stores. No deep clone of property data.
+    let mut extracted = extract_subgraph(source, selection)?;
+
+    // 2. Consolidate all node properties into column stores so the output
+    //    file is self-contained — does not depend on the source's stores.
+    //    Mirrors the prep that `KnowledgeGraph::save` does for the
+    //    in-memory save path.
+    extracted.enable_columnar();
+
+    let path_str = out_path.to_str().ok_or_else(|| {
+        format!(
+            "save_subset: out_path is not valid UTF-8: {}",
+            out_path.display()
+        )
+    })?;
+
+    // 3. Persist via the v3 binary writer. `prepare_save` operates on
+    //    `Arc<DirGraph>` (it stamps metadata + snapshots index keys), so
+    //    wrap-then-unwrap once.
+    let mut arc = Arc::new(extracted);
+    crate::graph::io::file::prepare_save(&mut arc);
+
+    crate::graph::io::file::write_graph_v3(&arc, path_str)
+        .map_err(|e| format!("save_subset: write_graph_v3 failed: {}", e))
 }
 
 #[cfg(test)]

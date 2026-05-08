@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`KnowledgeGraph.save_subset(path)` on the fluent selection chain.**
+  Equivalent to `kg.to_subgraph().save(path)` in a single call —
+  produces an independent v3 binary file that reloads via
+  `kglite.load(path)` (or `load(path, storage='disk')` for disk mode).
+  All edges between selected nodes are included; node and edge
+  properties round-trip byte-for-byte. Works on any source storage
+  mode. v1 is correct but in-memory-bounded; bounded-memory streaming
+  for Wikidata-scale extracts ships in a follow-up that consumes the
+  Pass A / RankIndex / kept_edges.tmp primitives already landed in
+  `src/graph/mutation/subgraph_streaming.rs`.
+
 ### Changed
 
 - **Edge-driven group-by aggregations with a typed target node now use
