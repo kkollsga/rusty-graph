@@ -9,6 +9,7 @@
 
 pub mod builder;
 pub mod csr;
+pub mod csr_build;
 pub mod edge_properties;
 pub mod graph;
 pub mod graph_persist;
