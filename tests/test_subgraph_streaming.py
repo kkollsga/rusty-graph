@@ -117,3 +117,55 @@ class TestPassAGating:
 
         with pytest.raises(ValueError, match="disk-backed"):
             g._scan_edges_filtered(edge_types=["KNOWS"])
+
+
+class TestPassAFileOutput:
+    """Phase 4: Pass A also spills kept edges to a temp file. The file
+    is the input handed to the merge-sort builder in subsequent phases.
+    """
+
+    def test_kept_edges_file_written_with_correct_count(self, disk_dir):
+        import os
+
+        g = build_disk_graph_with_articles_and_authors(disk_dir)
+        out_path = os.path.join(disk_dir, "kept_edges.tmp")
+
+        stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY"], kept_edges_out=out_path)
+
+        # Same logical kept counts as the no-file variant.
+        assert stats["kept_edge_count"] == 5
+        assert stats["kept_node_count"] == 7
+        assert stats["kept_edge_records"] == 5
+
+        # File exists and is sized for at least 5 records (the file is
+        # pre-allocated for the worst case of all source edges, but the
+        # logical record count is what matters).
+        assert os.path.exists(out_path)
+        # Each record is (u32, u32, u64) = 16 bytes; mmap'd file has
+        # capacity ≥ kept_edge_records × 16. Smaller graphs may pad to
+        # the OS page size, so just check non-empty.
+        assert os.path.getsize(out_path) >= 5 * 16
+
+    def test_rank_index_kept_count_matches_bitset(self, disk_dir):
+        import os
+
+        g = build_disk_graph_with_articles_and_authors(disk_dir)
+        out_path = os.path.join(disk_dir, "kept_edges.tmp")
+        stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY"], kept_edges_out=out_path)
+
+        # Phase 3 RankIndex built from Pass A's bitset must produce the
+        # same kept count as Bitset::count_ones — sanity check the rank
+        # primitive end-to-end on real disk data.
+        assert stats["rank_kept_count"] == stats["kept_node_count"]
+
+    def test_no_filter_writes_all_edges(self, disk_dir):
+        import os
+
+        g = build_disk_graph_with_articles_and_authors(disk_dir)
+        out_path = os.path.join(disk_dir, "kept_edges_all.tmp")
+
+        stats = g._scan_edges_filtered(edge_types=None, kept_edges_out=out_path)
+
+        assert stats["kept_edge_records"] == 9
+        assert stats["kept_edge_count"] == 9
+        assert os.path.exists(out_path)

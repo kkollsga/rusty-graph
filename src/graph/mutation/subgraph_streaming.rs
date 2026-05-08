@@ -17,6 +17,8 @@
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
 use crate::graph::storage::disk::graph::DiskGraph;
+use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
+use std::path::Path;
 
 /// Canonical streaming-filter spec. The fluent chain
 /// (`select().expand().save_subset()`) lowers into this; future Cypher
@@ -265,6 +267,106 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
             scan_duration_secs: scan_start.elapsed().as_secs_f64(),
         },
     }
+}
+
+// ── Pass A with file output — Phase 4 ──────────────────────────────────────
+//
+// Same sequential scan as `pass_a_scan` but also spills the kept edges to
+// a `MmapOrVec<(u32, u32, u64)>` at `kept_edges_path`. The on-disk record
+// shape matches the existing CSR builder's input
+// (`csr_build::build_csr_files` consumes `&MmapOrVec<(u32, u32, u64)>`),
+// so a later phase can drive the merge sort over this file by translating
+// `(src, tgt)` via the rank index in the iterator.
+//
+// Edge property bytes are NOT inlined yet — that's a Phase 5 extension
+// that requires either (a) a sidecar file keyed by source edge_idx or
+// (b) a fourth column in the temp record. For Phase 4 we keep the temp
+// file shape compatible with the existing builder; properties travel
+// independently in subsequent work.
+//
+// Memory: bitset (~15 MB at 120M nodes). No heap buffer scales with kept
+// edge count; appended records go straight to the mmap'd file.
+//
+// I/O: one sequential read of `edge_endpoints` + one sequential write to
+// `kept_edges_path`.
+
+/// Result of [`pass_a_scan_to_file`]. The temp file path is returned so
+/// the caller (Phase 5+) can hand it to `csr_build::build_csr_files`
+/// after wrapping it with a rank-translating iterator.
+pub struct PassAFileResult {
+    pub kept_nodes: Bitset,
+    pub stats: ScanStats,
+    pub kept_edges_path: std::path::PathBuf,
+    pub kept_edge_records: u64,
+}
+
+/// Pass A with file output. Identical semantics to [`pass_a_scan`] but
+/// also appends `(src, tgt, conn_type)` for each kept edge to a file at
+/// `kept_edges_path` via `MmapOrVec::mapped`. The file is sized for the
+/// total edge count up front (a safe upper bound on kept edges); Phase 5
+/// reads the actual count from `kept_edge_records`.
+pub fn pass_a_scan_to_file(
+    source: &DiskGraph,
+    spec: &SubsetSpec,
+    kept_edges_path: &Path,
+) -> Result<PassAFileResult, String> {
+    let n_nodes = source.node_slots.len();
+    let n_edges = source.next_edge_idx as usize;
+    let mut kept_nodes = Bitset::with_len(n_nodes);
+
+    let edge_type_set: Option<std::collections::HashSet<u64>> = spec
+        .edge_types
+        .as_ref()
+        .map(|v| v.iter().map(|k| k.as_u64()).collect());
+
+    if let Some(parent) = kept_edges_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "save_subset: failed to create temp dir {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    let mut kept_edges: MmapOrVec<(u32, u32, u64)> = MmapOrVec::mapped(kept_edges_path, n_edges)
+        .unwrap_or_else(|_| MmapOrVec::with_capacity(n_edges));
+
+    source.edge_endpoints.advise_sequential();
+    let scan_start = std::time::Instant::now();
+    let mut kept_edge_count: u64 = 0;
+    for edge_idx in 0..n_edges {
+        let ep = source.edge_endpoints.get(edge_idx);
+        if ep.source == TOMBSTONE_EDGE {
+            continue;
+        }
+        if let Some(ref types) = edge_type_set {
+            if !types.contains(&ep.connection_type) {
+                continue;
+            }
+        }
+        kept_nodes.set(ep.source as usize);
+        kept_nodes.set(ep.target as usize);
+        kept_edges.push((ep.source, ep.target, ep.connection_type));
+        kept_edge_count += 1;
+    }
+
+    let kept_node_count = kept_nodes.count_ones();
+    let scan_duration_secs = scan_start.elapsed().as_secs_f64();
+
+    Ok(PassAFileResult {
+        kept_nodes,
+        stats: ScanStats {
+            kept_node_count,
+            kept_edge_count,
+            total_edge_count: n_edges as u64,
+            scan_duration_secs,
+        },
+        kept_edges_path: kept_edges_path.to_path_buf(),
+        kept_edge_records: kept_edge_count,
+    })
 }
 
 #[cfg(test)]

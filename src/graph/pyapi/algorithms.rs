@@ -1231,13 +1231,16 @@ impl KnowledgeGraph {
     ///         'total_edge_count':      u64,
     ///         'scan_duration_secs':    f64,
     ///     }
-    #[pyo3(signature = (edge_types=None))]
+    #[pyo3(signature = (edge_types=None, kept_edges_out=None))]
     fn _scan_edges_filtered(
         &self,
         py: Python<'_>,
         edge_types: Option<Vec<String>>,
+        kept_edges_out: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::graph::mutation::subgraph_streaming::{pass_a_scan, SubsetSpec};
+        use crate::graph::mutation::subgraph_streaming::{
+            pass_a_scan, pass_a_scan_to_file, RankIndex, SubsetSpec,
+        };
         use crate::graph::storage::backend::GraphBackend;
 
         let disk = match &self.inner.graph {
@@ -1259,13 +1262,35 @@ impl KnowledgeGraph {
             edge_types: edge_type_keys,
         };
 
-        let result = pass_a_scan(disk, &spec);
-
         let dict = PyDict::new(py);
-        dict.set_item("kept_node_count", result.stats.kept_node_count)?;
-        dict.set_item("kept_edge_count", result.stats.kept_edge_count)?;
-        dict.set_item("total_edge_count", result.stats.total_edge_count)?;
-        dict.set_item("scan_duration_secs", result.stats.scan_duration_secs)?;
+        match kept_edges_out {
+            None => {
+                let result = pass_a_scan(disk, &spec);
+                dict.set_item("kept_node_count", result.stats.kept_node_count)?;
+                dict.set_item("kept_edge_count", result.stats.kept_edge_count)?;
+                dict.set_item("total_edge_count", result.stats.total_edge_count)?;
+                dict.set_item("scan_duration_secs", result.stats.scan_duration_secs)?;
+            }
+            Some(path_str) => {
+                let path = std::path::Path::new(path_str);
+                let result = pass_a_scan_to_file(disk, &spec, path)
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+                // Build the rank index from the bitset we got back —
+                // exercises the Phase 3 primitive end-to-end on real
+                // disk data, and surfaces kept_count for differential
+                // checks against `count_ones`.
+                let rank = RankIndex::from_bitset(result.kept_nodes);
+
+                dict.set_item("kept_node_count", result.stats.kept_node_count)?;
+                dict.set_item("kept_edge_count", result.stats.kept_edge_count)?;
+                dict.set_item("total_edge_count", result.stats.total_edge_count)?;
+                dict.set_item("scan_duration_secs", result.stats.scan_duration_secs)?;
+                dict.set_item("kept_edges_path", result.kept_edges_path.to_string_lossy())?;
+                dict.set_item("kept_edge_records", result.kept_edge_records)?;
+                dict.set_item("rank_kept_count", rank.kept_count() as u64)?;
+            }
+        }
         Ok(dict.into())
     }
 }
