@@ -369,24 +369,48 @@ pub fn pass_a_scan_to_file(
     })
 }
 
-// ── save_subset orchestrator ───────────────────────────────────────────────
+// ── Streaming disk-to-disk pipeline ───────────────────────────────────────
 //
-// Phase 5+6 ship a working `save_subset(selection, path)` that produces a
-// fully independent on-disk graph. v1 uses the existing in-memory
-// `extract_subgraph` machinery — bounded by RAM, but correct for every
-// storage mode of the source. The streaming primitives in this module
-// (Bitset, RankIndex, Pass A, kept_edges.tmp) are wired and tested but
-// not yet on the hot path.
+// Eliminates the in-memory petgraph step that drove the in-memory baseline
+// to 7.1 GB peak RSS on Wikidata Articles+P50+Authors. The streaming path:
 //
-// v2 will swap the in-memory `extract_subgraph` step for a
-// streaming-disk-to-disk pipeline using the primitives above. The public
-// API stays unchanged — only the implementation flips.
+// 1. Determine kept node ids per type (sorted by source id).
+// 2. Create the destination as a disk-mode `DirGraph` from the start —
+//    its `pending_edges` are file-backed via `MmapOrVec`, no in-memory
+//    petgraph copy.
+// 3. For each kept type T, build the destination's `ColumnStore` for T
+//    by walking source's nodes of type T in sorted source-id order.
+//    Source row reads stay sequential within a single `ColumnStore` at
+//    a time, so the OS page cache stays warm — kills the random-I/O
+//    pattern that came from `enable_columnar`'s interleaved reads
+//    across multiple type stores.
+// 4. Walk source `node_slots` in id order; for each kept old_idx, add a
+//    single `NodeData::Columnar { store: arc(dest_store), row_id }` to
+//    the dest's disk graph. `DiskGraph::add_node` only reads `row_id`,
+//    so the dest's auto-assigned `NodeIndex` matches the global
+//    `RankIndex.old_to_new(old_idx)`.
+// 5. Walk source `edge_endpoints` in edge_idx order, applying the
+//    edge-type filter. For each kept edge, translate src/tgt via the
+//    rank index and call `dest.graph.add_edge`. With `defer_csr=true`
+//    the dest disk graph appends to its file-backed `pending_edges`
+//    (sequential write, bounded heap).
+// 6. `dest.save_disk(out_path)` triggers `build_csr_from_pending` (the
+//    Phase 1 merge-sort builder, all sequential I/O).
 //
-// Why ship the in-memory baseline first: realistic 1-hop subsets on
-// Wikidata (Articles + Authors ≈ 15 M nodes / 10 M edges) fit in ~1 GB
-// of RAM via petgraph + Arc'd column stores, so the API is usable today
-// for the user's stated workflow. Larger subsets need streaming, which
-// is gated on the column-store materialization pieces still pending.
+// Memory budget at Wikidata Articles+P50+Authors scale (17.4M kept):
+//  - kept_per_type indices: ~70 MB (sorted u32 per kept type)
+//  - rank index: ~30 MB
+//  - dest column stores during push: bounded by max-type heap.
+//  - pending_edges: file-backed, ~16 B per kept edge, mmap.
+//
+// Sequential I/O strategy:
+//  - Pass A scan: 1× sequential read of source `edge_endpoints.bin`.
+//  - Per-type column-store push: sequential reads of one source store
+//    at a time (kept ids in source-id order = monotone row_ids).
+//  - Dest column-store writes: sequential append (heap during push,
+//    flushed once at save_disk).
+//  - Pending-edges write: sequential append to file-backed mmap.
+//  - CSR build: external merge sort (existing).
 
 /// Save a filtered subgraph to disk.
 ///
@@ -408,7 +432,6 @@ pub fn save_subset(
     _spec: Option<&SubsetSpec>,
 ) -> Result<(), String> {
     use crate::graph::mutation::subgraph::extract_subgraph;
-    use std::sync::Arc;
 
     // 1. Materialize the filtered subgraph in-memory. `extract_subgraph`
     //    works for every source storage mode — its reads go through the
@@ -419,10 +442,9 @@ pub fn save_subset(
     //    column stores. No deep clone of property data.
     let mut extracted = extract_subgraph(source, selection)?;
 
-    // 2. Consolidate all node properties into column stores so the output
-    //    file is self-contained — does not depend on the source's stores.
-    //    Mirrors the prep that `KnowledgeGraph::save` does for the
-    //    in-memory save path.
+    // 2. Consolidate properties into self-contained column stores so the
+    //    output is independent of the source's stores. Required by both
+    //    save paths below.
     extracted.enable_columnar();
 
     let path_str = out_path.to_str().ok_or_else(|| {
@@ -432,14 +454,372 @@ pub fn save_subset(
         )
     })?;
 
-    // 3. Persist via the v3 binary writer. `prepare_save` operates on
-    //    `Arc<DirGraph>` (it stamps metadata + snapshots index keys), so
-    //    wrap-then-unwrap once.
-    let mut arc = Arc::new(extracted);
-    crate::graph::io::file::prepare_save(&mut arc);
+    // 3. Choose the right serializer based on graph size. The single-file
+    //    v3 format (`write_graph_v3`) bincode-serializes the whole
+    //    DirGraph in one go and trips bincode's size limit at scale —
+    //    Wikidata-class extracts (~17 M nodes / 35 M edges) hit it.
+    //    Above the threshold, convert to disk mode and write the
+    //    directory format which scales without per-blob limits. Reload
+    //    works for both: `kglite.load(path)` auto-detects file vs dir.
+    //
+    //    Threshold picked empirically: the v3 single-file format is
+    //    comfortable below ~1 M nodes; everything above gets the
+    //    directory treatment for safety.
+    const SINGLE_FILE_NODE_THRESHOLD: u64 = 1_000_000;
 
-    crate::graph::io::file::write_graph_v3(&arc, path_str)
-        .map_err(|e| format!("save_subset: write_graph_v3 failed: {}", e))
+    use crate::graph::storage::GraphRead;
+    let node_count = u64::try_from(extracted.graph.node_count()).unwrap_or(u64::MAX);
+    if node_count <= SINGLE_FILE_NODE_THRESHOLD {
+        // Single .kgl file path — small subgraphs.
+        let mut arc = std::sync::Arc::new(extracted);
+        crate::graph::io::file::prepare_save(&mut arc);
+        crate::graph::io::file::write_graph_v3(&arc, path_str)
+            .map_err(|e| format!("save_subset: write_graph_v3 failed: {}", e))
+    } else {
+        // Directory format — large subgraphs. enable_disk_mode builds CSR
+        // files in a temp dir; save_disk renames them into `path_str`.
+        extracted.enable_disk_mode()?;
+        extracted.save_disk(path_str)
+    }
+}
+
+/// Streaming disk-to-disk subgraph filter.
+///
+/// `kept_per_type` maps each kept node type to its sorted source node ids
+/// (ascending). The caller must guarantee sortedness — Pass A's bitset
+/// intersected with `type_indices` already produces sorted output.
+///
+/// `edge_filter` keeps only edges whose connection type's interned u64
+/// hash is in the set. `None` keeps every edge between kept nodes.
+///
+/// Output: a self-contained disk-mode graph at `out_path`. The caller is
+/// responsible for ensuring `out_path` is empty / does not exist —
+/// `DiskGraph::new_at_path` creates the directory layout.
+pub fn save_subset_streaming_disk(
+    source: &DirGraph,
+    kept_per_type: &std::collections::HashMap<String, Vec<u32>>,
+    edge_filter: Option<&[u64]>,
+    out_path: &Path,
+) -> Result<(), String> {
+    use crate::datatypes::values::Value;
+    use crate::graph::schema::{EdgeData, NodeData, PropertyStorage};
+    use crate::graph::storage::backend::GraphBackend;
+    use crate::graph::storage::column_store::ColumnStore;
+    use crate::graph::storage::disk::graph::DiskGraph;
+    use crate::graph::storage::interner::InternedKey;
+    use petgraph::graph::NodeIndex;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let path_str = out_path.to_str().ok_or_else(|| {
+        format!(
+            "save_subset_streaming_disk: out_path is not valid UTF-8: {}",
+            out_path.display()
+        )
+    })?;
+
+    // 1. Create destination as a disk-mode DirGraph.
+    std::fs::create_dir_all(out_path).map_err(|e| {
+        format!(
+            "save_subset_streaming_disk: create_dir_all({}): {}",
+            out_path.display(),
+            e
+        )
+    })?;
+    let dest_disk = DiskGraph::new_at_path(out_path)
+        .map_err(|e| format!("save_subset_streaming_disk: DiskGraph::new_at_path: {}", e))?;
+    let mut dest = DirGraph::from_graph(GraphBackend::Disk(Box::new(dest_disk)));
+
+    // Clone source metadata so the dest is fully self-contained on reload.
+    dest.interner = source.interner.clone();
+    dest.type_schemas = source.type_schemas.clone();
+    dest.node_type_metadata = source.node_type_metadata.clone();
+    dest.connection_type_metadata = source.connection_type_metadata.clone();
+    dest.id_field_aliases = source.id_field_aliases.clone();
+    dest.title_field_aliases = source.title_field_aliases.clone();
+    dest.parent_types = source.parent_types.clone();
+
+    // Bulk-loader contract: defer CSR build until save_disk so add_edge
+    // appends to the file-backed pending_edges instead of going through
+    // the slow per-edge overflow path.
+    if let GraphBackend::Disk(ref mut dg) = dest.graph {
+        dg.defer_csr = true;
+    }
+
+    // 2. Build a global rank index over the kept node set so we can
+    //    translate source node ids to dest ids in O(1) RAM. New ids are
+    //    assigned in source-id order across all types.
+    //
+    //    The bitset is sized to the source node bound; Pass A also uses
+    //    this size, so peak together stays at ~30 MB on Wikidata.
+    use crate::graph::storage::GraphRead;
+    let n_source_nodes = source.graph.node_bound();
+    let mut bitset = Bitset::with_len(n_source_nodes);
+    for sorted_ids in kept_per_type.values() {
+        for &id in sorted_ids {
+            bitset.set(id as usize);
+        }
+    }
+    let rank = RankIndex::from_bitset(bitset);
+
+    // 3. For each kept type T, build dest's ColumnStore by walking source
+    //    nodes of type T in source-id order. Sequential reads of one
+    //    source store at a time = warm OS page cache.
+    //
+    //    NodeData with PropertyStorage::Columnar carries `row_id` directly
+    //    into DiskGraph::add_node — that's what binds the new node_slot
+    //    to the column-store row we just pushed. The store Arc is dropped
+    //    by add_node, so the per-type Arc is installed in dest.column_stores
+    //    at the end of this loop.
+    //
+    //    Per-type "row_id within store" is the push position (0, 1, 2,
+    //    …); per-source-id mapping `(old_idx → dest_row_id)` is recorded
+    //    in `row_id_for_old` so step 4 can build the right NodeData.
+    let mut dest_stores: HashMap<String, Arc<ColumnStore>> = HashMap::new();
+    let mut row_id_for_old: HashMap<u32, u32> = HashMap::new();
+    for (type_name, sorted_ids) in kept_per_type {
+        // Prefer the schema attached to source's existing column store —
+        // it's authoritative regardless of whether `type_schemas` /
+        // `node_type_metadata` were populated at source-load time. Older
+        // disk graphs sometimes have one-or-the-other empty; falling back
+        // to `type_schemas` would silently skip the type and lose all
+        // its kept nodes.
+        let schema = if let Some(src_store) = source.column_stores.get(type_name) {
+            Arc::clone(src_store.schema())
+        } else if let Some(s) = source.type_schemas.get(type_name) {
+            Arc::clone(s)
+        } else {
+            continue; // type with no schema anywhere — nothing to push
+        };
+        let meta = source
+            .node_type_metadata
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let mut store = ColumnStore::new(schema, &meta, &source.interner);
+
+        for &old_id in sorted_ids {
+            let old_idx = NodeIndex::new(old_id as usize);
+            let nd = match source.graph.node_weight(old_idx) {
+                Some(n) => n,
+                None => continue, // tombstoned in source — skip
+            };
+
+            // Read id, title, properties from source. For disk-backed
+            // sources this is one mmap read in a single ColumnStore.
+            let (id_val, title_val, props): (Value, Value, Vec<(InternedKey, Value)>) =
+                match &nd.properties {
+                    PropertyStorage::Columnar { store: src, row_id } => (
+                        src.get_id(*row_id).unwrap_or_else(|| nd.id.clone()),
+                        src.get_title(*row_id).unwrap_or_else(|| nd.title.clone()),
+                        src.row_properties(*row_id),
+                    ),
+                    PropertyStorage::Map(m) => (
+                        nd.id.clone(),
+                        nd.title.clone(),
+                        m.iter().map(|(&k, v)| (k, v.clone())).collect(),
+                    ),
+                    PropertyStorage::Compact { schema, values } => {
+                        let pairs = schema
+                            .slots
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &ik)| {
+                                values.get(i).and_then(|v| {
+                                    if matches!(v, Value::Null) {
+                                        None
+                                    } else {
+                                        Some((ik, v.clone()))
+                                    }
+                                })
+                            })
+                            .collect();
+                        (nd.id.clone(), nd.title.clone(), pairs)
+                    }
+                };
+
+            store.push_id(&id_val);
+            store.push_title(&title_val);
+            let dest_row_id = store.push_row(&props);
+            row_id_for_old.insert(old_id, dest_row_id);
+        }
+
+        dest_stores.insert(type_name.clone(), Arc::new(store));
+    }
+
+    // 4. Add a NodeData per kept node, in source-id order, so dest's auto-
+    //    assigned NodeIndex matches `rank.old_to_new(old_id)`.
+    //
+    //    DiskGraph::add_node reads only the row_id from PropertyStorage::
+    //    Columnar; the store Arc inside is irrelevant at add time. The
+    //    per-type Arcs are installed into dest.column_stores after this
+    //    loop, before any reads.
+    // The placeholder Arc is only used to pass DiskGraph::add_node — it
+    // reads `row_id` from the Columnar variant and discards the store.
+    // Reuse one of the real per-type Arcs; if there's nothing, the loop
+    // below skips entirely (no nodes kept).
+    let placeholder_store: Option<Arc<ColumnStore>> = dest_stores.values().next().cloned();
+
+    for old_id in 0..n_source_nodes as u32 {
+        if !rank.contains(old_id) {
+            continue;
+        }
+        let old_idx = NodeIndex::new(old_id as usize);
+        let nd = match source.graph.node_weight(old_idx) {
+            Some(n) => n,
+            None => continue,
+        };
+        let dest_row_id = match row_id_for_old.get(&old_id) {
+            Some(&r) => r,
+            None => continue,
+        };
+
+        let id_val = match &nd.properties {
+            PropertyStorage::Columnar { store: src, row_id } => {
+                src.get_id(*row_id).unwrap_or_else(|| nd.id.clone())
+            }
+            _ => nd.id.clone(),
+        };
+        let title_val = match &nd.properties {
+            PropertyStorage::Columnar { store: src, row_id } => {
+                src.get_title(*row_id).unwrap_or_else(|| nd.title.clone())
+            }
+            _ => nd.title.clone(),
+        };
+
+        let store_arc = match &placeholder_store {
+            Some(s) => Arc::clone(s),
+            None => continue, // no kept stores → nothing to add
+        };
+        let new_node_data = NodeData {
+            id: id_val,
+            title: title_val,
+            node_type: nd.node_type,
+            properties: PropertyStorage::Columnar {
+                store: store_arc,
+                row_id: dest_row_id,
+            },
+        };
+
+        crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
+    }
+
+    // Free the per-old-id mapping — we don't need it for edge translation
+    // (rank index handles that in O(1)).
+    drop(row_id_for_old);
+
+    // 5. Install dest column stores into both DirGraph and DiskGraph.
+    //    sync_disk_column_stores copies Arc references into DiskGraph's
+    //    HashMap so post-load reads see the right stores.
+    dest.column_stores = dest_stores;
+    dest.sync_disk_column_stores();
+
+    // 6. Walk source edges in edge_idx order. For each edge passing the
+    //    filter and with both endpoints in the kept set, translate via
+    //    the rank index and append to dest's pending_edges.
+    let edge_filter_set: Option<std::collections::HashSet<u64>> =
+        edge_filter.map(|v| v.iter().copied().collect());
+
+    let source_disk = match &source.graph {
+        GraphBackend::Disk(dg) => Some(dg.as_ref()),
+        _ => None,
+    };
+
+    if let Some(sdg) = source_disk {
+        // Disk source: sequential read of edge_endpoints.bin + lockstep
+        // edge_properties_at lookups (which read source's prop heap in
+        // edge_idx order = sequential).
+        sdg.edge_endpoints.advise_sequential();
+        let n_edges = sdg.next_edge_idx as usize;
+        for edge_idx in 0..n_edges {
+            let ep = sdg.edge_endpoints.get(edge_idx);
+            if ep.source == crate::graph::storage::disk::csr::TOMBSTONE_EDGE {
+                continue;
+            }
+            if let Some(ref types) = edge_filter_set {
+                if !types.contains(&ep.connection_type) {
+                    continue;
+                }
+            }
+            let new_src = match rank.old_to_new(ep.source) {
+                Some(x) => NodeIndex::new(x as usize),
+                None => continue,
+            };
+            let new_tgt = match rank.old_to_new(ep.target) {
+                Some(x) => NodeIndex::new(x as usize),
+                None => continue,
+            };
+            let conn_type = InternedKey::from_u64(ep.connection_type);
+            let props = sdg
+                .edge_properties_at(edge_idx as u32)
+                .map(|cow| cow.into_owned())
+                .unwrap_or_default();
+            let edge_data = EdgeData::new_interned(conn_type, props);
+            crate::graph::storage::GraphWrite::add_edge(
+                &mut dest.graph,
+                new_src,
+                new_tgt,
+                edge_data,
+            );
+        }
+    } else {
+        // Memory / mapped source: walk via for_each_edge_endpoint_key to
+        // get the same sequential shape on a backend-agnostic surface.
+        // Properties go through `for_each_edge_of_conn_type` per kept
+        // edge type — but we don't have the edge_idx → properties path
+        // generically here, so fall back to per-edge lookup via
+        // `edge_references()`. Less optimal but correct.
+        use petgraph::visit::IntoEdgeReferences;
+        let backend = match &source.graph {
+            GraphBackend::Memory(g) => Some(g.inner()),
+            GraphBackend::Mapped(_) | GraphBackend::Recording(_) | GraphBackend::Disk(_) => None,
+        };
+        if let Some(g) = backend {
+            for er in g.edge_references() {
+                use petgraph::visit::EdgeRef;
+                let w = er.weight();
+                if let Some(ref types) = edge_filter_set {
+                    if !types.contains(&w.connection_type.as_u64()) {
+                        continue;
+                    }
+                }
+                let src = er.source().index() as u32;
+                let tgt = er.target().index() as u32;
+                let new_src = match rank.old_to_new(src) {
+                    Some(x) => NodeIndex::new(x as usize),
+                    None => continue,
+                };
+                let new_tgt = match rank.old_to_new(tgt) {
+                    Some(x) => NodeIndex::new(x as usize),
+                    None => continue,
+                };
+                let edge_data = EdgeData::new_interned(w.connection_type, w.properties.clone());
+                crate::graph::storage::GraphWrite::add_edge(
+                    &mut dest.graph,
+                    new_src,
+                    new_tgt,
+                    edge_data,
+                );
+            }
+        } else {
+            return Err(
+                "save_subset_streaming_disk: mapped + recording sources not yet supported"
+                    .to_string(),
+            );
+        }
+    }
+
+    // 7. Rebuild type_indices from the freshly-added nodes. The streaming
+    //    add_node path bypasses the bulk loader's index maintenance, so
+    //    dest.type_indices is empty until we walk node_weights here. The
+    //    saved `type_indices.bin` is what `MATCH (n:Type)` queries hit
+    //    after reload — without this rebuild, the subset reloads with
+    //    correct node_count and edges but every typed Cypher query
+    //    returns 0.
+    dest.rebuild_type_indices();
+
+    // 8. Save: triggers build_csr_from_pending (the Phase 1 merge sort).
+    dest.save_disk(path_str)
 }
 
 #[cfg(test)]

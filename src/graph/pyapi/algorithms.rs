@@ -1211,6 +1211,117 @@ impl KnowledgeGraph {
         .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)
     }
 
+    /// [DEBUG] Save a subgraph filtered by edge type, bypassing the
+    /// fluent selection chain.
+    ///
+    /// Equivalent in spirit to `expand(hops=1, edge_types=...)` followed
+    /// by `save_subset` — but `expand` does not currently take an
+    /// edge-type filter, so this method drives Pass A directly to build
+    /// the kept-nodes set, then routes the resulting node set through
+    /// the existing in-memory save path.
+    ///
+    /// Disk-backed sources only. The kept set is exactly the union of
+    /// endpoints of every edge whose connection type matches one of
+    /// `edge_types` — useful for "all (a)-[:E]->(b) and just those
+    /// nodes" filters where `expand` would over-pull.
+    ///
+    /// Returns scan + save stats as a dict so callers can time the
+    /// component steps without re-loading the source.
+    #[pyo3(signature = (path, edge_types))]
+    fn _save_subset_filtered_by_edge_type(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        edge_types: Vec<String>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::graph::mutation::subgraph_streaming::{
+            pass_a_scan, save_subset_streaming_disk, SubsetSpec,
+        };
+        use crate::graph::storage::backend::GraphBackend;
+        use std::collections::HashMap;
+
+        let edge_type_keys_u64: Vec<u64> = edge_types
+            .iter()
+            .map(|s| crate::graph::storage::interner::InternedKey::from_str(s).as_u64())
+            .collect();
+        let spec = SubsetSpec {
+            edge_types: Some(
+                edge_types
+                    .iter()
+                    .map(|s| crate::graph::storage::interner::InternedKey::from_str(s))
+                    .collect(),
+            ),
+        };
+
+        let inner = self.inner.clone();
+        let path_owned = path.to_string();
+        let edge_filter = edge_type_keys_u64.clone();
+        let (scan_secs, kept_node_count, kept_edge_count, group_secs, save_secs) =
+            py.detach(move || -> PyResult<(f64, u64, u64, f64, f64)> {
+                let disk = match &inner.graph {
+                    GraphBackend::Disk(dg) => dg.as_ref(),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "_save_subset_filtered_by_edge_type requires a disk-backed source.",
+                        ));
+                    }
+                };
+
+                // Pass A: sequential edge scan → kept_nodes bitset.
+                let scan_t0 = std::time::Instant::now();
+                let pass_a = pass_a_scan(disk, &spec);
+                let scan_secs = scan_t0.elapsed().as_secs_f64();
+
+                // Group kept nodes by source type, in source-id order.
+                // type_indices slices are already sorted, so the resulting
+                // Vec per type is sorted too — required by the streaming
+                // pipeline for sequential ColumnStore reads.
+                let group_t0 = std::time::Instant::now();
+                let mut kept_per_type: HashMap<String, Vec<u32>> = HashMap::new();
+                for (type_name, type_nodes) in inner.type_indices.iter() {
+                    let mut kept: Vec<u32> = Vec::new();
+                    for nid in type_nodes.iter() {
+                        let id = nid.index();
+                        if pass_a.kept_nodes.get(id) {
+                            kept.push(id as u32);
+                        }
+                    }
+                    if !kept.is_empty() {
+                        kept_per_type.insert(type_name.to_string(), kept);
+                    }
+                }
+                let group_secs = group_t0.elapsed().as_secs_f64();
+
+                // Streaming materialize + save: dest is disk-mode from
+                // the start, no in-memory petgraph copy.
+                let save_t0 = std::time::Instant::now();
+                save_subset_streaming_disk(
+                    &inner,
+                    &kept_per_type,
+                    Some(&edge_filter),
+                    std::path::Path::new(&path_owned),
+                )
+                .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+                let save_secs = save_t0.elapsed().as_secs_f64();
+
+                Ok((
+                    scan_secs,
+                    pass_a.stats.kept_node_count,
+                    pass_a.stats.kept_edge_count,
+                    group_secs,
+                    save_secs,
+                ))
+            })?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("pass_a_scan_secs", scan_secs)?;
+        dict.set_item("group_per_type_secs", group_secs)?;
+        dict.set_item("save_secs", save_secs)?;
+        dict.set_item("kept_node_count", kept_node_count)?;
+        dict.set_item("kept_edge_count", kept_edge_count)?;
+        Ok(dict.into())
+    }
+
     /// Get statistics about the subgraph that would be extracted.
     ///
     /// Returns information about what would be included in a subgraph extraction
