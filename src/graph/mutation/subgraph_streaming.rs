@@ -708,6 +708,31 @@ pub fn save_subset_streaming_disk(
         )))
     };
 
+    // Sub-phase timers, gated on the same KGLITE_STREAMING_TIMING flag.
+    // Each `Instant::now()` is ~50 ns on macOS so 4 calls × 17 M
+    // iterations = ~3-4 s of measurement overhead on Wikidata when
+    // enabled, which is a small fraction of the 446 s node walk.
+    // Off when the env var is unset — zero overhead.
+    let mut t_lookups = std::time::Duration::ZERO;
+    let mut t_read_id_title = std::time::Duration::ZERO;
+    let mut t_read_props = std::time::Duration::ZERO;
+    let mut t_push_row = std::time::Duration::ZERO;
+    let mut t_add_node = std::time::Duration::ZERO;
+    let mut row_counter: u64 = 0;
+
+    // Periodic progress: when timing is on, print per-million-row
+    // breakdown every PROGRESS_EVERY rows. Lets us assess a perf
+    // change in ~30 seconds of bench time instead of 10 minutes —
+    // if the per-million numbers don't move, the fix isn't working.
+    const PROGRESS_EVERY: u64 = 1_000_000;
+    let mut last_progress_row: u64 = 0;
+    let mut last_progress_at = Instant::now();
+    let mut last_t_lookups = std::time::Duration::ZERO;
+    let mut last_t_read_id_title = std::time::Duration::ZERO;
+    let mut last_t_read_props = std::time::Duration::ZERO;
+    let mut last_t_push_row = std::time::Duration::ZERO;
+    let mut last_t_add_node = std::time::Duration::ZERO;
+
     if let (Some(sdg), Some(placeholder_arc)) = (source_disk_for_nodes, placeholder_arc) {
         for old_id in 0..n_source_nodes as u32 {
             if !rank.contains(old_id) {
@@ -717,6 +742,11 @@ pub fn save_subset_streaming_disk(
             if !slot.is_alive() {
                 continue;
             }
+            let t0 = if timing_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let type_key = InternedKey::from_u64(slot.node_type);
             let type_name = source.interner.resolve(type_key);
 
@@ -728,18 +758,78 @@ pub fn save_subset_streaming_disk(
                 Some(w) => w,
                 None => continue,
             };
+            if let Some(t) = t0 {
+                t_lookups += t.elapsed();
+            }
 
-            let id_val = src_store.get_id(slot.row_id).unwrap_or(Value::Null);
-            let title_val = src_store.get_title(slot.row_id).unwrap_or(Value::Null);
-            let props = src_store.row_properties(slot.row_id);
+            // Borrowed-read fast path: get_id / get_title return
+            // `BorrowedValue<'_>` / `&str` slices into the source's
+            // mmap with no heap allocation. The streaming visitor
+            // forwards each property's borrowed bytes straight into
+            // dest's BufWriters via `push_row_borrowed`. This kills
+            // the `Value::String(s.to_string())` clone × ~30
+            // properties × 17 M rows = ~510 M heap allocations that
+            // dominated the v3 node walk wall time.
+            //
+            // `DiskGraph::add_node` reads only `data.node_type` and
+            // `data.properties.row_id`; the `id` and `title` fields
+            // are ignored on the disk path (verified — see the
+            // `add_node` impl). So we can pass `Value::Null` for
+            // both and skip the clone for NodeData. Reads later go
+            // through `dest.column_stores[type].get_id/title` which
+            // sees what `push_row_borrowed` wrote.
+            let t1 = if timing_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let id_borrowed = src_store
+                .id_borrowed(slot.row_id)
+                .unwrap_or(crate::datatypes::values::BorrowedValue::Null);
+            let title_borrowed = match src_store.title_borrowed(slot.row_id) {
+                Some(s) => crate::datatypes::values::BorrowedValue::String(s),
+                None => crate::datatypes::values::BorrowedValue::Null,
+            };
+            if let Some(t) = t1 {
+                t_read_id_title += t.elapsed();
+            }
 
+            let t2 = if timing_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let dest_row_id = writer
-                .push_row(&id_val, &title_val, &props)
+                .push_row_borrowed(id_borrowed, title_borrowed, |row| {
+                    let t1b = if timing_enabled {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+                    let r = src_store.try_for_each_property_borrowed(slot.row_id, |key, bv| {
+                        row.push_property(key, bv)
+                    });
+                    if let Some(t) = t1b {
+                        t_read_props += t.elapsed();
+                    }
+                    r
+                })
                 .map_err(|e| format!("save_subset_streaming_disk: push_row: {}", e))?;
+            if let Some(t) = t2 {
+                t_push_row += t.elapsed();
+            }
 
+            let t3 = if timing_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let new_node_data = NodeData {
-                id: id_val,
-                title: title_val,
+                // add_node ignores `id` and `title` on the disk path
+                // (only reads node_type + properties.row_id). Skip
+                // the heap allocation entirely.
+                id: Value::Null,
+                title: Value::Null,
                 node_type: type_key,
                 properties: PropertyStorage::Columnar {
                     store: Arc::clone(&placeholder_arc),
@@ -747,6 +837,42 @@ pub fn save_subset_streaming_disk(
                 },
             };
             crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
+            if let Some(t) = t3 {
+                t_add_node += t.elapsed();
+            }
+            row_counter += 1;
+
+            if timing_enabled && row_counter - last_progress_row >= PROGRESS_EVERY {
+                let now = Instant::now();
+                let dt = now.duration_since(last_progress_at).as_secs_f64();
+                let drows = (row_counter - last_progress_row) as f64;
+                let d_lookups = (t_lookups - last_t_lookups).as_secs_f64();
+                let d_idtitle = (t_read_id_title - last_t_read_id_title).as_secs_f64();
+                let d_props = (t_read_props - last_t_read_props).as_secs_f64();
+                let d_push = (t_push_row - last_t_push_row).as_secs_f64();
+                let d_addn = (t_add_node - last_t_add_node).as_secs_f64();
+                eprintln!(
+                    "save_subset_streaming_disk:   progress: rows={} (+{:.0}M) wall={:.2}s \
+                     ({:.1}us/row) | dlookups={:.2}s did+t={:.2}s dprops={:.2}s \
+                     dpush={:.2}s daddn={:.2}s",
+                    row_counter,
+                    drows / 1_000_000.0,
+                    dt,
+                    dt * 1e6 / drows,
+                    d_lookups,
+                    d_idtitle,
+                    d_props,
+                    d_push,
+                    d_addn,
+                );
+                last_progress_row = row_counter;
+                last_progress_at = now;
+                last_t_lookups = t_lookups;
+                last_t_read_id_title = t_read_id_title;
+                last_t_read_props = t_read_props;
+                last_t_push_row = t_push_row;
+                last_t_add_node = t_add_node;
+            }
         }
     } else if !writers.is_empty() {
         // Streaming primitives only target disk sources. In-memory /
@@ -757,6 +883,21 @@ pub fn save_subset_streaming_disk(
         );
     }
     log_phase("node walk (push rows + add_node)", phase_node_walk);
+    if timing_enabled {
+        let t_read_source = t_read_id_title + t_read_props;
+        eprintln!(
+            "save_subset_streaming_disk:   node walk sub-phases ({} rows): \
+             lookups={:.3}s, read_source={:.3}s (id+title={:.3}s, props={:.3}s), \
+             push_row={:.3}s, add_node={:.3}s",
+            row_counter,
+            t_lookups.as_secs_f64(),
+            t_read_source.as_secs_f64(),
+            t_read_id_title.as_secs_f64(),
+            t_read_props.as_secs_f64(),
+            t_push_row.as_secs_f64(),
+            t_add_node.as_secs_f64(),
+        );
+    }
     let phase_finalize = Instant::now();
 
     // 5. Finalize each per-type writer: flush BufWriters, mmap the

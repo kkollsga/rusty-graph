@@ -1089,6 +1089,64 @@ impl ColumnStore {
         self.id_column.is_some() || self.title_column.is_some() || self.mmap_store.is_some()
     }
 
+    /// Borrowed view of the id column. Delegates to the underlying
+    /// `MmapColumnStore` when present (the disk-graph case used by
+    /// `save_subset_streaming_disk`); returns `None` otherwise.
+    #[inline]
+    pub fn id_borrowed(&self, row_id: u32) -> Option<crate::datatypes::values::BorrowedValue<'_>> {
+        self.mmap_store.as_ref()?.id_borrowed(row_id)
+    }
+
+    /// Borrowed view of the title column. See [`id_borrowed`].
+    #[inline]
+    pub fn title_borrowed(&self, row_id: u32) -> Option<&str> {
+        self.mmap_store.as_ref()?.title_borrowed(row_id)
+    }
+
+    /// Allocation-free property visitor. Used by
+    /// `save_subset_streaming_disk` to skip the per-row
+    /// `Vec<(InternedKey, Value)>` and `Value::String` clones that
+    /// dominated v3's node walk on Wikidata (~298 s of 446 s).
+    /// Mmap-backed stores hit the fast path; heap-overlay stores
+    /// fall back to allocating `row_properties` (the streaming
+    /// pipeline only ever sees disk-mode sources today).
+    pub fn try_for_each_property_borrowed<F, E>(&self, row_id: u32, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(InternedKey, crate::datatypes::values::BorrowedValue<'_>) -> Result<(), E>,
+    {
+        if row_id >= self.row_count
+            || self
+                .tombstones
+                .get(row_id as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if self.columns.is_empty() {
+            if let Some(ref ms) = self.mmap_store {
+                return ms.try_for_each_property_borrowed(row_id, f);
+            }
+            return Ok(());
+        }
+        // Heap-only / overlay path: convert through `row_properties`.
+        let owned = self.row_properties(row_id);
+        for (key, val) in owned.iter() {
+            let bv = match val {
+                Value::Null => crate::datatypes::values::BorrowedValue::Null,
+                Value::Boolean(b) => crate::datatypes::values::BorrowedValue::Boolean(*b),
+                Value::Int64(v) => crate::datatypes::values::BorrowedValue::Int64(*v),
+                Value::Float64(v) => crate::datatypes::values::BorrowedValue::Float64(*v),
+                Value::UniqueId(v) => crate::datatypes::values::BorrowedValue::UniqueId(*v),
+                Value::String(s) => crate::datatypes::values::BorrowedValue::String(s.as_str()),
+                Value::DateTime(d) => crate::datatypes::values::BorrowedValue::DateTime(*d),
+                _ => continue,
+            };
+            f(*key, bv)?;
+        }
+        Ok(())
+    }
+
     /// Type tag of the id column if known: `"string"` or `"uniqueid"`
     /// for the typed cases, `"mixed"` for heterogeneous ids, or
     /// `None` if there is no id column at all. External writers

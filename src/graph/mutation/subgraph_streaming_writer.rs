@@ -31,7 +31,7 @@
 //! - Str:      `<col>.off`   + `<col>.str`  + `<col>.null`
 //! - Mixed:    heap-buffered until finalize (no streaming format)
 
-use crate::datatypes::values::Value;
+use crate::datatypes::values::{BorrowedValue, Value};
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use crate::graph::storage::column_store::{ColumnStore, TypedColumn};
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
@@ -167,6 +167,7 @@ impl TypeWriter {
     /// property values in slot order, padding null for unset slots.
     /// Non-schema keys in `props` are silently dropped — matches v1
     /// `ColumnStore::push_row` behavior.
+    #[cfg(test)]
     pub(super) fn push_row(
         &mut self,
         id: &Value,
@@ -186,6 +187,52 @@ impl TypeWriter {
         for (slot, slot_val) in slot_values.iter().enumerate() {
             let v: &Value = slot_val.unwrap_or(&Value::Null);
             self.columns[slot].push(v)?;
+        }
+
+        let row_id = self.row_count;
+        self.row_count = self
+            .row_count
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("TypeWriter: row count overflow > u32::MAX"))?;
+        Ok(row_id)
+    }
+
+    /// Allocation-free row push. Caller invokes `f(visitor)` and
+    /// for each property calls `visitor.push_property(key,
+    /// borrowed_value)`. Strings stay borrowed from the source mmap;
+    /// dest's BufWriters write `&[u8]` directly without going through
+    /// `Value::String(s.to_string())`.
+    ///
+    /// On Wikidata Articles+P50+Authors this is the lever: the v3
+    /// node walk's `read_source` was 381 s of 407 s wall time,
+    /// dominated by ~510 M `Value::String` clones inside
+    /// `MmapColumnStore::row_properties`. Borrowing eliminates those
+    /// clones entirely; only Mixed-column writes still allocate.
+    pub(super) fn push_row_borrowed<F>(
+        &mut self,
+        id: BorrowedValue<'_>,
+        title: BorrowedValue<'_>,
+        f: F,
+    ) -> io::Result<u32>
+    where
+        F: FnOnce(&mut RowVisitor<'_>) -> io::Result<()>,
+    {
+        self.id_col.push_borrowed(id)?;
+        self.title_col.push_borrowed(title)?;
+
+        let filled = {
+            let mut visitor = RowVisitor {
+                schema: &self.schema,
+                columns: &mut self.columns,
+                filled: SmallBitmap::new(self.schema.len()),
+            };
+            f(&mut visitor)?;
+            visitor.filled
+        };
+        for slot in 0..self.columns.len() {
+            if !filled.get(slot) {
+                self.columns[slot].push_borrowed(BorrowedValue::Null)?;
+            }
         }
 
         let row_id = self.row_count;
@@ -220,6 +267,85 @@ impl TypeWriter {
         // as the Arc is alive.
         let _ = self.out_dir;
         Ok(Arc::new(store))
+    }
+}
+
+/// Visitor handed to `push_row_borrowed`'s closure. Forwards each
+/// property to its schema slot's column writer and tracks which
+/// slots have been filled this row, so unfilled slots get nulls
+/// after the closure returns.
+pub(super) struct RowVisitor<'a> {
+    schema: &'a Arc<TypeSchema>,
+    columns: &'a mut Vec<ColumnWriter>,
+    filled: SmallBitmap,
+}
+
+impl<'a> RowVisitor<'a> {
+    /// Push a borrowed property into its schema slot, if any.
+    /// Non-schema keys are silently dropped.
+    pub(super) fn push_property(
+        &mut self,
+        key: InternedKey,
+        value: BorrowedValue<'_>,
+    ) -> io::Result<()> {
+        if let Some(slot) = self.schema.slot(key) {
+            let s = slot as usize;
+            if self.filled.get(s) {
+                // Defensive: each row should hit each schema slot at
+                // most once. A double-fill desyncs the column
+                // writer's row count from `self.row_count`.
+                return Err(io::Error::other(format!(
+                    "TypeWriter::push_row_borrowed: slot {} filled twice in one row",
+                    s
+                )));
+            }
+            self.columns[s].push_borrowed(value)?;
+            self.filled.set(s);
+        }
+        Ok(())
+    }
+}
+
+/// Per-row "which slots have been filled" bitmap. 64-bit inline;
+/// falls back to a `Vec<u64>` only for schemas wider than 64.
+struct SmallBitmap {
+    inline: u64,
+    overflow: Vec<u64>,
+    len: usize,
+}
+
+impl SmallBitmap {
+    fn new(len: usize) -> Self {
+        let overflow = if len > 64 {
+            vec![0u64; (len - 64).div_ceil(64)]
+        } else {
+            Vec::new()
+        };
+        Self {
+            inline: 0,
+            overflow,
+            len,
+        }
+    }
+
+    fn get(&self, idx: usize) -> bool {
+        debug_assert!(idx < self.len);
+        if idx < 64 {
+            (self.inline >> idx) & 1 == 1
+        } else {
+            let i = idx - 64;
+            (self.overflow[i / 64] >> (i % 64)) & 1 == 1
+        }
+    }
+
+    fn set(&mut self, idx: usize) {
+        debug_assert!(idx < self.len);
+        if idx < 64 {
+            self.inline |= 1u64 << idx;
+        } else {
+            let i = idx - 64;
+            self.overflow[i / 64] |= 1u64 << (i % 64);
+        }
     }
 }
 
@@ -323,6 +449,144 @@ impl ColumnWriter {
         Ok(make(data, nulls, 0, data_path, nulls_path))
     }
 
+    /// Allocation-free counterpart of [`push`]. Writes the borrowed
+    /// `value` straight to the column's `BufWriter`s — `String` goes
+    /// to `data` as `&[u8]` without ever materializing `Value::String`,
+    /// fixed types are by-value and trivially cheap.
+    fn push_borrowed(&mut self, value: BorrowedValue<'_>) -> io::Result<()> {
+        match self {
+            ColumnWriter::Int64 {
+                data, nulls, len, ..
+            } => {
+                let (v, is_null): (i64, u8) = match value {
+                    BorrowedValue::Int64(x) => (x, 0),
+                    BorrowedValue::Null => (0, 1),
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "TypeWriter::push_borrowed: expected Int64/Null, got {:?}",
+                            borrowed_kind(&other)
+                        )))
+                    }
+                };
+                data.write_all(&v.to_le_bytes())?;
+                nulls.write_all(&[is_null])?;
+                *len = len.checked_add(1).ok_or_else(row_overflow)?;
+            }
+            ColumnWriter::Float64 {
+                data, nulls, len, ..
+            } => {
+                let (v, is_null): (f64, u8) = match value {
+                    BorrowedValue::Float64(x) => (x, 0),
+                    BorrowedValue::Int64(x) => (x as f64, 0),
+                    BorrowedValue::Null => (0.0, 1),
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "TypeWriter::push_borrowed: expected Float64/Int64/Null, got {:?}",
+                            borrowed_kind(&other)
+                        )))
+                    }
+                };
+                data.write_all(&v.to_le_bytes())?;
+                nulls.write_all(&[is_null])?;
+                *len = len.checked_add(1).ok_or_else(row_overflow)?;
+            }
+            ColumnWriter::UniqueId {
+                data, nulls, len, ..
+            } => {
+                let (v, is_null): (u32, u8) = match value {
+                    BorrowedValue::UniqueId(x) => (x, 0),
+                    BorrowedValue::Null => (0, 1),
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "TypeWriter::push_borrowed: expected UniqueId/Null, got {:?}",
+                            borrowed_kind(&other)
+                        )))
+                    }
+                };
+                data.write_all(&v.to_le_bytes())?;
+                nulls.write_all(&[is_null])?;
+                *len = len.checked_add(1).ok_or_else(row_overflow)?;
+            }
+            ColumnWriter::Bool {
+                data, nulls, len, ..
+            } => {
+                let (v, is_null): (u8, u8) = match value {
+                    BorrowedValue::Boolean(b) => (b as u8, 0),
+                    BorrowedValue::Null => (0, 1),
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "TypeWriter::push_borrowed: expected Boolean/Null, got {:?}",
+                            borrowed_kind(&other)
+                        )))
+                    }
+                };
+                data.write_all(&[v])?;
+                nulls.write_all(&[is_null])?;
+                *len = len.checked_add(1).ok_or_else(row_overflow)?;
+            }
+            ColumnWriter::Date {
+                data, nulls, len, ..
+            } => {
+                let (days, is_null): (i32, u8) = match value {
+                    BorrowedValue::DateTime(d) => {
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                            .expect("1970-01-01 is a valid date");
+                        ((d - epoch).num_days() as i32, 0)
+                    }
+                    BorrowedValue::Null => (0, 1),
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "TypeWriter::push_borrowed: expected DateTime/Null, got {:?}",
+                            borrowed_kind(&other)
+                        )))
+                    }
+                };
+                data.write_all(&days.to_le_bytes())?;
+                nulls.write_all(&[is_null])?;
+                *len = len.checked_add(1).ok_or_else(row_overflow)?;
+            }
+            ColumnWriter::Str {
+                offsets,
+                data,
+                nulls,
+                cursor,
+                len,
+                ..
+            } => {
+                let (bytes, is_null): (&[u8], u8) = match value {
+                    BorrowedValue::String(s) => (s.as_bytes(), 0),
+                    BorrowedValue::Null => (&[], 1),
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "TypeWriter::push_borrowed: expected String/Null, got {:?}",
+                            borrowed_kind(&other)
+                        )))
+                    }
+                };
+                if !bytes.is_empty() {
+                    data.write_all(bytes)?;
+                    *cursor = cursor
+                        .checked_add(bytes.len() as u64)
+                        .ok_or_else(|| io::Error::other("Str data cursor overflow"))?;
+                }
+                offsets.write_all(&cursor.to_le_bytes())?;
+                nulls.write_all(&[is_null])?;
+                *len = len.checked_add(1).ok_or_else(row_overflow)?;
+            }
+            ColumnWriter::Mixed { values } => {
+                // Mixed columns can't avoid heap (the bincode payload
+                // at finalize captures owned `Value`s). Convert at
+                // push time.
+                values.push(value.to_value());
+            }
+        }
+        Ok(())
+    }
+
+    /// Owned `&Value` push variant — kept for the test harness's
+    /// `push_row` path. Production traffic goes through
+    /// [`push_borrowed`].
+    #[cfg(test)]
     fn push(&mut self, value: &Value) -> io::Result<()> {
         match self {
             ColumnWriter::Int64 {
@@ -592,9 +856,22 @@ fn row_overflow() -> io::Error {
     io::Error::other("TypeWriter column row count overflow > u32::MAX")
 }
 
+fn borrowed_kind(v: &BorrowedValue<'_>) -> &'static str {
+    match v {
+        BorrowedValue::Null => "Null",
+        BorrowedValue::Boolean(_) => "Boolean",
+        BorrowedValue::Int64(_) => "Int64",
+        BorrowedValue::Float64(_) => "Float64",
+        BorrowedValue::UniqueId(_) => "UniqueId",
+        BorrowedValue::String(_) => "String",
+        BorrowedValue::DateTime(_) => "DateTime",
+    }
+}
+
 /// Short identifier for a Value's variant, used in type-mismatch
 /// errors. We don't depend on `Value::Debug` because some variants
 /// would print large payloads.
+#[cfg(test)]
 fn value_kind(v: &Value) -> &'static str {
     match v {
         Value::Null => "Null",

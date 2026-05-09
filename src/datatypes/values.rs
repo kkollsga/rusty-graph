@@ -67,6 +67,44 @@ pub enum Value {
     },
 }
 
+/// Zero-copy view of a [`Value`] for hot read paths that don't need
+/// owned heap data. Strings borrow from the source buffer (e.g. an
+/// mmap region) instead of cloning into a `String`.
+///
+/// Used by `save_subset_streaming_disk` to avoid the
+/// `Value::String(s.to_string())` clone per property × per row, which
+/// dominated the v3 node walk wall time on Wikidata (298 s out of
+/// 446 s — heap pressure from ~510 M `String` allocations).
+///
+/// `to_value()` materializes an owned `Value` when one is needed
+/// (e.g. for the heterogeneous Mixed column path).
+#[derive(Clone, Copy, Debug)]
+pub enum BorrowedValue<'a> {
+    Null,
+    Boolean(bool),
+    Int64(i64),
+    Float64(f64),
+    UniqueId(u32),
+    String(&'a str),
+    DateTime(NaiveDate),
+}
+
+impl<'a> BorrowedValue<'a> {
+    /// Materialize into an owned [`Value`]. Allocates for `String`.
+    /// Takes `self` by value since `BorrowedValue` is `Copy`.
+    pub fn to_value(self) -> Value {
+        match self {
+            BorrowedValue::Null => Value::Null,
+            BorrowedValue::Boolean(b) => Value::Boolean(b),
+            BorrowedValue::Int64(v) => Value::Int64(v),
+            BorrowedValue::Float64(v) => Value::Float64(v),
+            BorrowedValue::UniqueId(v) => Value::UniqueId(v),
+            BorrowedValue::String(s) => Value::String(s.to_string()),
+            BorrowedValue::DateTime(d) => Value::DateTime(d),
+        }
+    }
+}
+
 // Implement Eq for Value
 impl Eq for Value {
     // We need this empty impl because we already have PartialEq

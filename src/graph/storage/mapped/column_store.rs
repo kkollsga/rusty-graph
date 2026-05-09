@@ -157,6 +157,14 @@ impl MmapColumnStore {
     ///
     /// Offset convention: `offsets[row]` is the cumulative end byte.
     /// Row 0 starts at byte 0; row i>0 starts at `offsets[i-1]`.
+    ///
+    /// SAFETY: Strings on disk were always written through
+    /// `Value::String` / `String::as_bytes()`, which are valid UTF-8
+    /// by Rust's core invariant. We use `from_utf8_unchecked` to
+    /// skip the byte-by-byte validator that walks every character.
+    /// On the Wikidata streaming workload this matters: at 30
+    /// strings × 17 M rows × ~50 bytes the validator was processing
+    /// ~25 GB of data per save, far more than the actual work.
     #[inline]
     fn read_str(&self, data_region: &Region, offsets_region: &Region, row: usize) -> &str {
         let end = self.read_u64(offsets_region, row) as usize;
@@ -166,7 +174,9 @@ impl MmapColumnStore {
             0
         };
         let bytes = &self.mmap[data_region.offset + start..data_region.offset + end];
-        std::str::from_utf8(bytes).unwrap_or("")
+        // SAFETY: see method-level note. Values written via
+        // `String::as_bytes()` are guaranteed valid UTF-8.
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 }
 
@@ -295,6 +305,218 @@ impl MmapColumnStore {
             }
             ColType::Str => unreachable!("string columns use ColRef::Str"),
         }
+    }
+
+    /// Borrowed view of the id column for a given row, without
+    /// allocating an owned `Value::String`. The returned `&str`
+    /// (when `Some(BorrowedValue::String)`) is tied to `self`'s mmap.
+    ///
+    /// Streaming-write callers use this to push id bytes directly into
+    /// dest column files without the per-row `to_string()` clone that
+    /// `get_id` does. On Wikidata that clone was ~5 µs/row × 17 M rows
+    /// = ~85 s of wall time.
+    pub fn id_borrowed(&self, row_id: u32) -> Option<crate::datatypes::values::BorrowedValue<'_>> {
+        use crate::datatypes::values::BorrowedValue;
+        if row_id >= self.row_count {
+            return None;
+        }
+        let row = row_id as usize;
+        if self.id_is_string {
+            let sc = self.id_str.as_ref()?;
+            if self.read_null(&sc.nulls, row) {
+                return None;
+            }
+            Some(BorrowedValue::String(self.read_str(
+                &sc.data,
+                &sc.offsets,
+                row,
+            )))
+        } else {
+            let fc = self.id_fixed.as_ref()?;
+            if self.read_null(&fc.nulls, row) {
+                return None;
+            }
+            Some(BorrowedValue::UniqueId(self.read_u32(&fc.data, row)))
+        }
+    }
+
+    /// Borrowed view of the title column for a given row. Title is
+    /// always a string column in `MmapColumnStore`, so this returns
+    /// `Option<&str>` rather than `BorrowedValue<'_>`.
+    pub fn title_borrowed(&self, row_id: u32) -> Option<&str> {
+        if row_id >= self.row_count {
+            return None;
+        }
+        let row = row_id as usize;
+        if self.title.nulls.len == 0 && self.title.data.len == 0 {
+            return None;
+        }
+        if self.read_null(&self.title.nulls, row) {
+            return None;
+        }
+        Some(self.read_str(&self.title.data, &self.title.offsets, row))
+    }
+
+    /// Allocation-free counterpart of [`row_properties`]: visits each
+    /// non-null `(InternedKey, BorrowedValue<'_>)` pair without
+    /// building a `Vec<(InternedKey, Value)>` and without the
+    /// `String::to_string()` heap clone for every string property.
+    /// Stops at the first `Err` returned by `f`.
+    ///
+    /// On Wikidata Articles+P50+Authors, the allocating `row_properties`
+    /// path was 298 s out of 446 s of node walk (67%) — almost
+    /// entirely heap pressure from ~510 M `Value::String` clones. The
+    /// borrowed visitor pushes `&str` straight to the dest column
+    /// writer and drops back to allocation only when the writer
+    /// genuinely needs a `Value` (Mixed columns / NodeData).
+    pub fn try_for_each_property_borrowed<F, E>(&self, row_id: u32, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(InternedKey, crate::datatypes::values::BorrowedValue<'_>) -> Result<(), E>,
+    {
+        use crate::datatypes::values::BorrowedValue;
+        if row_id >= self.row_count {
+            return Ok(());
+        }
+        let row = row_id as usize;
+
+        for (&key, col_ref) in &self.col_map {
+            match col_ref {
+                ColRef::Fixed(idx) => {
+                    let fc = &self.fixed_cols[*idx];
+                    if !self.read_null(&fc.nulls, row) {
+                        let bv = match fc.col_type {
+                            ColType::Int64 => BorrowedValue::Int64(self.read_i64(&fc.data, row)),
+                            ColType::Float64 => {
+                                BorrowedValue::Float64(self.read_f64(&fc.data, row))
+                            }
+                            ColType::UniqueId => {
+                                BorrowedValue::UniqueId(self.read_u32(&fc.data, row))
+                            }
+                            ColType::Bool => {
+                                BorrowedValue::Boolean(self.read_u8(&fc.data, row) != 0)
+                            }
+                            ColType::Date => {
+                                let days = self.read_i32(&fc.data, row);
+                                BorrowedValue::DateTime(
+                                    UNIX_EPOCH_DATE + chrono::Duration::days(days as i64),
+                                )
+                            }
+                            ColType::Str => unreachable!("string columns use ColRef::Str"),
+                        };
+                        f(key, bv)?;
+                    }
+                }
+                ColRef::Str(idx) => {
+                    let sc = &self.str_cols[*idx];
+                    if !self.read_null(&sc.nulls, row) {
+                        let s = self.read_str(&sc.data, &sc.offsets, row);
+                        f(key, BorrowedValue::String(s))?;
+                    }
+                }
+            }
+        }
+        // Overflow bag — decode bincode entries IN PLACE and yield
+        // `BorrowedValue` slices into the mmap blob. The naïve path
+        // would call `overflow_row_properties` which allocates a
+        // `Vec<(InternedKey, Value)>` + a `String` per entry; on
+        // Wikidata articles ~20+ properties per row land in
+        // overflow, so that's ~250 M `String` allocations across the
+        // node walk. The custom decoder below skips them entirely:
+        // strings borrow the raw mmap bytes via
+        // `from_utf8_unchecked` (overflow blobs were written from
+        // `String::as_bytes`, so guaranteed valid UTF-8).
+        if let Some(blob) = self.overflow_blob(row_id) {
+            if blob.len() >= 2 {
+                let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
+                let mut pos = 2;
+                for _ in 0..num_entries {
+                    if pos + 9 > blob.len() {
+                        break;
+                    }
+                    let entry_key =
+                        u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
+                    let type_tag = blob[pos + 8];
+                    pos += 9;
+                    let key = InternedKey::from_u64(entry_key);
+                    match type_tag {
+                        0 => {
+                            f(key, BorrowedValue::Null)?;
+                        }
+                        1 => {
+                            if pos + 8 > blob.len() {
+                                break;
+                            }
+                            let v =
+                                i64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
+                            pos += 8;
+                            f(key, BorrowedValue::Int64(v))?;
+                        }
+                        2 => {
+                            if pos + 8 > blob.len() {
+                                break;
+                            }
+                            let v =
+                                f64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
+                            pos += 8;
+                            f(key, BorrowedValue::Float64(v))?;
+                        }
+                        3 => {
+                            if pos + 4 > blob.len() {
+                                break;
+                            }
+                            let v =
+                                u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]));
+                            pos += 4;
+                            f(key, BorrowedValue::UniqueId(v))?;
+                        }
+                        4 => {
+                            if pos + 1 > blob.len() {
+                                break;
+                            }
+                            let v = blob[pos] != 0;
+                            pos += 1;
+                            f(key, BorrowedValue::Boolean(v))?;
+                        }
+                        5 => {
+                            if pos + 4 > blob.len() {
+                                break;
+                            }
+                            let days =
+                                i32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]));
+                            pos += 4;
+                            f(
+                                key,
+                                BorrowedValue::DateTime(
+                                    UNIX_EPOCH_DATE + chrono::Duration::days(days as i64),
+                                ),
+                            )?;
+                        }
+                        6 => {
+                            if pos + 4 > blob.len() {
+                                break;
+                            }
+                            let slen =
+                                u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]))
+                                    as usize;
+                            pos += 4;
+                            if pos + slen > blob.len() {
+                                break;
+                            }
+                            // SAFETY: overflow strings were written via
+                            // `String::as_bytes()` (overflow_serializer in
+                            // ntriples build / save paths), so the bytes
+                            // are valid UTF-8 by construction.
+                            let s =
+                                unsafe { std::str::from_utf8_unchecked(&blob[pos..pos + slen]) };
+                            pos += slen;
+                            f(key, BorrowedValue::String(s))?;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Iterate over all non-null properties for a row.
