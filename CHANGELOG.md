@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite-mcp-server` is now a Rust-native single binary**, built
+  on top of the `mcp-server` framework (rmcp + manifest-driven tool
+  registration) shipped from the sibling `mcp-methods` workspace.
+  The binary lives at `crates/kglite-mcp-server/`. Full mode coverage
+  matches the previous Python server: `--graph X.kgl`, `--workspace
+  DIR`, `--watch DIR`, `--source-root DIR`, plus bare framework. The
+  manifest YAML schema is unchanged, so any `<basename>_mcp.yaml`
+  written for the Python server boots unchanged on the new binary.
+- Workspace mode auto-builds a code-tree graph for each cloned repo
+  via a `PostActivateHook` calling `kglite.code_tree.build()`; watch
+  mode re-runs the same path on debounced file changes; embedder
+  factories declared in the manifest are bound to the active graph
+  via `graph.set_embedder()`.
+
+### Removed
+
+- **`kglite/mcp_server/` Python package + the `kglite[mcp]` extras
+  dependency group + the `kglite-mcp-server` console script entry +
+  `examples/mcp_server.py` + 11 `tests/test_mcp_*.py` modules**
+  (~4,150 LoC). All replaced by the Rust binary above. The manifest
+  schema and tool surface are 1:1 compatible — agents see the same
+  `cypher_query` / `graph_overview` / `save_graph` / `read_source` /
+  `grep` / `list_source` / `github_issues` / `github_api` /
+  `repo_management` / `ping` tools as before.
+- `mcp` optional-dependency group removed from `pyproject.toml`. To
+  install the new server: `cargo install --path crates/kglite-mcp-server`
+  from a kglite source clone.
+
+### Changed
+
+- `kglite` is now a Cargo workspace (root crate + `crates/kglite-mcp-server`).
+  The Python wheel build via maturin is unchanged; a new
+  `python-extension` Cargo feature gates `pyo3/extension-module` so
+  `cargo build` can share the rlib with the new sibling binary.
+- `CLAUDE.md` "When changing a `#[pymethods]` function" checklist
+  step 4 now points at `crates/kglite-mcp-server/src/tools.rs`
+  (instead of the deleted `examples/mcp_server.py`).
+
 ## [0.9.13] — 2026-05-09
 
 ### Added

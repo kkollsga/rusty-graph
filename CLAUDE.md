@@ -99,7 +99,7 @@ Before starting any performance-related code changes:
 1. `src/graph/pyapi/kg_methods.rs` (or domain file under `pyapi/`) — implementation
 2. `kglite/__init__.pyi` — type stub + docstring
 3. `src/graph/introspection/*.rs` — `describe()` output (if agent-facing)
-4. `examples/mcp_server.py` — MCP tool (if agent-facing)
+4. `crates/kglite-mcp-server/src/tools.rs` — MCP tool wrapper (if agent-facing)
 5. `CHANGELOG.md` — `[Unreleased]` section
 
 ## Documentation

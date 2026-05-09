@@ -38,10 +38,12 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
-mcp = ["mcp>=1.0", "mcp-methods>=0.3.19", "PyYAML>=6.0"]
 
-[project.scripts]
-kglite-mcp-server = "kglite.mcp_server:main"
+# Note: the `kglite-mcp-server` binary is now a Rust-native single
+# executable (crates/kglite-mcp-server). Build via `cargo install
+# --path crates/kglite-mcp-server` from the source repo, or use the
+# pre-built binary distributed with the wheel once distribution is
+# wired up.
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"

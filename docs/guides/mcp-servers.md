@@ -6,23 +6,30 @@
 > the agent gets Cypher access to your data through ordinary tool
 > calls — no API to learn, no infrastructure to manage.
 
-KGLite ships the server as a console script. For most graphs the
-out-of-the-box `kglite-mcp-server` is everything you need. For
-project-specific tools — semantic search, source-file access,
+KGLite ships `kglite-mcp-server` as a single Rust binary built on the
+[mcp-methods] framework (rmcp + manifest-driven tool registration).
+For most graphs the out-of-the-box server is everything you need.
+For project-specific tools — semantic search, source-file access,
 parameterised Cypher lookups, custom Python hooks — drop a YAML
 manifest next to your graph and the bundled server picks it up
 automatically. **No fork required for most customisation.**
 
+[mcp-methods]: https://github.com/kkollsga/mcp-methods
+
 ## Quick Start
 
-### 1. Install with the MCP extra
+### 1. Build the binary
 
 ```bash
-pip install "kglite[mcp]"
+git clone https://github.com/kkollsga/kglite
+cargo install --path kglite/crates/kglite-mcp-server
 ```
 
-This pulls in `mcp`, `mcp-methods`, and `PyYAML` alongside KGLite and
-registers the `kglite-mcp-server` console script.
+CPython is embedded into the binary via PyO3 — `python:` tools and
+custom embedder factories work out of the box. `kglite` itself must
+be available on `PYTHONPATH` (`pip install kglite` covers this) so
+the binary can call into it for `cypher_query` / `graph_overview` /
+`save_graph` dispatch.
 
 ### 2. Point it at a graph file
 
@@ -335,140 +342,73 @@ Tools registered (visible in any MCP-aware agent):
 
 That's six tools from ~30 lines of YAML and ~10 lines of Python.
 
-## Forking the bundled server
+## Building a downstream binary
 
-When the manifest tiers aren't enough — you need custom CSV-export
-logic, FastMCP middleware, conditional tool registration, or anything
-that touches the server lifecycle — fork
-[`examples/mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py).
-That file is a thin wrapper around `kglite.mcp_server.main`; replace
-the body with your own `FastMCP` setup to get full control.
+When the manifest tiers aren't enough — you need conditional tool
+registration based on graph schema, custom transports, or tools that
+need to share state with the kglite-specific dispatch — build a
+*downstream binary* on top of the [`mcp-server`][mcp-server-crate]
+framework. `kglite-mcp-server` itself is exactly that: a 514-LoC Rust
+crate that registers `cypher_query` / `graph_overview` / `save_graph`
+on top of the framework's source / GitHub / python-tool surface.
 
-When deciding between manifest vs fork:
+[mcp-server-crate]: https://github.com/kkollsga/mcp-methods/tree/main/crates/mcp-server
 
-| Need | Manifest | Fork |
+The shape:
+
+```rust
+use mcp_server::{McpServer, ServerOptions, apply_python_extensions};
+use rmcp::handler::server::router::tool::ToolRoute;
+
+let options = ServerOptions::from_manifest(manifest.as_ref(), "My Server")
+    .with_static_source_roots(vec!["/path/to/data".into()]);
+let mut server = McpServer::new(options);
+
+// Register your domain tools dynamically:
+server.tool_router_mut().add_route(ToolRoute::new_dyn(
+    Tool::new("my_tool", "Description", schema),
+    move |ctx| Box::pin(async move { /* … */ }),
+));
+
+server.serve(rmcp::transport::stdio()).await?;
+```
+
+Adding a new tool to `kglite-mcp-server` itself is a single
+`make_route()` call in `crates/kglite-mcp-server/src/tools.rs` (~5
+lines). When deciding between manifest vs downstream binary:
+
+| Need | Manifest | Downstream binary |
 |---|---|---|
 | Read-only tools (Cypher templates, source access) | ✅ | overkill |
 | Custom Python tool logic | ✅ (`python:` tier) | works too |
 | Tool registration conditional on graph schema | ⚠️ no | ✅ |
-| Custom MCP middleware / hooks | ❌ | ✅ |
+| Custom rmcp transports / middleware | ❌ | ✅ |
 | Replacing `cypher_query` / `graph_overview` | ❌ | ✅ |
-| FastMCP transport other than stdio | ❌ | ✅ |
-| Cypher tool returning >15 rows / >2k chars inline | ❌ (manifest tier caps) | ✅ |
-| `FORMAT CSV` export from a manifest tool | ❌ (use bundled `cypher_query`) | ✅ |
 
-Most projects never need to fork.
+Most projects never need a downstream binary.
 
-### Minimal fork template
+## Built-in patterns
 
-```python
-#!/usr/bin/env python3
-"""MCP server exposing a KGLite knowledge graph."""
-
-import kglite
-from mcp.server.fastmcp import FastMCP
-
-graph = kglite.load("my_graph.kgl")
-schema = graph.schema()
-
-mcp = FastMCP(
-    "my-graph",
-    instructions=(
-        f"Knowledge graph ({schema['node_count']} nodes, {schema['edge_count']} edges). "
-        "Call graph_overview() first, then cypher_query() to explore."
-    ),
-)
-
-@mcp.tool()
-def graph_overview(
-    types: list[str] | None = None,
-    connections: bool | list[str] | None = None,
-    cypher: bool | list[str] | None = None,
-) -> str:
-    """Get graph schema, connection details, or Cypher language reference."""
-    return graph.describe(types=types, connections=connections, cypher=cypher)
-
-@mcp.tool()
-def cypher_query(query: str) -> str:
-    """Run a Cypher query. Append FORMAT CSV for full export."""
-    try:
-        result = graph.cypher(query)
-        if isinstance(result, str):
-            return result
-        if len(result) == 0:
-            return "No results."
-        rows = [str(row) for row in result[:15]]
-        header = f"{len(result)} row(s)"
-        if len(result) > 15:
-            header += " (showing first 15)"
-        return header + ":\n" + "\n".join(rows)
-    except Exception as e:
-        return f"Cypher error: {e}"
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
-```
-
-## Patterns for forks
-
-### FORMAT CSV export
+### `FORMAT CSV` export
 
 When agents need full result sets (not just 15 rows), they append
-`FORMAT CSV` to the query. KGLite returns a CSV string directly from
-Rust. The bundled server saves it to a temp file and serves it over
-a localhost HTTP server with CORS:
+`FORMAT CSV` to the query. The Rust binary saves it to a temp file
+and serves it over a localhost HTTP server with CORS — agents can
+generate HTML artifacts that `fetch()` the CSV at runtime instead
+of hardcoding thousands of rows into the artifact source.
 
-```python
-from datetime import datetime
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-import threading
+### Mutable graphs
 
-TEMP_DIR = Path("./temp")
-_file_server_port = None
+`save_graph` is built in: when the manifest sets `builtins.save_graph: true`
+(single-graph mode), the tool registers automatically and persists
+post-mutation graph state to the source `.kgl` path.
 
-def _ensure_file_server():
-    global _file_server_port
-    if _file_server_port is not None:
-        return _file_server_port
-    TEMP_DIR.mkdir(exist_ok=True)
+### Custom embedders
 
-    class CORSHandler(SimpleHTTPRequestHandler):
-        def __init__(self, *a, **kw):
-            super().__init__(*a, directory=str(TEMP_DIR), **kw)
-        def end_headers(self):
-            self.send_header("Access-Control-Allow-Origin", "*")
-            super().end_headers()
-
-    server = HTTPServer(("127.0.0.1", 0), CORSHandler)
-    _file_server_port = server.server_address[1]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return _file_server_port
-```
-
-The CORS header lets agents generate HTML artifacts that fetch the
-CSV at runtime via `fetch()`, rather than hardcoding thousands of
-rows into the artifact source.
-
-### Adding semantic search
-
-```python
-from sentence_transformers import SentenceTransformer
-
-class Embedder:
-    def __init__(self, model_name="all-MiniLM-L6-v2"):
-        self._model = SentenceTransformer(model_name)
-        self.dimension = self._model.get_sentence_embedding_dimension()
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        return self._model.encode(texts, show_progress_bar=False).tolist()
-
-    def load(self) -> None: pass
-    def unload(self) -> None: pass
-
-graph.set_embedder(Embedder())
-```
-
-The agent can then write queries like:
+The manifest's `embedder: { module, class, kwargs }` block — gated
+by `trust.allow_embedder: true` + `--trust-tools` — instantiates a
+user-supplied class and binds it to the active graph via
+`graph.set_embedder()`. The agent can then write queries like:
 
 ```cypher
 MATCH (a:Article)
@@ -477,44 +417,16 @@ RETURN a.title, text_score(a, 'summary', 'renewable energy') AS score
 ORDER BY score DESC LIMIT 10
 ```
 
-For production servers, implement `load()` / `unload()` with a
-cooldown timer. See [Semantic Search](semantic-search.md).
-
-### Mutable graphs
-
-If agents need to modify the graph (CREATE, SET, DELETE, MERGE), add
-a `save_graph` tool — without it, mutations live only in memory:
-
-```python
-@mcp.tool()
-def save_graph() -> str:
-    """Save the current graph state to disk."""
-    try:
-        graph.save(str(graph_path))
-        s = graph.schema()
-        return f"Saved ({s['node_count']} nodes, {s['edge_count']} edges)."
-    except Exception as e:
-        return f"Save failed: {e}"
-```
+See [Semantic Search](semantic-search.md) for the embedder protocol.
 
 ### Security
 
-**Read-only mode** rejects mutations at the Cypher level:
-
-```python
-graph.read_only(True)
-```
-
-**Path traversal** — when accepting file paths from agents, always
-validate against an allowed root. (The bundled `read_source` /
-`grep` / `list_source` tools already do this for the configured
-`source_root`.)
-
-```python
-path = (allowed_root / user_path).resolve()
-if not path.is_relative_to(allowed_root):
-    return "Access denied."
-```
+- **Read-only mode** rejects mutations at the Cypher level — set via
+  `graph.read_only(True)` before binding to the server, or use
+  single-graph mode with `builtins.save_graph: false` (the default).
+- **Path traversal** is blocked by the framework's source tools: the
+  bundled `read_source` / `grep` / `list_source` canonicalise every
+  path against the configured `source_root` before any I/O.
 
 **Query parameters** — when passing user input to Cypher, use
 `params` to prevent injection:

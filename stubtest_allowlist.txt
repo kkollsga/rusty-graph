@@ -47,10 +47,3 @@ kglite.datasets.sodir.wrapper.KnowledgeGraph.describe
 # attribute under stubtest. Internal-only re-export, not part of the API.
 kglite.datasets.sodir.wrapper.Any
 kglite.datasets.sodir.wrapper.Any.__new__
-kglite.mcp_server.core_tools.Any
-kglite.mcp_server.core_tools.Any.__new__
-kglite.mcp_server.source_access.Any
-kglite.mcp_server.source_access.Any.__new__
-kglite.mcp_server.workspace.Any
-kglite.mcp_server.workspace.Any.__new__
-
