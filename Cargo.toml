@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/kglite-mcp-server"]
+resolver = "2"
+
 [package]
 name = "kglite"
 version = "0.9.13"
@@ -7,6 +11,14 @@ description = "A high-performance graph database with Python bindings written in
 readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
 license = "MIT"
+
+# `python-extension` toggles pyo3's extension-module feature so the
+# wheel build (via maturin) and the kglite-mcp-server binary build
+# (via plain cargo) can share the same kglite rlib. Maturin is wired
+# to enable it; cargo build leaves it off.
+[features]
+default = []
+python-extension = ["pyo3/extension-module"]
 
 [lib]
 name = "kglite"

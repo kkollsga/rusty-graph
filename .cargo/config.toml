@@ -1,0 +1,11 @@
+# Embed an rpath for libpython3.12 so kglite-mcp-server (and any
+# tests that link the rlib) can find it at runtime. Mirrors the
+# config in mcp-methods. Development-time hack; release distribution
+# should bundle libpython next to the binary or static-link via
+# `python-static`.
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/opt/miniconda3/lib"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/opt/miniconda3/lib"]

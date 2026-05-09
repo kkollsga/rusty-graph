@@ -54,7 +54,7 @@ Issues = "https://github.com/kkollsga/kglite/issues"
 # extension-module must be added via maturin features (not Cargo.toml default)
 # so `cargo test` can still link. abi3-py310 is in Cargo.toml since it affects
 # symbol visibility even outside maturin builds.
-features = ["pyo3/extension-module"]
+features = ["python-extension"]
 
 [tool.ruff]
 line-length = 120
