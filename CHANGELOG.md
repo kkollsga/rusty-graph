@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12] — 2026-05-09
+
 ### Added
 
 - **`KnowledgeGraph.save_subset(path)` on the fluent selection chain.**
@@ -15,10 +17,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kglite.load(path)` (or `load(path, storage='disk')` for disk mode).
   All edges between selected nodes are included; node and edge
   properties round-trip byte-for-byte. Works on any source storage
-  mode. v1 is correct but in-memory-bounded; bounded-memory streaming
-  for Wikidata-scale extracts ships in a follow-up that consumes the
-  Pass A / RankIndex / kept_edges.tmp primitives already landed in
-  `src/graph/mutation/subgraph_streaming.rs`.
+  mode.
+- **`_save_subset_filtered_by_edge_type(path, [edge_types])` —
+  disk-to-disk streaming subgraph filter** (Wikidata-scale path).
+  Single-pass over the source's `edge_endpoints.bin` builds a kept-
+  nodes bitset; a per-type `TypeWriter` then streams kept rows
+  directly to dest column files via `BufWriter`s — no intermediate
+  in-memory `ColumnStore`, no chunk-and-merge step. End-to-end on the
+  full Wikidata graph (124M nodes / 861M edges, P50 + endpoints)
+  produces a 17,364,495-node / 35,448,243-edge subgraph in 349s wall
+  time (down from 550s on the v1 in-memory path). Working set stays
+  in the hundreds of MB regardless of subset size — peak RSS is
+  largely soft mmap pages.
+- **`BorrowedValue<'a>` zero-copy view of `Value`** in
+  `datatypes::values`. `String(&'a str)` borrows from the source
+  buffer (typically an mmap region) instead of cloning into a
+  `String`. Used by the streaming subgraph filter; available as a
+  general read-path primitive. Convert with `to_value()`.
+- **`MmapColumnStore::id_borrowed` / `title_borrowed` /
+  `try_for_each_property_borrowed`** — allocation-free reads. The
+  property visitor decodes overflow-bag bincode entries in place
+  and yields `BorrowedValue::String` views into the mmap; previously
+  every overflow row allocated a `Vec<(InternedKey, Value)>` plus a
+  `String` per entry. ColumnStore wrapper delegates to mmap_store
+  for disk graphs.
+
+### Changed
+
+- **`MmapColumnStore::read_str` skips UTF-8 validation.** Source
+  bytes were always written through `String::as_bytes()` (Rust's
+  UTF-8 invariant), so the `from_utf8` validator was walking ~25 GB
+  of source data per Wikidata save for nothing. `from_utf8_unchecked`
+  is now used. Saves ~70 s of wall time on the streaming subgraph
+  filter; no observable behavior change.
+- **Streaming subgraph filter uses borrowed-value writes
+  end-to-end.** `TypeWriter::push_row_borrowed` accepts
+  `BorrowedValue<'_>` and writes `&[u8]` straight to per-column
+  `BufWriter`s without ever materializing `Value::String`. Combined
+  with the read-side borrowing above, the Wikidata save phase drops
+  from 550s to 349s (-37%). Node-walk sub-phase: 446s → 241s
+  (-46%); the `props` portion 330s → 145s (-56%); `id+title` 87s →
+  17s (-80%). Output is byte-identical to the prior path —
+  `tests/test_subgraph_streaming.py`'s round-trip equality suite
+  (14 cases) stays green.
+- **Sub-phase timers in `save_subset_streaming_disk` gated on
+  `KGLITE_STREAMING_TIMING=1`.** Off by default (zero overhead);
+  when enabled, prints per-phase wall times plus per-million-row
+  progress so a future optimizer can iterate in 30-second chunks
+  rather than 10-minute round-trips. Useful for finding bottlenecks
+  without committing to a full bench cycle.
 
 ### Changed
 
