@@ -218,8 +218,9 @@ def session_detail(session_id: str) -> str:
     return json.dumps(record, indent=2) if record else f"Session {session_id} not found."
 ```
 
-The function's signature, type hints, and docstring are picked up by
-FastMCP's introspection — no synthesis layer.
+The function's signature, type hints, and docstring are introspected
+via Python's `inspect.signature()` and converted to a JSON Schema for
+the MCP wire format — no synthesis layer.
 
 **Loading requires both signals**:
 
@@ -241,7 +242,7 @@ File paths resolve relative to the manifest, same contract as
 ### Top-level fields
 
 ```yaml
-name: My Graph                        # FastMCP server display name (optional)
+name: My Graph                        # Server display name (optional)
 instructions: |                       # Replaces default instructions (optional)
   Custom prompt shown to the agent at server-info time.
 source_root: ./data                   # OR source_roots: [./data, ../alt]

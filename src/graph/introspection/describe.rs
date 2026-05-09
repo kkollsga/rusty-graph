@@ -1790,10 +1790,11 @@ tools:
   </register_with_claude>
 
   <forking desc="Escape hatch — when the manifest can't express what you need">
-    Fork examples/mcp_server.py only when you need to replace the
-    bundled tools, swap the FastMCP transport, or register custom
-    middleware. For everything else (custom Cypher tools, source-file
-    access, Python hooks), the manifest path above is the answer. See
+    Build a downstream Rust binary on top of the mcp-server framework
+    (the kglite-mcp-server crate is the reference) only when you need
+    to replace bundled tools, swap the rmcp transport, or register
+    conditional tools. For everything else (custom Cypher tools,
+    source-file access, Python hooks), the manifest is the answer. See
     docs/guides/mcp-servers.md for the full reference.
   </forking>
 

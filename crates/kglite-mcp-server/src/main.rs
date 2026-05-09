@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
     }
 
     let mut server = McpServer::new(options);
-    tools::register(server.tool_router_mut(), graph_state.clone());
+    tools::register(&mut server, graph_state.clone());
 
     // Manifest python: tools + custom embedder. The framework returns
     // the embedder PyObject; we bind it to the active graph here so

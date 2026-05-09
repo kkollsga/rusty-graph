@@ -6,7 +6,6 @@
 //! sit alongside the built-in source / GitHub / python tools.
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -14,13 +13,7 @@ use mcp_server::python::json_to_py;
 use mcp_server::server::McpServer;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
-use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
-use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content, Tool};
-use rmcp::ErrorData as McpError;
 use serde::{Deserialize, Serialize};
-
-type DynFut<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 const NO_GRAPH: &str =
     "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').";
@@ -98,12 +91,19 @@ impl GraphState {
         .ok()
     }
 
-    fn read<F, R>(&self, f: F) -> Option<R>
+    /// Run a closure against the active graph if one is loaded, or
+    /// return the standard "no graph" message otherwise. This is the
+    /// state-injection contract used by every kglite tool registered
+    /// via `McpServer::register_typed_tool`.
+    fn with_active<F>(&self, f: F) -> String
     where
-        F: FnOnce(&ActiveGraph) -> R,
+        F: FnOnce(&ActiveGraph) -> String,
     {
         let guard = self.inner.read().unwrap();
-        guard.as_ref().map(f)
+        match guard.as_ref() {
+            Some(active) => f(active),
+            None => NO_GRAPH.to_string(),
+        }
     }
 }
 
@@ -130,77 +130,29 @@ struct OverviewArgs {
 struct SaveGraphArgs {}
 
 /// Register cypher_query / graph_overview / save_graph on the supplied
-/// router. State is shared by Arc, so a graph swap on `state` lands
+/// server. State is shared by Arc, so a graph swap on `state` lands
 /// instantly on the next tool call.
-pub fn register(router: &mut ToolRouter<McpServer>, state: GraphState) {
-    router.add_route(make_route(
+pub fn register(server: &mut McpServer, state: GraphState) {
+    let s = state.clone();
+    server.register_typed_tool::<CypherArgs, _>(
         "cypher_query",
         "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
          inline; append FORMAT CSV to export full results to a CSV string.",
-        schema::<CypherArgs>(),
-        state.clone(),
-        |g, args: CypherArgs| run_cypher(g, &args.query),
-    ));
-    router.add_route(make_route(
+        move |args| s.with_active(|g| run_cypher(g, &args.query)),
+    );
+    let s = state.clone();
+    server.register_typed_tool::<OverviewArgs, _>(
         "graph_overview",
         "Inspect the active graph's schema. With no args returns the inventory; pass \
          types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
-        schema::<OverviewArgs>(),
-        state.clone(),
-        |g, args: OverviewArgs| run_overview(g, &args),
-    ));
-    router.add_route(make_route(
+        move |args| s.with_active(|g| run_overview(g, &args)),
+    );
+    let s = state;
+    server.register_typed_tool::<SaveGraphArgs, _>(
         "save_graph",
         "Persist the active graph to its source .kgl file (single-graph mode only).",
-        schema::<SaveGraphArgs>(),
-        state,
-        |g, _: SaveGraphArgs| run_save(g),
-    ));
-}
-
-fn schema<T: schemars::JsonSchema>() -> serde_json::Map<String, serde_json::Value> {
-    serde_json::to_value(schemars::schema_for!(T))
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
-}
-
-fn make_route<T, F>(
-    name: &'static str,
-    description: &'static str,
-    schema: serde_json::Map<String, serde_json::Value>,
-    state: GraphState,
-    handler: F,
-) -> ToolRoute<McpServer>
-where
-    T: for<'de> Deserialize<'de> + Default + Send + Sync + 'static,
-    F: Fn(&ActiveGraph, T) -> String + Send + Sync + 'static,
-{
-    let attr = Tool::new(name, description, Arc::new(schema));
-    let handler = Arc::new(handler);
-    ToolRoute::new_dyn(attr, move |ctx: ToolCallContext<'_, McpServer>| {
-        let state = state.clone();
-        let handler = handler.clone();
-        let arguments = ctx.arguments.clone();
-        let f: DynFut<'_, Result<CallToolResult, McpError>> = Box::pin(async move {
-            let args: T = match arguments {
-                Some(map) => match serde_json::from_value(serde_json::Value::Object(map)) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        return Ok(CallToolResult::success(vec![Content::text(format!(
-                            "invalid arguments: {e}"
-                        ))]))
-                    }
-                },
-                None => T::default(),
-            };
-            let body = state
-                .read(|g| handler(g, args))
-                .unwrap_or_else(|| NO_GRAPH.to_string());
-            Ok(CallToolResult::success(vec![Content::text(body)]))
-        });
-        f
-    })
+        move |_| s.with_active(run_save),
+    );
 }
 
 fn run_cypher(graph: &ActiveGraph, query: &str) -> String {

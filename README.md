@@ -269,10 +269,14 @@ use cases above:
   — declarative CSV→graph loading via a JSON blueprint; regions,
   facilities, and sensors with lat/lon coordinates and pipeline-path
   traversal queries.
-- **[`mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)**
-  — fork template for the bundled MCP server. Reach for this only
-  when the manifest can't express what you need (custom CSV-export,
-  FastMCP middleware, replacing bundled tools).
+- **[`crates/kglite-mcp-server/`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-mcp-server)**
+  — Rust-native single-binary MCP server (built on rmcp + the
+  [mcp-methods] framework). Reach for it when the manifest doesn't
+  express what you need; the binary is the reference for layering
+  domain-specific tools on top of the generic source / GitHub /
+  python-tool surface.
+
+[mcp-methods]: https://github.com/kkollsga/mcp-methods
 
 For Wikidata- and Sodir-scale builds, see the [Public datasets](#public-datasets)
 section above — `kglite.datasets.wikidata.open(...)` and
