@@ -1089,6 +1089,32 @@ impl ColumnStore {
         self.id_column.is_some() || self.title_column.is_some() || self.mmap_store.is_some()
     }
 
+    /// Type tag of the id column if known: `"string"` or `"uniqueid"`
+    /// for the typed cases, `"mixed"` for heterogeneous ids, or
+    /// `None` if there is no id column at all. External writers
+    /// (`save_subset_streaming_disk`'s TypeWriter) use this to open a
+    /// matching column file format on the dest side.
+    pub fn id_type_str(&self) -> Option<&'static str> {
+        if let Some(ref ms) = self.mmap_store {
+            return Some(if ms.id_is_string {
+                "string"
+            } else {
+                "uniqueid"
+            });
+        }
+        self.id_column.as_ref().map(|c| c.type_tag())
+    }
+
+    /// Type tag of the title column. `MmapColumnStore`'s title is
+    /// always a string column (per its data model); otherwise we
+    /// report the in-memory `title_column`'s tag, or `None`.
+    pub fn title_type_str(&self) -> Option<&'static str> {
+        if self.mmap_store.is_some() {
+            return Some("string");
+        }
+        self.title_column.as_ref().map(|c| c.type_tag())
+    }
+
     /// Number of rows (including tombstoned).
     pub fn row_count(&self) -> u32 {
         self.row_count

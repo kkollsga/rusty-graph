@@ -650,6 +650,7 @@ dependencies = [
  "geo",
  "geojson",
  "indexmap",
+ "libc",
  "memchr",
  "memmap2",
  "mimalloc",

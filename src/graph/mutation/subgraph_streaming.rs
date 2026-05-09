@@ -582,16 +582,15 @@ pub fn save_subset_streaming_disk(
     //
     //    Per-type "row_id within store" is the push position (0, 1, 2,
     //    …); per-source-id mapping `(old_idx → dest_row_id)` is recorded
-    //    in `row_id_for_old` so step 4 can build the right NodeData.
-    // v2: per-type ChunkedColumnBuilder. Each builder buffers
-    // `chunk_size_rows` rows in a heap-backed ColumnStore, spills to
-    // mmap'd files, **drops the chunk to release file handles**, repeats.
-    // After all rows pushed, finalize() merges per-chunk files into the
-    // canonical column-store layout. This is the same chunk-and-spill
-    // shape as `csr_build::merge_sort_build` — peak heap stays bounded
-    // by `chunk_size_rows × per_row_property_bytes`, regardless of total
-    // kept-row count.
-    use crate::graph::mutation::chunked_column_builder::ChunkedColumnBuilder;
+    //    via the rank index so the edge phase below builds the right
+    //    `NodeIndex`.
+    //
+    // v3: per-type `TypeWriter` streams rows directly to the dest's
+    // final column files. No heap-backed chunk buffer, no merge step
+    // — each push appends to the pre-opened `BufWriter`s. peak heap is
+    // bounded by `(open_buf_writers × BUF_SIZE) + Mixed-column heap`.
+    // See `subgraph_streaming_writer.rs` for the writer protocol.
+    use crate::graph::mutation::subgraph_streaming_writer::TypeWriter;
 
     let scratch_root = out_path.join(".tmp_streaming");
     std::fs::create_dir_all(&scratch_root).map_err(|e| {
@@ -602,18 +601,16 @@ pub fn save_subset_streaming_disk(
         )
     })?;
 
-    // Chunk size in rows. Default 1_048_576; override via
-    // `KGLITE_SUBSET_CHUNK_ROWS` (small values force chunking in tests
-    // and bound peak heap on tight-RAM machines).
-    let chunk_size_rows: u32 = std::env::var("KGLITE_SUBSET_CHUNK_ROWS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(1_048_576);
-
-    // One builder per kept type. Lazy-create the inner ColumnStore on
-    // first push, so types with zero pushed rows leave no on-disk trace.
-    let mut builders: HashMap<String, ChunkedColumnBuilder> = HashMap::new();
+    // One writer per kept type. Open all up front: they hold the file
+    // handles for the type's column files. We need every writer alive
+    // simultaneously because the source walk visits types in arbitrary
+    // (source-id-determined) order — without all writers open, we'd
+    // either reorder source reads (defeating sequential-read patterns)
+    // or have to re-open files per push. macOS `kern.maxfilesperproc`
+    // is typically 61440 (verified via sysctl); 4500 types × ~5 files
+    // each = ~22500 fds, well under the limit. Linux defaults are at
+    // least as generous.
+    let mut writers: HashMap<String, TypeWriter> = HashMap::new();
     for type_name in kept_per_type.keys() {
         let schema = if let Some(src_store) = source.column_stores.get(type_name) {
             Arc::clone(src_store.schema())
@@ -627,21 +624,41 @@ pub fn save_subset_streaming_disk(
             .get(type_name)
             .cloned()
             .unwrap_or_default();
-        let chunk_root = scratch_root
-            .join(sanitize_type_name(type_name))
-            .join("chunks");
+        let writer_dir = scratch_root.join(sanitize_type_name(type_name));
 
-        // Wikidata-style sources have string ids (Q-codes). Pre-seeding
-        // the chunk's id_column with TypedColumn::Str avoids the lazy
-        // push_id path that creates a heap-backed Mixed column. For
-        // sources with int / mixed ids, push_id's demote-to-Mixed path
-        // catches it; the optimization is best-effort.
-        let prefer_str_id = true;
+        // Match source's id/title column types — Wikidata mixes
+        // `string` (Q-codes) and `uniqueid` ids across types, so we
+        // can't hard-code one variant. `id_type_str` / `title_type_str`
+        // return the source's stored type tag (mmap-backed or
+        // in-memory). Default to "mixed" when the source has no
+        // column store entry — TypeWriter's Mixed buffer handles
+        // anything.
+        let id_type = source
+            .column_stores
+            .get(type_name)
+            .and_then(|s| s.id_type_str())
+            .unwrap_or("mixed");
+        let title_type = source
+            .column_stores
+            .get(type_name)
+            .and_then(|s| s.title_type_str())
+            .unwrap_or("mixed");
 
-        builders.insert(
-            type_name.clone(),
-            ChunkedColumnBuilder::new(schema, meta, chunk_root, chunk_size_rows, prefer_str_id),
-        );
+        let writer = TypeWriter::new(
+            schema,
+            meta,
+            writer_dir,
+            &source.interner,
+            id_type,
+            title_type,
+        )
+        .map_err(|e| {
+            format!(
+                "save_subset_streaming_disk: TypeWriter::new {}: {}",
+                type_name, e
+            )
+        })?;
+        writers.insert(type_name.clone(), writer);
     }
 
     // 4. Single-pass node walk — bypasses `DiskGraph::node_weight` which
@@ -649,7 +666,7 @@ pub fn save_subset_streaming_disk(
     //    disk access pattern:
     //      sdg.node_slots[old_id] → (type, src_row_id)
     //      source.column_stores[type] → get_id / get_title / row_properties
-    //      builders[type].push_row(id, title, props)  ← chunks under the hood
+    //      writers[type].push_row(id, title, props)
     //      dest.graph.add_node
     let source_disk_for_nodes: Option<&DiskGraph> = match &source.graph {
         GraphBackend::Disk(dg) => Some(dg.as_ref()),
@@ -658,9 +675,9 @@ pub fn save_subset_streaming_disk(
 
     // Placeholder Arc handed to DiskGraph::add_node — it reads only
     // `row_id` from the Columnar variant and drops the Arc. Real per-
-    // type Arcs are produced by builder.finalize() and installed into
+    // type Arcs are produced by writer.finalize() and installed into
     // dest.column_stores after the loop.
-    let placeholder_arc: Option<Arc<ColumnStore>> = if builders.is_empty() {
+    let placeholder_arc: Option<Arc<ColumnStore>> = if writers.is_empty() {
         None
     } else {
         Some(Arc::new(ColumnStore::new(
@@ -686,8 +703,8 @@ pub fn save_subset_streaming_disk(
                 Some(s) => s.as_ref(),
                 None => continue,
             };
-            let builder = match builders.get_mut(type_name) {
-                Some(b) => b,
+            let writer = match writers.get_mut(type_name) {
+                Some(w) => w,
                 None => continue,
             };
 
@@ -695,8 +712,8 @@ pub fn save_subset_streaming_disk(
             let title_val = src_store.get_title(slot.row_id).unwrap_or(Value::Null);
             let props = src_store.row_properties(slot.row_id);
 
-            let dest_row_id = builder
-                .push_row(&id_val, &title_val, &props, &source.interner)
+            let dest_row_id = writer
+                .push_row(&id_val, &title_val, &props)
                 .map_err(|e| format!("save_subset_streaming_disk: push_row: {}", e))?;
 
             let new_node_data = NodeData {
@@ -710,7 +727,7 @@ pub fn save_subset_streaming_disk(
             };
             crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
         }
-    } else if !builders.is_empty() {
+    } else if !writers.is_empty() {
         // Streaming primitives only target disk sources. In-memory /
         // mapped sources route through extract_subgraph + write_graph_v3
         // earlier in the public save_subset.
@@ -719,17 +736,14 @@ pub fn save_subset_streaming_disk(
         );
     }
 
-    // 5. Finalize each per-type builder: merge chunks into the
-    //    destination's canonical column-store layout, drop chunk subdirs,
-    //    return a fresh Arc<ColumnStore> mmap-backed at final paths.
+    // 5. Finalize each per-type writer: flush BufWriters, mmap the
+    //    closed files, build TypedColumns, install Arc<ColumnStore>.
+    //    No merge step — the writers wrote directly to canonical
+    //    final files, so this is just a close+mmap.
     let mut arc_dest_stores: HashMap<String, Arc<ColumnStore>> = HashMap::new();
-    let builder_pairs: Vec<(String, ChunkedColumnBuilder)> = builders.into_iter().collect();
-    for (type_name, builder) in builder_pairs {
-        let final_dir = scratch_root
-            .join(sanitize_type_name(&type_name))
-            .join("final");
-        let store = builder
-            .finalize(&final_dir, &source.interner)
+    for (type_name, writer) in writers.into_iter() {
+        let store = writer
+            .finalize(&source.interner)
             .map_err(|e| format!("save_subset_streaming_disk: finalize {}: {}", type_name, e))?;
         arc_dest_stores.insert(type_name, store);
     }
@@ -755,10 +769,14 @@ pub fn save_subset_streaming_disk(
         // Re-evict source node_slots now that the node materialization
         // pass above touched ~17 M source slots — without an explicit
         // drop, those pages stay resident and pile on top of edge-pass
-        // page cache. Source column stores are mmap'd via MmapColumnStore
-        // which doesn't have an advise API yet; their pages are held
-        // resident through the edge phase. v2 follow-up.
+        // page cache. Apply both madvise (region hint) and fadvise (fd-
+        // level page-cache hint) for best-effort eviction across Linux
+        // and macOS. Source column stores are mmap'd via
+        // MmapColumnStore which doesn't yet have an advise API; their
+        // pages remain resident through the edge phase — that's the
+        // next bottleneck once these levers are in place.
         sdg.node_slots.advise_dontneed();
+        sdg.node_slots.fadvise_dontneed();
         let n_edges = sdg.next_edge_idx as usize;
         for edge_idx in 0..n_edges {
             let ep = sdg.edge_endpoints.get(edge_idx);
@@ -860,11 +878,28 @@ pub fn save_subset_streaming_disk(
     save_result
 }
 
-/// File-system-safe slug for a node type name. Wikidata's type names
-/// include spaces, commas, and other characters; sanitize so each type
-/// gets a clean subdir.
+/// File-system-safe, **collision-free** slug for a node type name.
+/// Wikidata's type names include spaces, commas, accents, CJK, and
+/// many other non-ASCII characters; the obvious sanitization (replace
+/// non-ASCII with `_`) collapses distinct types onto identical paths.
+/// On real Wikidata: 10 distinct single-char types (`ग`, `झ`, `色`,
+/// `藪`, ...) all sanitize to `_`, the pair `établissement public` /
+/// `Établissement public` both collide on `_tablissement_public`,
+/// `C♯` and `C♭` collide on `C_`, and `梅林` / `連合` both collide on
+/// `__`. Two such types racing through the writer's `OpenOptions::
+/// truncate(true).open(...)` would overwrite each other's files —
+/// observed as a `slice index starts at N but ends at 0` panic far
+/// downstream during `rebuild_type_indices` (the second-to-finalize
+/// type's mmap-backed offsets file gets truncated out from under the
+/// first type's `Arc<ColumnStore>`).
+///
+/// Fix: append the InternedKey u64 hash as a hex suffix. Even when
+/// the readable prefix collapses, the hash makes each type's path
+/// globally unique.
 fn sanitize_type_name(name: &str) -> String {
-    name.chars()
+    use std::fmt::Write as _;
+    let mut prefix: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
                 c
@@ -872,7 +907,10 @@ fn sanitize_type_name(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    let hash = InternedKey::from_str(name).as_u64();
+    let _ = write!(prefix, "_{:016x}", hash);
+    prefix
 }
 
 #[cfg(test)]
@@ -897,6 +935,32 @@ mod tests {
         bs.set(99);
         bs.set(500); // ignored, not panic
         assert_eq!(bs.count_ones(), 1);
+    }
+
+    /// Distinct Wikidata-observed type names that share an ASCII-prefix
+    /// shape (after non-alnum→`_` mapping) MUST sanitize to distinct
+    /// paths. Without per-type uniqueness, the writers' files race and
+    /// the second-to-finalize type truncates the first's mmap-backed
+    /// files out from under it.
+    #[test]
+    fn sanitize_type_name_is_collision_free() {
+        let groups = vec![
+            vec!["établissement public", "Établissement public"],
+            vec!["ग", "झ", "ज", "च", "त", "छ", "色", "ञ", "ट", "藪"],
+            vec!["C♯", "C♭"],
+            vec!["梅林", "連合"],
+        ];
+        for group in groups {
+            let mut sanitized: Vec<String> = group.iter().map(|n| sanitize_type_name(n)).collect();
+            sanitized.sort();
+            sanitized.dedup();
+            assert_eq!(
+                sanitized.len(),
+                group.len(),
+                "sanitize_type_name collapsed distinct types {:?}",
+                group
+            );
+        }
     }
 
     // Note: `pass_a_scan` requires a real `DiskGraph`. End-to-end tests

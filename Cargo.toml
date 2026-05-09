@@ -42,6 +42,11 @@ rayon = "1.10"
 flate2 = "1"
 zstd = "0.13"
 memmap2 = "0.9"
+# libc is already a transitive dep via memmap2; expose it directly so we
+# can call posix_fadvise / fcntl on file descriptors backing our mmaps —
+# needed by the streaming subgraph filter to actively evict source-side
+# page cache between phases.
+libc = "0.2"
 bzip2 = "0.6"
 # Pinned to git HEAD because crates.io 0.1.2 ships an older Cargo.toml
 # without the `rayon` feature flag (the feature exists on the v0.1.2 tag

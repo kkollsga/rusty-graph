@@ -245,6 +245,59 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     #[cfg(not(unix))]
     pub fn advise_dontneed(&self) {}
 
+    /// Tell the kernel the file's page-cache contents are no longer
+    /// needed via `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux, or
+    /// `fcntl(F_NOCACHE, 1)` on macOS to discourage further caching of
+    /// future reads (the closest macOS equivalent — no retroactive-
+    /// eviction primitive exists in the macOS API surface).
+    ///
+    /// This is the targeted complement to [`Self::advise_dontneed`]
+    /// (which uses `madvise` on the mmap region): the file-descriptor-
+    /// level hint reaches the page cache directly on Linux. On macOS
+    /// the call is best-effort and may have no observable impact —
+    /// recorded so future kernel improvements pick it up automatically.
+    ///
+    /// No-op for heap-backed storage and on non-Unix platforms.
+    #[cfg(target_os = "linux")]
+    pub fn fadvise_dontneed(&self) {
+        if let MmapOrVec::Mapped { file, len, .. } = self {
+            let byte_len = (*len * std::mem::size_of::<T>()) as libc::off_t;
+            if byte_len > 0 {
+                use std::os::unix::io::AsRawFd;
+                // SAFETY: file is a valid open fd; posix_fadvise has no
+                // memory-safety implications. Errors are intentionally
+                // ignored — the call is a hint.
+                unsafe {
+                    let _ = libc::posix_fadvise(
+                        file.as_raw_fd(),
+                        0,
+                        byte_len,
+                        libc::POSIX_FADV_DONTNEED,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn fadvise_dontneed(&self) {
+        if let MmapOrVec::Mapped { file, .. } = self {
+            use std::os::unix::io::AsRawFd;
+            // F_NOCACHE: 1 disables data caching for future reads/writes
+            // on this fd. macOS doesn't expose a retroactive-evict
+            // primitive comparable to Linux's POSIX_FADV_DONTNEED; this
+            // at least keeps subsequent reads from re-pinning more
+            // pages. Errors are intentionally ignored — the call is a
+            // hint and unprivileged fcntl flags vary across versions.
+            unsafe {
+                let _ = libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn fadvise_dontneed(&self) {}
+
     /// Flush dirty pages to the backing file (msync), then advise the
     /// kernel to drop them from the page cache. Used during streaming
     /// builds (e.g. `save_subset_streaming_disk`) to keep dirty-mmap
@@ -690,6 +743,44 @@ impl MmapBytes {
             MmapBytes::Mapped { mmap, .. } => &mmap[start..end],
         }
     }
+
+    /// Tell the kernel the file's page-cache contents are no longer
+    /// needed. Same contract as [`MmapOrVec::fadvise_dontneed`].
+    /// `dead_code` allowed: this is the parallel primitive for the
+    /// MmapOrVec one used by the streaming filter; kept here so future
+    /// per-row Str eviction has the right API in place.
+    #[allow(dead_code)]
+    #[cfg(target_os = "linux")]
+    pub fn fadvise_dontneed(&self) {
+        if let MmapBytes::Mapped { file, len, .. } = self {
+            if *len > 0 {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    let _ = libc::posix_fadvise(
+                        file.as_raw_fd(),
+                        0,
+                        *len as libc::off_t,
+                        libc::POSIX_FADV_DONTNEED,
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    #[cfg(target_os = "macos")]
+    pub fn fadvise_dontneed(&self) {
+        if let MmapBytes::Mapped { file, .. } = self {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                let _ = libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn fadvise_dontneed(&self) {}
 
     /// Flush dirty pages to backing file (msync), then advise the kernel
     /// to drop them from page cache. Same contract as
