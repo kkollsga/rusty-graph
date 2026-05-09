@@ -518,6 +518,25 @@ pub fn save_subset_streaming_disk(
     use petgraph::graph::NodeIndex;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Instant;
+
+    // Stage timers — opt-in via `KGLITE_STREAMING_TIMING=1` so we
+    // don't pollute production stderr. The 4 phases (writer setup,
+    // node walk, edge walk, finalize+save_disk) are the granularity at
+    // which we attack performance regressions in this pipeline.
+    let timing_enabled = std::env::var("KGLITE_STREAMING_TIMING")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    let log_phase = |label: &str, t0: Instant| {
+        if timing_enabled {
+            eprintln!(
+                "save_subset_streaming_disk: {} = {:.3}s",
+                label,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    };
+    let phase_start = Instant::now();
 
     let path_str = out_path.to_str().ok_or_else(|| {
         format!(
@@ -660,6 +679,8 @@ pub fn save_subset_streaming_disk(
         })?;
         writers.insert(type_name.clone(), writer);
     }
+    log_phase("setup (rank + writer creation)", phase_start);
+    let phase_node_walk = Instant::now();
 
     // 4. Single-pass node walk — bypasses `DiskGraph::node_weight` which
     //    would allocate every read into source's `node_arena`. Direct
@@ -735,6 +756,8 @@ pub fn save_subset_streaming_disk(
             "save_subset_streaming_disk currently requires a disk-backed source".to_string(),
         );
     }
+    log_phase("node walk (push rows + add_node)", phase_node_walk);
+    let phase_finalize = Instant::now();
 
     // 5. Finalize each per-type writer: flush BufWriters, mmap the
     //    closed files, build TypedColumns, install Arc<ColumnStore>.
@@ -749,6 +772,8 @@ pub fn save_subset_streaming_disk(
     }
     dest.column_stores = arc_dest_stores;
     dest.sync_disk_column_stores();
+    log_phase("writer finalize (close + mmap per type)", phase_finalize);
+    let phase_edge_walk = Instant::now();
 
     // 6. Walk source edges in edge_idx order. For each edge passing the
     //    filter and with both endpoints in the kept set, translate via
@@ -856,6 +881,9 @@ pub fn save_subset_streaming_disk(
         }
     }
 
+    log_phase("edge walk (translate + add_edge)", phase_edge_walk);
+    let phase_save = Instant::now();
+
     // 7. Rebuild type_indices from the freshly-added nodes. The streaming
     //    add_node path bypasses the bulk loader's index maintenance, so
     //    dest.type_indices is empty until we walk node_weights here. The
@@ -867,6 +895,8 @@ pub fn save_subset_streaming_disk(
 
     // 8. Save: triggers build_csr_from_pending (the Phase 1 merge sort).
     let save_result = dest.save_disk(path_str);
+    log_phase("save_disk (CSR build + sidecars)", phase_save);
+    log_phase("TOTAL", phase_start);
 
     // 9. Drop dest before cleaning the scratch dir so the mmap files
     //    aren't held open. dest's column_stores carry Arc handles to the
