@@ -7,9 +7,13 @@
 #     pip install "kglite[mcp]"
 #     kglite-mcp-server --graph conference_graph.kgl --trust-tools
 #
-# Drop --trust-tools when you don't have python: hooks (or remove the
-# python: section below). All paths in this file resolve relative to
-# the yaml's directory; ../ traversal is allowed.
+# In workspace (multi-graph) mode, name the file `workspace_mcp.yaml`
+# and place it inside the workspace directory. The same fields apply.
+#
+# Drop --trust-tools when you don't have python: hooks or a custom
+# embedder declared (or remove those sections below). All paths in
+# this file resolve relative to the yaml's directory; ../ traversal
+# is allowed.
 
 # ── Server identity (optional) ───────────────────────────────────────
 name: Conference Graph
@@ -20,6 +24,15 @@ instructions: |
   data in ./data, similar_sessions for embedding-based recs,
   session_detail for fields not lifted to the graph.
 
+# ── overview_prefix: prepended to bare graph_overview() output ───────
+# Useful for sticky context the agent needs after a few turns —
+# baselines, hidden invariants, validator hints. Skipped for focused
+# graph_overview(types=...) / connections=... / cypher=... drill-downs.
+overview_prefix: |
+  Sessions are linked to Speakers via PRESENTS, to Companies via SPONSORED_BY,
+  and to one another via SIMILAR_TO (embedding-derived; score ∈ [0, 1]).
+  Run `cypher_query("MATCH (s:Session) RETURN count(s)")` for a quick row count.
+
 # ── source_root: auto-registers read_source / grep / list_source ─────
 # These tools are sandboxed to the listed directories. Backed by the
 # mcp-methods Rust extension (ripgrep crates, gitignore-aware,
@@ -27,11 +40,37 @@ instructions: |
 #     source_roots: [./data, ../shared/lookups]
 source_root: ./data
 
-# ── Trust gate for python: tools (only set when needed) ──────────────
-# This is HALF the trust signal. The operator must ALSO pass
-# --trust-tools on the CLI. Refusing either way is the default.
+# ── Trust gates (only set when needed) ───────────────────────────────
+# Each gate is HALF the trust signal — the operator must ALSO pass
+# --trust-tools on the CLI. Either signal alone refuses to load.
+#   allow_python_tools — required for `python:` tool entries below
+#   allow_embedder     — required for the `embedder:` factory below
 trust:
   allow_python_tools: true
+  # allow_embedder: true   # uncomment if using a custom embedder factory
+
+# ── Pre-blessed builtins (no trust gate needed) ──────────────────────
+# These wrap small kglite-internal operations the CLI knows how to
+# perform safely without loading user code.
+#   save_graph     — register save_graph() to persist Cypher mutations
+#   temp_cleanup   — "on_overview" wipes temp/ on bare graph_overview()
+#                    calls so it doesn't grow unbounded; "never" (default)
+#                    keeps existing behaviour
+# builtins:
+#   save_graph: true
+#   temp_cleanup: on_overview
+
+# ── Custom embedder factory (optional, trust-gated) ──────────────────
+# Replaces the stock `--embedder MODEL_NAME` shortcut. Use when you need
+# cooldown-based unload, a non-sentence-transformers backend, or other
+# project-specific lifecycle. The class is instantiated as
+# `Class(**kwargs)` and bound via graph.set_embedder().
+# embedder:
+#   module: ./embedder.py            # path relative to this yaml
+#   class: GraphEmbedder
+#   kwargs:
+#     model: BAAI/bge-m3
+#     cooldown: 900                  # seconds idle before unload
 
 # ── Custom tools the agent can call by name ──────────────────────────
 tools:

@@ -27,9 +27,24 @@ import re
 
 _VALID_TOOL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _TOOL_KINDS = ("cypher", "python")
-_ALLOWED_TOP_KEYS = frozenset({"name", "instructions", "source_root", "source_roots", "trust", "tools"})
-_ALLOWED_TRUST_KEYS = frozenset({"allow_python_tools"})
+_ALLOWED_TOP_KEYS = frozenset(
+    {
+        "name",
+        "instructions",
+        "overview_prefix",
+        "source_root",
+        "source_roots",
+        "trust",
+        "tools",
+        "embedder",
+        "builtins",
+    }
+)
+_ALLOWED_TRUST_KEYS = frozenset({"allow_python_tools", "allow_embedder"})
 _ALLOWED_TOOL_KEYS = frozenset({"name", "description", "parameters", "cypher", "python", "function"})
+_ALLOWED_EMBEDDER_KEYS = frozenset({"module", "class", "kwargs"})
+_ALLOWED_BUILTIN_KEYS = frozenset({"save_graph", "temp_cleanup"})
+_VALID_TEMP_CLEANUP = frozenset({"never", "on_overview"})
 
 
 class ManifestError(ValueError):
@@ -44,6 +59,7 @@ class ManifestError(ValueError):
 @dataclass
 class TrustConfig:
     allow_python_tools: bool = False
+    allow_embedder: bool = False
 
 
 @dataclass
@@ -67,18 +83,62 @@ ToolSpec = CypherTool | PythonTool
 
 
 @dataclass
+class EmbedderConfig:
+    """Custom-embedder factory declared in the manifest.
+
+    ``module`` is a Python file path relative to the yaml directory (e.g.
+    ``./embedder.py``). ``klass`` is the symbol to instantiate. ``kwargs``
+    are passed verbatim to the constructor. Loading is gated by
+    ``trust.allow_embedder: true`` plus the operator's ``--trust-tools``
+    flag, identical to the python-tools gate.
+    """
+
+    module: str
+    klass: str
+    kwargs: dict = field(default_factory=dict)
+
+
+@dataclass
+class BuiltinsConfig:
+    """Pre-blessed tools that don't need ``--trust-tools``.
+
+    These wrap small kglite-internal operations that the CLI knows how
+    to perform safely. Currently:
+
+    - ``save_graph``: registers a ``save_graph()`` MCP tool that calls
+      ``graph.save(graph_path)``. Use after CREATE/SET/DELETE Cypher
+      mutations to persist to disk.
+    - ``temp_cleanup``: ``"on_overview"`` clears the CSV export temp
+      directory on bare ``graph_overview()`` calls. ``"never"`` (default)
+      keeps the existing behaviour.
+    """
+
+    save_graph: bool = False
+    temp_cleanup: str = "never"
+
+
+@dataclass
 class Manifest:
     yaml_path: Path
     name: str | None = None
     instructions: str | None = None
+    overview_prefix: str | None = None
     source_roots: list[str] = field(default_factory=list)
     trust: TrustConfig = field(default_factory=TrustConfig)
     tools: list[ToolSpec] = field(default_factory=list)
+    embedder: EmbedderConfig | None = None
+    builtins: BuiltinsConfig = field(default_factory=BuiltinsConfig)
 
 
 def find_sibling_manifest(graph_path: Path) -> Path | None:
     """Return ``<graph_basename>_mcp.yaml`` next to ``graph_path``, or ``None``."""
     candidate = graph_path.parent / f"{graph_path.stem}_mcp.yaml"
+    return candidate if candidate.is_file() else None
+
+
+def find_workspace_manifest(workspace_dir: Path) -> Path | None:
+    """Return ``<workspace>/workspace_mcp.yaml`` or ``None``."""
+    candidate = workspace_dir / "workspace_mcp.yaml"
     return candidate if candidate.is_file() else None
 
 
@@ -145,6 +205,11 @@ def _build(raw: dict, yaml_path: Path) -> Manifest:
             if not isinstance(apt, bool):
                 raise ManifestError("trust.allow_python_tools must be a bool", yaml_path)
             trust.allow_python_tools = apt
+        if "allow_embedder" in tv:
+            ae = tv["allow_embedder"]
+            if not isinstance(ae, bool):
+                raise ManifestError("trust.allow_embedder must be a bool", yaml_path)
+            trust.allow_embedder = ae
 
     tools: list[ToolSpec] = []
     seen_names: set[str] = set()
@@ -159,13 +224,19 @@ def _build(raw: dict, yaml_path: Path) -> Manifest:
             seen_names.add(tool.name)
             tools.append(tool)
 
+    embedder = _build_embedder(raw.get("embedder"), yaml_path)
+    builtins = _build_builtins(raw.get("builtins"), yaml_path)
+
     return Manifest(
         yaml_path=yaml_path,
         name=_optional_str(raw, "name", yaml_path),
         instructions=_optional_str(raw, "instructions", yaml_path),
+        overview_prefix=_optional_str(raw, "overview_prefix", yaml_path),
         source_roots=source_roots,
         trust=trust,
         tools=tools,
+        embedder=embedder,
+        builtins=builtins,
     )
 
 
@@ -239,3 +310,57 @@ def _build_tool(entry: object, idx: int, yaml_path: Path) -> ToolSpec:
         description=description,
         parameters=parameters,
     )
+
+
+def _build_embedder(raw: object, yaml_path: Path) -> EmbedderConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ManifestError("embedder must be a mapping", yaml_path)
+    unknown = set(raw) - _ALLOWED_EMBEDDER_KEYS
+    if unknown:
+        raise ManifestError(
+            f"unknown embedder keys: {sorted(unknown)}. Allowed: {sorted(_ALLOWED_EMBEDDER_KEYS)}",
+            yaml_path,
+        )
+    module = raw.get("module")
+    if not isinstance(module, str) or not module:
+        raise ManifestError("embedder.module must be a non-empty string (path or dotted name)", yaml_path)
+    klass = raw.get("class")
+    if not isinstance(klass, str) or not _VALID_TOOL_NAME.match(klass):
+        raise ManifestError(
+            f"embedder.class must be a valid identifier matching {_VALID_TOOL_NAME.pattern}",
+            yaml_path,
+        )
+    kwargs = raw.get("kwargs", {})
+    if not isinstance(kwargs, dict):
+        raise ManifestError("embedder.kwargs must be a mapping", yaml_path)
+    return EmbedderConfig(module=module, klass=klass, kwargs=kwargs)
+
+
+def _build_builtins(raw: object, yaml_path: Path) -> BuiltinsConfig:
+    if raw is None:
+        return BuiltinsConfig()
+    if not isinstance(raw, dict):
+        raise ManifestError("builtins must be a mapping", yaml_path)
+    unknown = set(raw) - _ALLOWED_BUILTIN_KEYS
+    if unknown:
+        raise ManifestError(
+            f"unknown builtins keys: {sorted(unknown)}. Allowed: {sorted(_ALLOWED_BUILTIN_KEYS)}",
+            yaml_path,
+        )
+    cfg = BuiltinsConfig()
+    if "save_graph" in raw:
+        sv = raw["save_graph"]
+        if not isinstance(sv, bool):
+            raise ManifestError("builtins.save_graph must be a bool", yaml_path)
+        cfg.save_graph = sv
+    if "temp_cleanup" in raw:
+        tc = raw["temp_cleanup"]
+        if not isinstance(tc, str) or tc not in _VALID_TEMP_CLEANUP:
+            raise ManifestError(
+                f"builtins.temp_cleanup must be one of {sorted(_VALID_TEMP_CLEANUP)}",
+                yaml_path,
+            )
+        cfg.temp_cleanup = tc
+    return cfg

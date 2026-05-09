@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.13] — 2026-05-09
+
+### Added
+
+- **`kglite-mcp-server --workspace DIR`: multi-graph workspace mode.**
+  Boots the server without a graph; the agent activates one with
+  `repo_management('org/repo')`, which clones the GitHub repo, builds
+  a code-graph via `kglite.code_tree.build`, and pins it as the active
+  graph for `cypher_query` / `graph_overview` / `read_source` / `grep`
+  / `list_source`. Inventory tracks `last_accessed` / `access_count`
+  per repo in `<workspace>/inventory.json`. Idle repos auto-sweep
+  after `--stale-after-days` (default 7); the active repo is exempt
+  and stale entries preserve their access history. Layout:
+  `<workspace>/{repos,graphs,temp,inventory.json,workspace_mcp.yaml}`.
+- **Manifest `embedder:` section** for project-supplied embedder
+  factories. Declare `module: ./embedder.py` + `class: GraphEmbedder`
+  + `kwargs: {...}` and the CLI imports + instantiates via
+  `Class(**kwargs)` and binds with `graph.set_embedder()`. Trust-gated
+  by `trust.allow_embedder: true` plus `--trust-tools` (both signals
+  required, mirrors the `python:` tool gate). Replaces the
+  always-loaded `--embedder MODEL_NAME` shortcut for users who need
+  cooldown-based unload (e.g. BAAI/bge-m3 on consumer hardware).
+- **Manifest `overview_prefix:` field.** Sticky preamble prepended to
+  `graph.describe()` output on bare `graph_overview()` calls. Skipped
+  for focused drill-downs (`types=[...]`, `connections=[...]`,
+  `cypher=[...]`) so they stay terse. Lets agents re-discover
+  load-bearing context (validator hints, baseline counts, hidden
+  invariants) deep into a session without competing with the
+  conversation for slot in the system instructions.
+- **Manifest `builtins:` section** for pre-blessed tools that don't
+  need `--trust-tools`. `save_graph: true` registers a `save_graph()`
+  MCP tool that calls `graph.save(graph_path)` — for persisting
+  CREATE/SET/DELETE Cypher mutations. `temp_cleanup: on_overview`
+  clears the CSV-export `temp/` directory on bare `graph_overview()`
+  calls so it doesn't grow unbounded across long sessions; `never`
+  (default) keeps the existing behaviour.
+- **`read_source(qualified_name=...)`** for code-aware servers. When
+  the bound graph carries `qualified_name` + `file_path` properties on
+  code nodes, the agent can pass a name like `MyClass.my_method` and
+  the tool resolves through `graph.source()` to a file slice in one
+  round-trip (was: cypher-then-read, two round-trips). Suffix
+  fallback handles short bare names (e.g. `helper_fn`) via Cypher
+  `ENDS WITH` against `qualified_name`. Available in both single-
+  graph and workspace modes.
+
+### Changed
+
+- `kglite-mcp-server` `--graph` and `--workspace` are now mutually
+  exclusive flags. Default behaviour (no flag, no `graph.kgl` in cwd)
+  is unchanged — single-graph mode looking for `./graph.kgl`.
+- `examples/conference_graph_mcp.yaml` annotated with the new
+  manifest fields (`overview_prefix`, `builtins`, `embedder`,
+  `trust.allow_embedder`).
+
 ## [0.9.12] — 2026-05-09
 
 ### Added
