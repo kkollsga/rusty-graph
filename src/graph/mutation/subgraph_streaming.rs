@@ -258,6 +258,14 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
     }
 
     let kept_node_count = kept_nodes.count_ones();
+
+    // Drop the source's edge_endpoints page cache now that we're done
+    // sweeping it sequentially. On Wikidata that's 9 GB of mmap pages
+    // dirty enough to dominate RSS for the rest of the pipeline if left
+    // resident — `advise_sequential` is just a hint and macOS doesn't
+    // honor it aggressively. DONTNEED forces eviction.
+    source.edge_endpoints.advise_dontneed();
+
     PassAResult {
         kept_nodes,
         stats: ScanStats {
@@ -662,6 +670,16 @@ pub fn save_subset_streaming_disk(
         )))
     };
 
+    // How often to flush dest column store mmap pages to disk and ask
+    // the kernel to drop them. Without this, dirty mmap pages stack up
+    // until the kernel evicts on its own — which on macOS happens late,
+    // pushing peak RSS toward the system RAM limit. 1 M rows is a
+    // compromise between flush overhead and dirty-page ceiling: at
+    // ~50 properties × ~50 bytes per row, 1 M rows is ~2.5 GB of dirty
+    // pages between flushes (lower in practice; many properties null).
+    const FLUSH_EVERY_ROWS: u64 = 1_000_000;
+    let mut rows_since_flush: u64 = 0;
+
     if let (Some(sdg), Some(placeholder_arc)) = (source_disk_for_nodes, placeholder_arc) {
         for old_id in 0..n_source_nodes as u32 {
             if !rank.contains(old_id) {
@@ -701,6 +719,23 @@ pub fn save_subset_streaming_disk(
                 },
             };
             crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
+
+            rows_since_flush += 1;
+            if rows_since_flush >= FLUSH_EVERY_ROWS {
+                // Flush every dest column store's mmap pages and drop
+                // page cache. Cost: a few msync calls (one per
+                // mmap-backed column file). Benefit: bounded RSS
+                // regardless of total kept-row count.
+                for store in dest_stores.values() {
+                    let _ = store.flush_and_release_pages();
+                }
+                rows_since_flush = 0;
+            }
+        }
+
+        // Final flush for the tail batch.
+        for store in dest_stores.values() {
+            let _ = store.flush_and_release_pages();
         }
     } else if !dest_stores.is_empty() {
         // dest_stores has entries but source isn't disk-backed. Streaming
@@ -737,6 +772,13 @@ pub fn save_subset_streaming_disk(
         // edge_properties_at lookups (which read source's prop heap in
         // edge_idx order = sequential).
         sdg.edge_endpoints.advise_sequential();
+        // Re-evict source node_slots now that the node materialization
+        // pass above touched ~17 M source slots — without an explicit
+        // drop, those pages stay resident and pile on top of edge-pass
+        // page cache. Source column stores are mmap'd via MmapColumnStore
+        // which doesn't have an advise API yet; their pages are held
+        // resident through the edge phase. v2 follow-up.
+        sdg.node_slots.advise_dontneed();
         let n_edges = sdg.next_edge_idx as usize;
         for edge_idx in 0..n_edges {
             let ep = sdg.edge_endpoints.get(edge_idx);

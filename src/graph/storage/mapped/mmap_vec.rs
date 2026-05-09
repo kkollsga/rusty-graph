@@ -245,6 +245,36 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     #[cfg(not(unix))]
     pub fn advise_dontneed(&self) {}
 
+    /// Flush dirty pages to the backing file (msync), then advise the
+    /// kernel to drop them from the page cache. Used during streaming
+    /// builds (e.g. `save_subset_streaming_disk`) to keep dirty-mmap
+    /// pressure bounded — without this, peak RSS climbs with the total
+    /// bytes pushed even when the data is file-backed.
+    ///
+    /// `flush()` (synchronous msync) is required before DONTNEED so the
+    /// kernel doesn't discard un-persisted writes. Heap-backed and empty
+    /// regions are no-ops.
+    #[cfg(unix)]
+    pub fn flush_and_release_pages(&self) -> std::io::Result<()> {
+        if let MmapOrVec::Mapped { mmap, len, .. } = self {
+            let byte_len = *len * std::mem::size_of::<T>();
+            if byte_len > 0 {
+                mmap.flush()?;
+                // SAFETY: we just flushed via msync; DONTNEED can only
+                // drop pages that are now identical to disk.
+                unsafe {
+                    let _ = mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn flush_and_release_pages(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Read element at index. Panics if out of bounds.
     pub fn get(&self, index: usize) -> T {
         match self {
@@ -651,6 +681,29 @@ impl MmapBytes {
             MmapBytes::Heap { data } => &data[start..end],
             MmapBytes::Mapped { mmap, .. } => &mmap[start..end],
         }
+    }
+
+    /// Flush dirty pages to backing file (msync), then advise the kernel
+    /// to drop them from page cache. Same contract as
+    /// [`MmapOrVec::flush_and_release_pages`].
+    #[cfg(unix)]
+    pub fn flush_and_release_pages(&self) -> io::Result<()> {
+        if let MmapBytes::Mapped { mmap, len, .. } = self {
+            if *len > 0 {
+                mmap.flush()?;
+                // SAFETY: just flushed via msync; DONTNEED only drops
+                // pages that are now identical to disk.
+                unsafe {
+                    let _ = mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn flush_and_release_pages(&self) -> io::Result<()> {
+        Ok(())
     }
 
     pub fn materialize_to_file(&mut self, path: &Path) -> io::Result<()> {

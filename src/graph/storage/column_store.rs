@@ -502,6 +502,54 @@ impl TypedColumn {
         Ok(())
     }
 
+    /// Flush dirty mmap pages to disk (msync) and advise the kernel to
+    /// drop them from page cache. Heap-backed columns are no-ops. See
+    /// `MmapOrVec::flush_and_release_pages` for the contract.
+    pub fn flush_and_release_pages(&self) -> io::Result<()> {
+        let mut first: Option<io::Error> = None;
+        let mut record = |r: io::Result<()>| {
+            if let Err(e) = r {
+                first.get_or_insert(e);
+            }
+        };
+        match self {
+            TypedColumn::Int64 { data, nulls } => {
+                record(data.flush_and_release_pages());
+                record(nulls.flush_and_release_pages());
+            }
+            TypedColumn::Float64 { data, nulls } => {
+                record(data.flush_and_release_pages());
+                record(nulls.flush_and_release_pages());
+            }
+            TypedColumn::UniqueId { data, nulls } => {
+                record(data.flush_and_release_pages());
+                record(nulls.flush_and_release_pages());
+            }
+            TypedColumn::Bool { data, nulls } => {
+                record(data.flush_and_release_pages());
+                record(nulls.flush_and_release_pages());
+            }
+            TypedColumn::Date { data, nulls } => {
+                record(data.flush_and_release_pages());
+                record(nulls.flush_and_release_pages());
+            }
+            TypedColumn::Str {
+                offsets,
+                data,
+                nulls,
+            } => {
+                record(offsets.flush_and_release_pages());
+                record(data.flush_and_release_pages());
+                record(nulls.flush_and_release_pages());
+            }
+            TypedColumn::Mixed { .. } => {} // heap only — no mmap to flush
+        }
+        match first {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Convert this column back to heap-backed storage.
     #[allow(dead_code)] // Test-only chain (ColumnStore::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
@@ -1342,6 +1390,37 @@ impl ColumnStore {
             col.materialize_to_file(dir, "__title__")?;
         }
         Ok(())
+    }
+
+    /// Flush dirty pages of every mmap-backed underlying file to disk and
+    /// advise the kernel to drop them from page cache. Used by streaming
+    /// builders (`save_subset_streaming_disk`) to keep peak RSS bounded
+    /// during long push loops — without this, dirty mmap pages accumulate
+    /// in RAM until the kernel evicts on its own schedule.
+    ///
+    /// Heap-backed columns are no-ops. Returns the first error from any
+    /// underlying msync; subsequent columns are still attempted.
+    pub fn flush_and_release_pages(&self) -> io::Result<()> {
+        let mut first_err: Option<io::Error> = None;
+        for col in &self.columns {
+            if let Err(e) = col.flush_and_release_pages() {
+                first_err.get_or_insert(e);
+            }
+        }
+        if let Some(ref col) = self.id_column {
+            if let Err(e) = col.flush_and_release_pages() {
+                first_err.get_or_insert(e);
+            }
+        }
+        if let Some(ref col) = self.title_column {
+            if let Err(e) = col.flush_and_release_pages() {
+                first_err.get_or_insert(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Convert all columns back to heap-backed storage.
