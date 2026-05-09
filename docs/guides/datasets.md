@@ -89,6 +89,66 @@ dump = wikidata.fetch_truthy("/data/wd")  # returns Path
 graph.load_ntriples(str(dump), predicates={"P31", "P279"}, …)
 ```
 
+### Carving out a focused subgraph
+
+Wikidata is wide. Most projects only need a slice — papers and their
+authors, films and their casts, paintings and their painters,
+buildings and their architects. Loading the full graph and filtering
+in Python burns RAM and wastes time on rows you'll never query.
+
+The streaming subgraph filter walks the source's edge file once,
+keeps every node that's an endpoint of an edge whose connection type
+matches your list, and writes the result as a self-contained
+disk-mode graph. Output reloads with the same API and is a fraction
+of the source's footprint — typically 5% on edge-type-scoped slices.
+
+```python
+from kglite.datasets import wikidata
+import kglite
+
+# Full graph from disk (cached after first build).
+g = wikidata.open("/data/wd")
+
+# "Papers + their authors" — every node that participates in a P50
+# (author) edge, plus the P50 edges themselves. Output is a
+# stand-alone disk graph.
+g._save_subset_filtered_by_edge_type(
+    "/data/wd_papers_authors",
+    ["P50"],
+)
+
+# Reload the slice and query it like any other graph.
+sub = kglite.load("/data/wd_papers_authors")
+sub.cypher(
+    "MATCH (paper:`scholarly article`)<-[:P50]-(author:human) "
+    "RETURN paper.title, count(author) AS coauthors "
+    "ORDER BY coauthors DESC LIMIT 10"
+).to_df()
+```
+
+On the full Wikidata graph (~124 M nodes / 861 M edges), this
+extracts the ~17 M-node / 35 M-edge author/paper subgraph in a few
+minutes with bounded working set; reload of the slice is sub-second.
+See `bench/bench_save_subset.py` for the canonical perf gate.
+
+The streaming path requires a disk-backed source. For in-memory or
+mapped graphs, use the selection-based `KnowledgeGraph.save_subset`
+(see [Recipes](recipes.md)) — same output format, in-memory
+extraction.
+
+```python
+# Same shape, smaller graph, in-memory extraction:
+g_100 = wikidata.open("/data/wd", entity_limit_millions=100,
+                      storage="memory")
+g_100.select("scholarly article").expand(hops=1, type="P50") \
+     .save_subset("/data/wd_100m_papers_authors.kgl")
+```
+
+The leading-underscore `_save_subset_filtered_by_edge_type` is the
+direct lowering of the streaming pipeline. Multiple edge types can be
+passed in one call (e.g. `["P50", "P98", "P110"]` for all the
+authorship-shaped predicates).
+
 ## Sodir (Norwegian Offshore Directorate)
 
 Petroleum-domain graph from the public ArcGIS REST FeatureServer at
