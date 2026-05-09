@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.14] — 2026-05-09
+
 ### Added
 
 - **`kglite-mcp-server` is now a Rust-native single binary**, built
