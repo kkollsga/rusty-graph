@@ -1457,6 +1457,69 @@ impl ColumnStore {
         &self.columns
     }
 
+    // ── External-builder accessors ──────────────────────────────────
+    //
+    // The streaming subgraph filter (`save_subset`) builds a destination
+    // ColumnStore in chunks, spilling each to disk and merging at the
+    // end. Those steps need to inject finished `TypedColumn` values
+    // (mmap-backed at the merged file paths) into a freshly-constructed
+    // ColumnStore shell. Plain `ColumnStore::new` has no way to do this;
+    // these accessors fill the gap.
+    //
+    // `dead_code` is allowed at the impl-block level here because the
+    // first consumer ships in commit 2 of the v2 chunk-spill PR; commit
+    // 1 lands these accessors alone so the API change passes parity
+    // tests in isolation before any new behavior is introduced.
+
+    /// Replace the schema-keyed property columns wholesale. The new
+    /// `Vec<TypedColumn>` must have exactly `self.schema().len()` entries
+    /// in slot order; the caller is responsible for the correspondence.
+    #[allow(dead_code)]
+    pub fn replace_columns(&mut self, columns: Vec<TypedColumn>) {
+        self.columns = columns;
+    }
+
+    /// Replace the id sidecar column.
+    #[allow(dead_code)]
+    pub fn replace_id_column(&mut self, col: TypedColumn) {
+        self.id_column = Some(col);
+    }
+
+    /// Replace the title sidecar column.
+    #[allow(dead_code)]
+    pub fn replace_title_column(&mut self, col: TypedColumn) {
+        self.title_column = Some(col);
+    }
+
+    /// Set the row count after wiring up replaced columns. The store's
+    /// authoritative row count is the merged total; without this the
+    /// fresh shell reports 0 rows even though the columns hold data.
+    #[allow(dead_code)]
+    pub fn set_row_count(&mut self, n: u32) {
+        self.row_count = n;
+    }
+
+    /// Type-tag string for the column at `slot`, e.g. `"int64"`,
+    /// `"string"`, `"mixed"`. Delegates to [`TypedColumn::type_tag`].
+    /// Used by the chunked-spill merge to dispatch to the right merge
+    /// kernel per typed-column variant.
+    #[allow(dead_code)]
+    pub fn column_type_str(&self, slot: usize) -> Option<&'static str> {
+        self.columns.get(slot).map(|c| c.type_tag())
+    }
+
+    /// Borrow the `Vec<Value>` inside a `TypedColumn::Mixed` at `slot`.
+    /// Returns `None` for non-Mixed variants. Used by the chunked-spill
+    /// builder to serialize Mixed columns to per-chunk bincode sidecars
+    /// (since `materialize_to_files` skips Mixed).
+    #[allow(dead_code)]
+    pub fn column_values_mixed(&self, slot: usize) -> Option<&Vec<Value>> {
+        match self.columns.get(slot)? {
+            TypedColumn::Mixed { data } => Some(data),
+            _ => None,
+        }
+    }
+
     /// Serialize all columns to a packed byte buffer for the v3 file format.
     ///
     /// Format per column:
