@@ -505,6 +505,7 @@ impl TypedColumn {
     /// Flush dirty mmap pages to disk (msync) and advise the kernel to
     /// drop them from page cache. Heap-backed columns are no-ops. See
     /// `MmapOrVec::flush_and_release_pages` for the contract.
+    #[allow(dead_code)]
     pub fn flush_and_release_pages(&self) -> io::Result<()> {
         let mut first: Option<io::Error> = None;
         let mut record = |r: io::Result<()>| {
@@ -1394,12 +1395,18 @@ impl ColumnStore {
 
     /// Flush dirty pages of every mmap-backed underlying file to disk and
     /// advise the kernel to drop them from page cache. Used by streaming
-    /// builders (`save_subset_streaming_disk`) to keep peak RSS bounded
-    /// during long push loops — without this, dirty mmap pages accumulate
-    /// in RAM until the kernel evicts on its own schedule.
+    /// builders to keep peak RSS bounded during long push loops — without
+    /// this, dirty mmap pages accumulate in RAM until the kernel evicts
+    /// on its own schedule.
     ///
     /// Heap-backed columns are no-ops. Returns the first error from any
     /// underlying msync; subsequent columns are still attempted.
+    ///
+    /// As of v2 the streaming subgraph filter no longer calls this on
+    /// the hot path — chunk-and-spill handles eviction by closing file
+    /// handles between chunks. Retained as a Linux-friendly explicit-
+    /// flush primitive for future callers.
+    #[allow(dead_code)]
     pub fn flush_and_release_pages(&self) -> io::Result<()> {
         let mut first_err: Option<io::Error> = None;
         for col in &self.columns {

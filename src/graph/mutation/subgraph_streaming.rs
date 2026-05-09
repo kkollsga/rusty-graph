@@ -583,10 +583,16 @@ pub fn save_subset_streaming_disk(
     //    Per-type "row_id within store" is the push position (0, 1, 2,
     //    …); per-source-id mapping `(old_idx → dest_row_id)` is recorded
     //    in `row_id_for_old` so step 4 can build the right NodeData.
-    // Per-type column stores get mmap-backed scratch files so heap stays
-    // bounded by the small id/title-Mixed columns. Without this, pushing
-    // 12.9 M Wikidata article rows accumulates ~5–8 GB of property data
-    // in heap before save_disk runs.
+    // v2: per-type ChunkedColumnBuilder. Each builder buffers
+    // `chunk_size_rows` rows in a heap-backed ColumnStore, spills to
+    // mmap'd files, **drops the chunk to release file handles**, repeats.
+    // After all rows pushed, finalize() merges per-chunk files into the
+    // canonical column-store layout. This is the same chunk-and-spill
+    // shape as `csr_build::merge_sort_build` — peak heap stays bounded
+    // by `chunk_size_rows × per_row_property_bytes`, regardless of total
+    // kept-row count.
+    use crate::graph::mutation::chunked_column_builder::ChunkedColumnBuilder;
+
     let scratch_root = out_path.join(".tmp_streaming");
     std::fs::create_dir_all(&scratch_root).map_err(|e| {
         format!(
@@ -596,11 +602,18 @@ pub fn save_subset_streaming_disk(
         )
     })?;
 
-    // Pre-create one ColumnStore per kept type — held mutable in a
-    // HashMap<String, ColumnStore> (not Arc'd yet) so the single node-walk
-    // loop below can call push_id/push_title/push_row on each. After the
-    // walk we wrap in Arc and install into dest.column_stores.
-    let mut dest_stores: HashMap<String, ColumnStore> = HashMap::new();
+    // Chunk size in rows. Default 1_048_576; override via
+    // `KGLITE_SUBSET_CHUNK_ROWS` (small values force chunking in tests
+    // and bound peak heap on tight-RAM machines).
+    let chunk_size_rows: u32 = std::env::var("KGLITE_SUBSET_CHUNK_ROWS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1_048_576);
+
+    // One builder per kept type. Lazy-create the inner ColumnStore on
+    // first push, so types with zero pushed rows leave no on-disk trace.
+    let mut builders: HashMap<String, ChunkedColumnBuilder> = HashMap::new();
     for type_name in kept_per_type.keys() {
         let schema = if let Some(src_store) = source.column_stores.get(type_name) {
             Arc::clone(src_store.schema())
@@ -614,53 +627,40 @@ pub fn save_subset_streaming_disk(
             .get(type_name)
             .cloned()
             .unwrap_or_default();
-        let mut store = ColumnStore::new(schema, &meta, &source.interner);
+        let chunk_root = scratch_root
+            .join(sanitize_type_name(type_name))
+            .join("chunks");
 
-        // Pre-materialize all schema columns to mmap-backed scratch files
-        // BEFORE pushing rows. After this every push grows the mmap file
-        // instead of accumulating in heap — same streaming-build pattern
-        // the build pipeline uses for `pending_edges`. id/title still
-        // start as Heap (push_id/push_title creates them lazily as Mixed),
-        // but those are one column each per type — small.
-        let type_scratch = scratch_root.join(sanitize_type_name(type_name));
-        std::fs::create_dir_all(&type_scratch).map_err(|e| {
-            format!(
-                "save_subset_streaming_disk: create_dir_all({}): {}",
-                type_scratch.display(),
-                e
-            )
-        })?;
-        store
-            .materialize_to_files(&type_scratch, &source.interner)
-            .map_err(|e| {
-                format!(
-                    "save_subset_streaming_disk: pre-materialize {}: {}",
-                    type_name, e
-                )
-            })?;
+        // Wikidata-style sources have string ids (Q-codes). Pre-seeding
+        // the chunk's id_column with TypedColumn::Str avoids the lazy
+        // push_id path that creates a heap-backed Mixed column. For
+        // sources with int / mixed ids, push_id's demote-to-Mixed path
+        // catches it; the optimization is best-effort.
+        let prefer_str_id = true;
 
-        dest_stores.insert(type_name.clone(), store);
+        builders.insert(
+            type_name.clone(),
+            ChunkedColumnBuilder::new(schema, meta, chunk_root, chunk_size_rows, prefer_str_id),
+        );
     }
 
     // 4. Single-pass node walk — bypasses `DiskGraph::node_weight` which
-    //    would allocate every read into source's `node_arena`. At
-    //    Wikidata scale that's 17M Box<NodeData> allocations and ~2 GB
-    //    of avoidable heap. Direct disk access pattern:
+    //    would allocate every read into source's `node_arena`. Direct
+    //    disk access pattern:
     //      sdg.node_slots[old_id] → (type, src_row_id)
     //      source.column_stores[type] → get_id / get_title / row_properties
-    //      dest_stores[type].push_id / push_title / push_row
+    //      builders[type].push_row(id, title, props)  ← chunks under the hood
     //      dest.graph.add_node
-    //    Two sequential mmap reads + one column-store push per kept node,
-    //    zero arena pressure.
     let source_disk_for_nodes: Option<&DiskGraph> = match &source.graph {
         GraphBackend::Disk(dg) => Some(dg.as_ref()),
         _ => None,
     };
 
     // Placeholder Arc handed to DiskGraph::add_node — it reads only
-    // `row_id` from the Columnar variant and drops the Arc. The real
-    // per-type Arcs are installed into dest.column_stores after the loop.
-    let placeholder_arc: Option<Arc<ColumnStore>> = if dest_stores.is_empty() {
+    // `row_id` from the Columnar variant and drops the Arc. Real per-
+    // type Arcs are produced by builder.finalize() and installed into
+    // dest.column_stores after the loop.
+    let placeholder_arc: Option<Arc<ColumnStore>> = if builders.is_empty() {
         None
     } else {
         Some(Arc::new(ColumnStore::new(
@@ -669,16 +669,6 @@ pub fn save_subset_streaming_disk(
             &source.interner,
         )))
     };
-
-    // How often to flush dest column store mmap pages to disk and ask
-    // the kernel to drop them. Without this, dirty mmap pages stack up
-    // until the kernel evicts on its own — which on macOS happens late,
-    // pushing peak RSS toward the system RAM limit. 1 M rows is a
-    // compromise between flush overhead and dirty-page ceiling: at
-    // ~50 properties × ~50 bytes per row, 1 M rows is ~2.5 GB of dirty
-    // pages between flushes (lower in practice; many properties null).
-    const FLUSH_EVERY_ROWS: u64 = 1_000_000;
-    let mut rows_since_flush: u64 = 0;
 
     if let (Some(sdg), Some(placeholder_arc)) = (source_disk_for_nodes, placeholder_arc) {
         for old_id in 0..n_source_nodes as u32 {
@@ -696,8 +686,8 @@ pub fn save_subset_streaming_disk(
                 Some(s) => s.as_ref(),
                 None => continue,
             };
-            let dest_store = match dest_stores.get_mut(type_name) {
-                Some(s) => s,
+            let builder = match builders.get_mut(type_name) {
+                Some(b) => b,
                 None => continue,
             };
 
@@ -705,9 +695,9 @@ pub fn save_subset_streaming_disk(
             let title_val = src_store.get_title(slot.row_id).unwrap_or(Value::Null);
             let props = src_store.row_properties(slot.row_id);
 
-            dest_store.push_id(&id_val);
-            dest_store.push_title(&title_val);
-            let dest_row_id = dest_store.push_row(&props);
+            let dest_row_id = builder
+                .push_row(&id_val, &title_val, &props, &source.interner)
+                .map_err(|e| format!("save_subset_streaming_disk: push_row: {}", e))?;
 
             let new_node_data = NodeData {
                 id: id_val,
@@ -719,40 +709,30 @@ pub fn save_subset_streaming_disk(
                 },
             };
             crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
-
-            rows_since_flush += 1;
-            if rows_since_flush >= FLUSH_EVERY_ROWS {
-                // Flush every dest column store's mmap pages and drop
-                // page cache. Cost: a few msync calls (one per
-                // mmap-backed column file). Benefit: bounded RSS
-                // regardless of total kept-row count.
-                for store in dest_stores.values() {
-                    let _ = store.flush_and_release_pages();
-                }
-                rows_since_flush = 0;
-            }
         }
-
-        // Final flush for the tail batch.
-        for store in dest_stores.values() {
-            let _ = store.flush_and_release_pages();
-        }
-    } else if !dest_stores.is_empty() {
-        // dest_stores has entries but source isn't disk-backed. Streaming
-        // primitives only matter at Wikidata scale, which means disk; the
-        // in-memory / mapped path uses extract_subgraph + write_graph_v3.
+    } else if !builders.is_empty() {
+        // Streaming primitives only target disk sources. In-memory /
+        // mapped sources route through extract_subgraph + write_graph_v3
+        // earlier in the public save_subset.
         return Err(
             "save_subset_streaming_disk currently requires a disk-backed source".to_string(),
         );
     }
 
-    // 5. Install dest column stores into both DirGraph and DiskGraph.
-    //    sync_disk_column_stores copies Arc references into DiskGraph's
-    //    HashMap so post-load reads see the right stores.
-    let arc_dest_stores: HashMap<String, Arc<ColumnStore>> = dest_stores
-        .into_iter()
-        .map(|(k, v)| (k, Arc::new(v)))
-        .collect();
+    // 5. Finalize each per-type builder: merge chunks into the
+    //    destination's canonical column-store layout, drop chunk subdirs,
+    //    return a fresh Arc<ColumnStore> mmap-backed at final paths.
+    let mut arc_dest_stores: HashMap<String, Arc<ColumnStore>> = HashMap::new();
+    let builder_pairs: Vec<(String, ChunkedColumnBuilder)> = builders.into_iter().collect();
+    for (type_name, builder) in builder_pairs {
+        let final_dir = scratch_root
+            .join(sanitize_type_name(&type_name))
+            .join("final");
+        let store = builder
+            .finalize(&final_dir, &source.interner)
+            .map_err(|e| format!("save_subset_streaming_disk: finalize {}: {}", type_name, e))?;
+        arc_dest_stores.insert(type_name, store);
+    }
     dest.column_stores = arc_dest_stores;
     dest.sync_disk_column_stores();
 

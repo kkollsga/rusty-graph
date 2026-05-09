@@ -6,6 +6,7 @@
 //! keep storage caches coherent.
 
 pub mod batch;
+pub mod chunked_column_builder;
 pub mod maintain;
 pub mod set_ops;
 pub mod subgraph;

@@ -254,6 +254,13 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     /// `flush()` (synchronous msync) is required before DONTNEED so the
     /// kernel doesn't discard un-persisted writes. Heap-backed and empty
     /// regions are no-ops.
+    ///
+    /// As of v2 the streaming subgraph filter no longer calls this in
+    /// the hot loop — chunk-and-spill drops file handles between chunks
+    /// which is what actually evicts on macOS. This method is retained
+    /// as a Linux-friendly explicit-flush primitive for future callers
+    /// (CSR build, periodic flushes during long mutations).
+    #[allow(dead_code)]
     #[cfg(unix)]
     pub fn flush_and_release_pages(&self) -> std::io::Result<()> {
         if let MmapOrVec::Mapped { mmap, len, .. } = self {
@@ -270,6 +277,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     #[cfg(not(unix))]
     pub fn flush_and_release_pages(&self) -> std::io::Result<()> {
         Ok(())
@@ -686,6 +694,7 @@ impl MmapBytes {
     /// Flush dirty pages to backing file (msync), then advise the kernel
     /// to drop them from page cache. Same contract as
     /// [`MmapOrVec::flush_and_release_pages`].
+    #[allow(dead_code)]
     #[cfg(unix)]
     pub fn flush_and_release_pages(&self) -> io::Result<()> {
         if let MmapBytes::Mapped { mmap, len, .. } = self {
@@ -701,6 +710,7 @@ impl MmapBytes {
         Ok(())
     }
 
+    #[allow(dead_code)]
     #[cfg(not(unix))]
     pub fn flush_and_release_pages(&self) -> io::Result<()> {
         Ok(())
