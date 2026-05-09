@@ -575,15 +575,25 @@ pub fn save_subset_streaming_disk(
     //    Per-type "row_id within store" is the push position (0, 1, 2,
     //    …); per-source-id mapping `(old_idx → dest_row_id)` is recorded
     //    in `row_id_for_old` so step 4 can build the right NodeData.
-    let mut dest_stores: HashMap<String, Arc<ColumnStore>> = HashMap::new();
-    let mut row_id_for_old: HashMap<u32, u32> = HashMap::new();
-    for (type_name, sorted_ids) in kept_per_type {
-        // Prefer the schema attached to source's existing column store —
-        // it's authoritative regardless of whether `type_schemas` /
-        // `node_type_metadata` were populated at source-load time. Older
-        // disk graphs sometimes have one-or-the-other empty; falling back
-        // to `type_schemas` would silently skip the type and lose all
-        // its kept nodes.
+    // Per-type column stores get mmap-backed scratch files so heap stays
+    // bounded by the small id/title-Mixed columns. Without this, pushing
+    // 12.9 M Wikidata article rows accumulates ~5–8 GB of property data
+    // in heap before save_disk runs.
+    let scratch_root = out_path.join(".tmp_streaming");
+    std::fs::create_dir_all(&scratch_root).map_err(|e| {
+        format!(
+            "save_subset_streaming_disk: create_dir_all({}): {}",
+            scratch_root.display(),
+            e
+        )
+    })?;
+
+    // Pre-create one ColumnStore per kept type — held mutable in a
+    // HashMap<String, ColumnStore> (not Arc'd yet) so the single node-walk
+    // loop below can call push_id/push_title/push_row on each. After the
+    // walk we wrap in Arc and install into dest.column_stores.
+    let mut dest_stores: HashMap<String, ColumnStore> = HashMap::new();
+    for type_name in kept_per_type.keys() {
         let schema = if let Some(src_store) = source.column_stores.get(type_name) {
             Arc::clone(src_store.schema())
         } else if let Some(s) = source.type_schemas.get(type_name) {
@@ -598,120 +608,117 @@ pub fn save_subset_streaming_disk(
             .unwrap_or_default();
         let mut store = ColumnStore::new(schema, &meta, &source.interner);
 
-        for &old_id in sorted_ids {
-            let old_idx = NodeIndex::new(old_id as usize);
-            let nd = match source.graph.node_weight(old_idx) {
-                Some(n) => n,
-                None => continue, // tombstoned in source — skip
+        // Pre-materialize all schema columns to mmap-backed scratch files
+        // BEFORE pushing rows. After this every push grows the mmap file
+        // instead of accumulating in heap — same streaming-build pattern
+        // the build pipeline uses for `pending_edges`. id/title still
+        // start as Heap (push_id/push_title creates them lazily as Mixed),
+        // but those are one column each per type — small.
+        let type_scratch = scratch_root.join(sanitize_type_name(type_name));
+        std::fs::create_dir_all(&type_scratch).map_err(|e| {
+            format!(
+                "save_subset_streaming_disk: create_dir_all({}): {}",
+                type_scratch.display(),
+                e
+            )
+        })?;
+        store
+            .materialize_to_files(&type_scratch, &source.interner)
+            .map_err(|e| {
+                format!(
+                    "save_subset_streaming_disk: pre-materialize {}: {}",
+                    type_name, e
+                )
+            })?;
+
+        dest_stores.insert(type_name.clone(), store);
+    }
+
+    // 4. Single-pass node walk — bypasses `DiskGraph::node_weight` which
+    //    would allocate every read into source's `node_arena`. At
+    //    Wikidata scale that's 17M Box<NodeData> allocations and ~2 GB
+    //    of avoidable heap. Direct disk access pattern:
+    //      sdg.node_slots[old_id] → (type, src_row_id)
+    //      source.column_stores[type] → get_id / get_title / row_properties
+    //      dest_stores[type].push_id / push_title / push_row
+    //      dest.graph.add_node
+    //    Two sequential mmap reads + one column-store push per kept node,
+    //    zero arena pressure.
+    let source_disk_for_nodes: Option<&DiskGraph> = match &source.graph {
+        GraphBackend::Disk(dg) => Some(dg.as_ref()),
+        _ => None,
+    };
+
+    // Placeholder Arc handed to DiskGraph::add_node — it reads only
+    // `row_id` from the Columnar variant and drops the Arc. The real
+    // per-type Arcs are installed into dest.column_stores after the loop.
+    let placeholder_arc: Option<Arc<ColumnStore>> = if dest_stores.is_empty() {
+        None
+    } else {
+        Some(Arc::new(ColumnStore::new(
+            Arc::new(crate::graph::schema::TypeSchema::new()),
+            &HashMap::new(),
+            &source.interner,
+        )))
+    };
+
+    if let (Some(sdg), Some(placeholder_arc)) = (source_disk_for_nodes, placeholder_arc) {
+        for old_id in 0..n_source_nodes as u32 {
+            if !rank.contains(old_id) {
+                continue;
+            }
+            let slot = sdg.node_slots.get(old_id as usize);
+            if !slot.is_alive() {
+                continue;
+            }
+            let type_key = InternedKey::from_u64(slot.node_type);
+            let type_name = source.interner.resolve(type_key);
+
+            let src_store = match source.column_stores.get(type_name) {
+                Some(s) => s.as_ref(),
+                None => continue,
+            };
+            let dest_store = match dest_stores.get_mut(type_name) {
+                Some(s) => s,
+                None => continue,
             };
 
-            // Read id, title, properties from source. For disk-backed
-            // sources this is one mmap read in a single ColumnStore.
-            let (id_val, title_val, props): (Value, Value, Vec<(InternedKey, Value)>) =
-                match &nd.properties {
-                    PropertyStorage::Columnar { store: src, row_id } => (
-                        src.get_id(*row_id).unwrap_or_else(|| nd.id.clone()),
-                        src.get_title(*row_id).unwrap_or_else(|| nd.title.clone()),
-                        src.row_properties(*row_id),
-                    ),
-                    PropertyStorage::Map(m) => (
-                        nd.id.clone(),
-                        nd.title.clone(),
-                        m.iter().map(|(&k, v)| (k, v.clone())).collect(),
-                    ),
-                    PropertyStorage::Compact { schema, values } => {
-                        let pairs = schema
-                            .slots
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, &ik)| {
-                                values.get(i).and_then(|v| {
-                                    if matches!(v, Value::Null) {
-                                        None
-                                    } else {
-                                        Some((ik, v.clone()))
-                                    }
-                                })
-                            })
-                            .collect();
-                        (nd.id.clone(), nd.title.clone(), pairs)
-                    }
-                };
+            let id_val = src_store.get_id(slot.row_id).unwrap_or(Value::Null);
+            let title_val = src_store.get_title(slot.row_id).unwrap_or(Value::Null);
+            let props = src_store.row_properties(slot.row_id);
 
-            store.push_id(&id_val);
-            store.push_title(&title_val);
-            let dest_row_id = store.push_row(&props);
-            row_id_for_old.insert(old_id, dest_row_id);
+            dest_store.push_id(&id_val);
+            dest_store.push_title(&title_val);
+            let dest_row_id = dest_store.push_row(&props);
+
+            let new_node_data = NodeData {
+                id: id_val,
+                title: title_val,
+                node_type: type_key,
+                properties: PropertyStorage::Columnar {
+                    store: Arc::clone(&placeholder_arc),
+                    row_id: dest_row_id,
+                },
+            };
+            crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
         }
-
-        dest_stores.insert(type_name.clone(), Arc::new(store));
+    } else if !dest_stores.is_empty() {
+        // dest_stores has entries but source isn't disk-backed. Streaming
+        // primitives only matter at Wikidata scale, which means disk; the
+        // in-memory / mapped path uses extract_subgraph + write_graph_v3.
+        return Err(
+            "save_subset_streaming_disk currently requires a disk-backed source".to_string(),
+        );
     }
-
-    // 4. Add a NodeData per kept node, in source-id order, so dest's auto-
-    //    assigned NodeIndex matches `rank.old_to_new(old_id)`.
-    //
-    //    DiskGraph::add_node reads only the row_id from PropertyStorage::
-    //    Columnar; the store Arc inside is irrelevant at add time. The
-    //    per-type Arcs are installed into dest.column_stores after this
-    //    loop, before any reads.
-    // The placeholder Arc is only used to pass DiskGraph::add_node — it
-    // reads `row_id` from the Columnar variant and discards the store.
-    // Reuse one of the real per-type Arcs; if there's nothing, the loop
-    // below skips entirely (no nodes kept).
-    let placeholder_store: Option<Arc<ColumnStore>> = dest_stores.values().next().cloned();
-
-    for old_id in 0..n_source_nodes as u32 {
-        if !rank.contains(old_id) {
-            continue;
-        }
-        let old_idx = NodeIndex::new(old_id as usize);
-        let nd = match source.graph.node_weight(old_idx) {
-            Some(n) => n,
-            None => continue,
-        };
-        let dest_row_id = match row_id_for_old.get(&old_id) {
-            Some(&r) => r,
-            None => continue,
-        };
-
-        let id_val = match &nd.properties {
-            PropertyStorage::Columnar { store: src, row_id } => {
-                src.get_id(*row_id).unwrap_or_else(|| nd.id.clone())
-            }
-            _ => nd.id.clone(),
-        };
-        let title_val = match &nd.properties {
-            PropertyStorage::Columnar { store: src, row_id } => {
-                src.get_title(*row_id).unwrap_or_else(|| nd.title.clone())
-            }
-            _ => nd.title.clone(),
-        };
-
-        let store_arc = match &placeholder_store {
-            Some(s) => Arc::clone(s),
-            None => continue, // no kept stores → nothing to add
-        };
-        let new_node_data = NodeData {
-            id: id_val,
-            title: title_val,
-            node_type: nd.node_type,
-            properties: PropertyStorage::Columnar {
-                store: store_arc,
-                row_id: dest_row_id,
-            },
-        };
-
-        crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
-    }
-
-    // Free the per-old-id mapping — we don't need it for edge translation
-    // (rank index handles that in O(1)).
-    drop(row_id_for_old);
 
     // 5. Install dest column stores into both DirGraph and DiskGraph.
     //    sync_disk_column_stores copies Arc references into DiskGraph's
     //    HashMap so post-load reads see the right stores.
-    dest.column_stores = dest_stores;
+    let arc_dest_stores: HashMap<String, Arc<ColumnStore>> = dest_stores
+        .into_iter()
+        .map(|(k, v)| (k, Arc::new(v)))
+        .collect();
+    dest.column_stores = arc_dest_stores;
     dest.sync_disk_column_stores();
 
     // 6. Walk source edges in edge_idx order. For each edge passing the
@@ -819,7 +826,31 @@ pub fn save_subset_streaming_disk(
     dest.rebuild_type_indices();
 
     // 8. Save: triggers build_csr_from_pending (the Phase 1 merge sort).
-    dest.save_disk(path_str)
+    let save_result = dest.save_disk(path_str);
+
+    // 9. Drop dest before cleaning the scratch dir so the mmap files
+    //    aren't held open. dest's column_stores carry Arc handles to the
+    //    scratch mmaps; once dest is gone, the Arcs drop and the kernel
+    //    releases the file handles.
+    drop(dest);
+    let _ = std::fs::remove_dir_all(&scratch_root);
+
+    save_result
+}
+
+/// File-system-safe slug for a node type name. Wikidata's type names
+/// include spaces, commas, and other characters; sanitize so each type
+/// gets a clean subdir.
+fn sanitize_type_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
