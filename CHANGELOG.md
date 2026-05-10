@@ -7,15 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.16] — 2026-05-10
+
 ### Added
 
 - **YAML `tools[].cypher` entries are now wired into MCP.** The
   `kglite-mcp-server` shim adds a `cypher_tools` module that
   registers each manifest-declared parameterised Cypher tool as a
   first-class MCP tool, dispatching to `graph.cypher(template,
-  params=args)` on the active graph. Closes the wishlist gap that
-  blocked all five production manifests' `tools:` sections from
-  reaching agents post-0.9.13. Schema is taken from the YAML
+  params=args)` on the active graph. Closes the gap that left all
+  five of the MCP-servers project's production manifests'
+  `tools:` sections invisible to agents after the Python
+  `kglite.mcp_server` was retired. Schema is taken from the YAML
   `parameters:` block when present, otherwise an empty object schema.
 - **`manifest.workspace.kind: local` is now honored.** The shim
   promotes a manifest-declared local workspace into a new internal
@@ -25,62 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over the `--workspace` CLI flag, mirroring the framework's own
   binary. Lets users retire `code_review_mcp_server.py`-style
   custom Python servers in favour of a YAML manifest.
-
-### Changed
-
-- **`kglite-mcp-server` now pins mcp-methods 0.3.23** (rev `e45a282`).
-  0.3.23 makes `build_tool_attr` public so the shim can register
-  dynamic tools, and filters empty-string `GITHUB_TOKEN` so an
-  operator who wants to disable GitHub tools at runtime can clear
-  the env var without unsetting it. Both findings came out of the
-  smoke-suite work below.
-
-### Fixed
-
-- **`save_disk` no longer fails with `OSError: Invalid argument (os error 22)`
-  on disk-backed graphs whose column stores are empty.** The unified
-  mega-file writer added in 0.9.15 had an early-return gate that
-  required *both* `total_bytes == 0` *and* `unhandled.is_empty()` —
-  but unhandled types only need sidecar fallback, never bytes in the
-  mega-file. With non-zero `unhandled` and zero planned bytes, the
-  code fell through to `mmap::map_mut` on a 0-byte file, which is
-  `EINVAL` on every Unix. Triggered on every fresh disk graph
-  (`KnowledgeGraph(storage="disk", ...).add_nodes(...).save(...)`) —
-  the entire `tests/test_disk_property_index.py` suite was failing.
-
-### Changed
-
-- **`kglite-mcp-server` now pins mcp-methods 0.3.22** (rev `7b284dd`).
-  The release brings `.env` auto-loading, GitHub-tool drill-down via
-  `element_id`, honest tool listing gated on `GITHUB_TOKEN`,
-  `inventory.json` `last_built_sha` + auto-rebuild gating on
-  `repo_management(update=True)`, `workspace.kind: local` mode, and a
-  `mcp_methods.fastmcp` Python helper submodule
-  (`register_overview` / `register_cypher_query` /
-  `register_source_tools` / `register_save_graph` /
-  `serve_csv_via_http`). Existing YAML manifests parse unchanged —
-  every schema addition is optional.
-- The framework's embedder factory now hands back an
-  `Arc<EmbedderHandle>` (load/unload/embed/touch + idle tracking)
-  instead of a raw `Py<PyAny>`. The shim extracts the underlying
-  Python instance via `handle.instance()` and binds that to the
-  active graph; kglite's per-batch `set_embedder` lifecycle drives
-  the same instance the framework's idle-watch task observes.
-
-### Fixed
-
-- **`import_embeddings()` no longer silently drops mismatched files.**
-  When `imported == 0` but the `.kgle` file contained data, or when
-  a per-type store had zero matches, the call now emits a
-  `UserWarning` describing the mismatch (file path, counts, likely
-  cause). The result dict gains a `dropped_stores` key so callers
-  can detect partial-drop cases programmatically. Reported via the
-  MCP-servers wishlist after a 7 MB embedding file silently became
-  `{stores: 0, imported: 0, skipped: 1923}` against a graph whose
-  `code_tree` qualified-name format had drifted.
-
-### Added
-
 - **`graph.embedding_diagnostics(node_type=None)`** — companion to
   `list_embeddings()` that surfaces per-`(node_type, text_column)`
   coverage with three states: `"embedded"` (store and property both
@@ -93,6 +40,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documentation of the `code_tree` qualified-name format per
   language with a stability commitment within minor releases —
   `docs/guides/code-tree.md`.
+- Recipe: `SET` → `add_properties` migration for hub aggregations,
+  with a worked example showing `Agg.count()` / `Spatial.distance()`
+  helpers replacing imperative-Cypher `WITH ... SET ...` chains —
+  `docs/guides/recipes.md`.
+- End-to-end smoke suite for `kglite-mcp-server` over JSON-RPC stdio
+  (`tests/test_mcp_server_smoke.py`) — 25 tests covering every tool
+  the binary exposes (`cypher_query`, `graph_overview`, `save_graph`,
+  `read_source`, `grep`, `list_source`, `github_issues`, `github_api`,
+  `set_root_dir`, `ping`, plus YAML-declared parameterised Cypher
+  tools). Auto-skips when the binary isn't built; runs in ~3 s.
+
+### Changed
+
+- **`kglite-mcp-server` now pins mcp-methods 0.3.23** (rev `e45a282`,
+  bumped from 0.3.21). Brings, in order: `.env` auto-loading,
+  GitHub-tool drill-down via `element_id`, honest tool listing gated
+  on `GITHUB_TOKEN`, `inventory.json` `last_built_sha` + auto-rebuild
+  gating on `repo_management(update=True)`, framework parsing of
+  `workspace.kind: local`, the `mcp_methods.fastmcp` Python helper
+  submodule (`register_overview` / `register_cypher_query` /
+  `register_source_tools` / `register_save_graph` / `serve_csv_via_http`),
+  a public `build_tool_attr` for downstream cypher-tool registration,
+  and an empty-string filter in `auth_token`. Existing YAML manifests
+  parse unchanged — every schema addition is optional.
+- The framework's embedder factory now hands back an
+  `Arc<EmbedderHandle>` (load/unload/embed/touch + idle tracking)
+  instead of a raw `Py<PyAny>`. The shim extracts the underlying
+  Python instance via `handle.instance()` and binds that to the
+  active graph; kglite's per-batch `set_embedder` lifecycle drives
+  the same instance the framework's idle-watch task observes.
+- `README.md` migration note: replaces the old `pip install
+  "kglite[mcp]"` flow with `cargo install --path crates/kglite-mcp-server`.
+
+### Fixed
+
+- **`import_embeddings()` no longer silently drops mismatched files.**
+  When `imported == 0` but the `.kgle` file contained data, or when
+  a per-type store had zero matches, the call now emits a
+  `UserWarning` describing the mismatch (file path, counts, likely
+  cause). The result dict gains a `dropped_stores` key so callers
+  can detect partial-drop cases programmatically. Reported via the
+  MCP-servers wishlist after a 7 MB embedding file silently became
+  `{stores: 0, imported: 0, skipped: 1923}` against a graph whose
+  `code_tree` qualified-name format had drifted.
+- **`save_disk` no longer fails with `OSError: Invalid argument
+  (os error 22)` on disk-backed graphs.** The 0.9.15 unified
+  mega-file writer had an early-return gate that required *both*
+  `total_bytes == 0` *and* `unhandled.is_empty()` — but unhandled
+  types only need sidecar fallback, never bytes in the mega-file.
+  With non-zero `unhandled` and zero planned bytes, the code fell
+  through to `mmap::map_mut` on a 0-byte file, which returns EINVAL
+  on every Unix. Triggered on every fresh disk graph
+  (`KnowledgeGraph(storage="disk", ...).add_nodes(...).save(...)`) —
+  the entire `tests/test_disk_property_index.py` suite was failing.
 
 ## [0.9.15] — 2026-05-10
 
