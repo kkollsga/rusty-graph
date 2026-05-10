@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`embedding_diagnostics()` now sees columnar properties.** The
+  0.9.16 implementation iterated `NodeData::property_iter()`, which
+  yields nothing for `PropertyStorage::Columnar` — the variant nodes
+  use after save+reload. As a result, diagnostics on a freshly-loaded
+  graph reported `nodes_with_property: 0` for properties that
+  actually existed (Cypher `WHERE x IS NOT NULL` confirmed), flipping
+  the status to `store_orphan` on a healthy steady-state graph. Same
+  root cause hid the `embeddable` status when a `node_type` filter
+  was passed for a type with a string property but no store yet.
+  Fixed by switching to `properties_cloned()`, which dispatches
+  across all `PropertyStorage` variants. Two new regression tests
+  cover the save+reload and filter-by-type paths.
+
 ## [0.9.16] — 2026-05-10
 
 ### Added

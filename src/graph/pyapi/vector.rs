@@ -331,6 +331,13 @@ impl KnowledgeGraph {
         // First pass: count string-typed properties per node type. Skips
         // builtin columns (id / title / type) — those are handled below
         // when an embedding store keys against them.
+        //
+        // **Important**: use `properties_cloned()` (or `iter_owned()`)
+        // rather than `property_iter()` — the latter yields *nothing* for
+        // `PropertyStorage::Columnar` (the variant nodes use after a
+        // save+reload cycle), which produced `nodes_with_property=0` for
+        // every columnarised graph and flipped the status to
+        // `store_orphan` on a healthy steady-state graph.
         for type_name in &types_to_scan {
             let type_indices = match self.inner.type_indices.get(type_name) {
                 Some(ix) => ix,
@@ -341,10 +348,10 @@ impl KnowledgeGraph {
                     Some(n) => n,
                     None => continue,
                 };
-                for (key, value) in node.property_iter(&self.inner.interner) {
+                for (key, value) in node.properties_cloned(&self.inner.interner) {
                     if matches!(value, Value::String(_)) {
                         let entry = by_key
-                            .entry((type_name.clone(), key.to_string()))
+                            .entry((type_name.clone(), key))
                             .or_insert((0usize, None));
                         entry.0 += 1;
                     }

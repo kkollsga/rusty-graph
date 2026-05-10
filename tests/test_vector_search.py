@@ -1617,3 +1617,64 @@ class TestEmbeddingDiagnostics:
         assert r["status"] == "embedded"
         assert r["nodes_with_property"] == 3
         assert r["nodes_embedded"] == 3
+
+    def test_status_embedded_after_save_reload(self, tmp_path):
+        """Regression: after save+reload, nodes use PropertyStorage::Columnar
+        whose `property_iter` yields nothing — the pre-fix
+        embedding_diagnostics would report nodes_with_property=0 for a
+        healthy graph and flip status to 'store_orphan'. Verify it now
+        sees the columnar properties correctly."""
+        # Build, embed, save.
+        src = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [f"f{i}" for i in range(5)],
+                "title": [f"fn_{i}" for i in range(5)],
+                "docstring": [f"doc string number {i}" for i in range(5)],
+            }
+        )
+        src.add_nodes(df, "Function", "id", "title")
+        src.set_embeddings(
+            "Function",
+            "docstring",
+            {f"f{i}": [float(i), float(5 - i)] for i in range(5)},
+        )
+        kgl = os.path.join(tmp_path, "code.kgl")
+        src.save(kgl)
+
+        # Reload — this is the path that triggers columnar storage on the
+        # docstring property in the MCP operator's bug report.
+        reloaded = kglite.load(kgl)
+        diag = reloaded.embedding_diagnostics()
+        rows = [d for d in diag if d["text_column"] == "docstring"]
+        assert len(rows) == 1, f"expected one diagnostic row, got: {diag}"
+        r = rows[0]
+        assert r["nodes_with_property"] == 5, (
+            f"expected 5 nodes_with_property post-reload, got {r['nodes_with_property']} "
+            f"(if 0, the column-store scan regressed again)"
+        )
+        assert r["nodes_embedded"] == 5
+        assert r["status"] == "embedded"
+
+    def test_filter_by_type_surfaces_embeddable(self):
+        """Regression B2: embedding_diagnostics(node_type='X') used to return
+        [] for types with a string property but no embedding store, hiding
+        the 'embeddable' status entirely. Verify the embeddable row is now
+        emitted under a type filter."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2],
+                "title": ["A", "B"],
+                "summary": ["body one", "body two"],
+            }
+        )
+        graph.add_nodes(df, "Article", "id", "title")
+        # No set_embeddings — Article has a `summary` string property but
+        # no `summary_emb` store yet.
+        diag = graph.embedding_diagnostics(node_type="Article")
+        rows = [d for d in diag if d["text_column"] == "summary"]
+        assert len(rows) == 1, f"embeddable row should appear; got {diag}"
+        assert rows[0]["status"] == "embeddable"
+        assert rows[0]["nodes_with_property"] == 2
+        assert rows[0]["nodes_embedded"] == 0
