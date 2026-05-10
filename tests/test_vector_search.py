@@ -1509,3 +1509,111 @@ class TestImportEmbeddingsSilentDrop:
         assert stats["imported"] == 0
         assert stats["skipped"] == 0
         assert stats["dropped_stores"] == 0
+
+
+class TestEmbeddingDiagnostics:
+    """Coverage diagnostics for embedding stores. Companion to
+    list_embeddings() that surfaces the silent-drop case (store exists
+    but underlying property is absent in the current graph)."""
+
+    def test_status_embedded(self):
+        """Nodes have property AND store exists → status='embedded'."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2, 3], "title": ["a", "b", "c"], "summary": ["x", "y", "z"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0], 2: [0.0, 1.0], 3: [0.5, 0.5]})
+
+        diag = graph.embedding_diagnostics()
+        rows = [d for d in diag if d["text_column"] == "summary"]
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["node_type"] == "Article"
+        assert r["embedding_key"] == "summary_emb"
+        assert r["nodes_with_property"] == 3
+        assert r["nodes_embedded"] == 3
+        assert r["dimension"] == 2
+        assert r["metric"] == "cosine"
+        assert r["status"] == "embedded"
+
+    def test_status_embeddable(self):
+        """Nodes have property but no store → status='embeddable'."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["a", "b"], "summary": ["text1", "text2"]})
+        graph.add_nodes(df, "Article", "id", "title")
+
+        diag = graph.embedding_diagnostics()
+        rows = [d for d in diag if d["text_column"] == "summary"]
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["status"] == "embeddable"
+        assert r["nodes_with_property"] == 2
+        assert r["nodes_embedded"] == 0
+        assert r["dimension"] is None
+        assert r["metric"] is None
+
+    def test_status_store_orphan(self, tmp_path):
+        """Store exists but the property is absent on every node → 'store_orphan'.
+        Reproduces the silent-drop case: import a .kgle into a graph whose IDs
+        don't match — the store would only be created if at least one matched,
+        so we simulate via direct API construction instead."""
+        # Build source with embeddings, export.
+        src = kglite.KnowledgeGraph()
+        df_src = pd.DataFrame({"id": [1, 2], "title": ["a", "b"], "summary": ["x", "y"]})
+        src.add_nodes(df_src, "Article", "id", "title")
+        src.set_embeddings("Article", "summary", {1: [1.0, 0.0], 2: [0.0, 1.0]})
+        kgle = os.path.join(tmp_path, "src.kgle")
+        src.export_embeddings(kgle)
+
+        # Target: same IDs (so the import succeeds and creates a store)
+        # but no `summary` property on any node — simulates a target
+        # that lost the source column between releases.
+        target = kglite.KnowledgeGraph()
+        df_target = pd.DataFrame({"id": [1, 2], "title": ["a", "b"]})
+        target.add_nodes(df_target, "Article", "id", "title")
+        target.import_embeddings(kgle)
+
+        diag = target.embedding_diagnostics()
+        rows = [d for d in diag if d["text_column"] == "summary"]
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["status"] == "store_orphan"
+        assert r["nodes_with_property"] == 0
+        assert r["nodes_embedded"] == 2
+
+    def test_filter_by_node_type(self):
+        """Passing node_type scopes the scan; other types are not in output."""
+        graph = kglite.KnowledgeGraph()
+        articles = pd.DataFrame({"id": [1, 2], "title": ["a", "b"], "summary": ["x", "y"]})
+        authors = pd.DataFrame({"id": [10], "title": ["alice"], "bio": ["story"]})
+        graph.add_nodes(articles, "Article", "id", "title")
+        graph.add_nodes(authors, "Author", "id", "title")
+
+        diag = graph.embedding_diagnostics(node_type="Article")
+        types_in_output = {d["node_type"] for d in diag}
+        assert types_in_output == {"Article"}
+
+    def test_unknown_type_raises(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["a"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        with pytest.raises(ValueError, match="does not exist"):
+            graph.embedding_diagnostics(node_type="Nonexistent")
+
+    def test_empty_graph_returns_empty(self):
+        graph = kglite.KnowledgeGraph()
+        assert graph.embedding_diagnostics() == []
+
+    def test_builtin_title_column_counted(self):
+        """A `title_emb` store keys against the builtin title — diagnostics
+        should report nodes_with_property = total node count, not 0."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2, 3], "title": ["a", "b", "c"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.set_embeddings("Article", "title", {1: [1.0, 0.0], 2: [0.0, 1.0], 3: [0.5, 0.5]})
+        diag = graph.embedding_diagnostics()
+        rows = [d for d in diag if d["text_column"] == "title"]
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["status"] == "embedded"
+        assert r["nodes_with_property"] == 3
+        assert r["nodes_embedded"] == 3

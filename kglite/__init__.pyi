@@ -3656,6 +3656,36 @@ class KnowledgeGraph:
         """
         ...
 
+    def embedding_diagnostics(self, node_type: Optional[str] = None) -> list[dict[str, Any]]:
+        """Diagnose embedding coverage per (node_type, text_column).
+
+        Companion to ``list_embeddings()``. Surfaces three states:
+
+        - ``"embedded"``: a store exists and at least one node has the
+          underlying property.
+        - ``"embeddable"``: nodes have a string-typed property but no
+          embedding store has been created or restored.
+        - ``"store_orphan"``: a store exists but no node in the current
+          graph has the underlying property — the symptom
+          ``import_embeddings()`` warns about when keys mismatch.
+
+        Use this after a ``UserWarning`` from ``import_embeddings()`` to
+        see *which* stores were dropped or partially mapped.
+
+        Args:
+            node_type: Optional filter. When set, only that node type is
+                scanned. When ``None``, every type in the graph is scanned
+                — may be expensive on graphs with millions of nodes.
+
+        Returns:
+            List of dicts with: ``node_type``, ``text_column``,
+            ``embedding_key`` (= ``f"{text_column}_emb"``),
+            ``nodes_with_property``, ``nodes_embedded``,
+            ``dimension`` (or ``None``), ``metric`` (or ``None``),
+            and ``status``.
+        """
+        ...
+
     def export_embeddings(
         self,
         path: str,

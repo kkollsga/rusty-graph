@@ -21,8 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`graph.embedding_diagnostics(node_type=None)`** — companion to
+  `list_embeddings()` that surfaces per-`(node_type, text_column)`
+  coverage with three states: `"embedded"` (store and property both
+  present), `"embeddable"` (property present, no store), and
+  `"store_orphan"` (store present, no node has the property — the
+  symptom an `import_embeddings()` warning indicates). Use it after
+  a silent-drop warning to see which stores are affected.
 - Type stubs for `import_embeddings()` and `export_embeddings()` —
   both methods existed but were missing from `kglite/__init__.pyi`.
+- Documentation of the `code_tree` qualified-name format per
+  language with a stability commitment within minor releases —
+  `docs/guides/code-tree.md`.
 
 ## [0.9.15] — 2026-05-10
 

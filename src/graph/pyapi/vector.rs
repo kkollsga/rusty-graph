@@ -274,6 +274,153 @@ impl KnowledgeGraph {
         py_list.into_py_any(py)
     }
 
+    /// Diagnose embedding coverage per (node_type, text_column).
+    ///
+    /// Surfaces three states the silent-drop case maps to:
+    ///
+    /// - ``"embedded"``: an embedding store exists and at least one node
+    ///   has the underlying property.
+    /// - ``"embeddable"``: nodes have a string-typed property but no
+    ///   embedding store has been created or restored.
+    /// - ``"store_orphan"``: an embedding store exists but no node in
+    ///   the current graph has the underlying property — the symptom
+    ///   ``import_embeddings()`` warns about when keys mismatch.
+    ///
+    /// Args:
+    ///     node_type: Optional. When set, only that node type is scanned.
+    ///         When ``None``, every type in the graph is scanned (may be
+    ///         expensive on graphs with millions of nodes — pass a type
+    ///         to scope the scan).
+    ///
+    /// Returns:
+    ///     List of dicts with: ``node_type``, ``text_column``,
+    ///     ``embedding_key`` (= ``f"{text_column}_emb"``),
+    ///     ``nodes_with_property``, ``nodes_embedded``,
+    ///     ``dimension`` (or ``None``), ``metric`` (or ``None``),
+    ///     and ``status``.
+    #[pyo3(signature = (node_type=None))]
+    fn embedding_diagnostics(
+        &self,
+        py: Python<'_>,
+        node_type: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::datatypes::values::Value;
+
+        // Validate the filter type up front so unknown types fail loudly
+        // instead of silently returning an empty list.
+        if let Some(t) = node_type {
+            if !self.inner.type_indices.contains_key(t) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Node type '{}' does not exist in the graph",
+                    t
+                )));
+            }
+        }
+
+        // (node_type, text_column) → (nodes_with_property, optional store).
+        // BTreeMap keeps the output deterministic (sorted by type then column).
+        type Stats<'a> = (usize, Option<&'a schema::EmbeddingStore>);
+        let mut by_key: std::collections::BTreeMap<(String, String), Stats<'_>> =
+            std::collections::BTreeMap::new();
+
+        let types_to_scan: Vec<String> = match node_type {
+            Some(t) => vec![t.to_string()],
+            None => self.inner.type_indices.keys().map(String::from).collect(),
+        };
+
+        // First pass: count string-typed properties per node type. Skips
+        // builtin columns (id / title / type) — those are handled below
+        // when an embedding store keys against them.
+        for type_name in &types_to_scan {
+            let type_indices = match self.inner.type_indices.get(type_name) {
+                Some(ix) => ix,
+                None => continue,
+            };
+            for nidx in type_indices.iter() {
+                let node = match self.inner.graph.node_weight(nidx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                for (key, value) in node.property_iter(&self.inner.interner) {
+                    if matches!(value, Value::String(_)) {
+                        let entry = by_key
+                            .entry((type_name.clone(), key.to_string()))
+                            .or_insert((0usize, None));
+                        entry.0 += 1;
+                    }
+                }
+            }
+        }
+
+        // Second pass: attach embedding store info, and add entries for
+        // stores whose underlying column had no corresponding string
+        // property (e.g. builtin columns like `title`, or actual orphans
+        // after an import_embeddings silent-drop).
+        for ((store_type, store_name), store) in &self.inner.embeddings {
+            if let Some(t) = node_type {
+                if store_type != t {
+                    continue;
+                }
+            }
+            let text_column = store_name
+                .strip_suffix("_emb")
+                .unwrap_or(store_name.as_str())
+                .to_string();
+            let entry = by_key
+                .entry((store_type.clone(), text_column.clone()))
+                .or_insert((0usize, None));
+            entry.1 = Some(store);
+            // Treat builtin columns as universally present so we don't
+            // mis-flag a `title_emb` store as a store_orphan.
+            if matches!(text_column.as_str(), "id" | "title" | "type") && entry.0 == 0 {
+                if let Some(type_indices) = self.inner.type_indices.get(store_type) {
+                    entry.0 = type_indices.len();
+                }
+            }
+        }
+
+        let py_list = PyList::empty(py);
+        for ((type_name, text_column), (nodes_with_property, store)) in by_key {
+            // Drop entries that ended up with no signal at all (no
+            // property, no store) — they happen when a non-string slot
+            // shows up via the schema scan path.
+            if nodes_with_property == 0 && store.is_none() {
+                continue;
+            }
+            let dict = PyDict::new(py);
+            dict.set_item("node_type", &type_name)?;
+            dict.set_item("text_column", &text_column)?;
+            dict.set_item("embedding_key", format!("{}_emb", text_column))?;
+            dict.set_item("nodes_with_property", nodes_with_property)?;
+            let nodes_embedded = store.map(|s| s.len()).unwrap_or(0);
+            dict.set_item("nodes_embedded", nodes_embedded)?;
+            let status = if store.is_none() {
+                "embeddable"
+            } else if nodes_with_property == 0 {
+                "store_orphan"
+            } else {
+                "embedded"
+            };
+            dict.set_item("status", status)?;
+            match store {
+                Some(s) => {
+                    dict.set_item("dimension", s.dimension)?;
+                    dict.set_item(
+                        "metric",
+                        s.metric.clone().unwrap_or_else(|| "cosine".to_string()),
+                    )?;
+                }
+                None => {
+                    dict.set_item("dimension", py.None())?;
+                    dict.set_item("metric", py.None())?;
+                }
+            }
+            py_list.append(dict)?;
+        }
+
+        py_list.into_py_any(py)
+    }
+
     /// Remove an embedding store.
     ///
     /// Args:
