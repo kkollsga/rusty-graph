@@ -8,6 +8,7 @@
 /data/
 /dev-documentation/
 /bench/
+/inbox/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
 /target/
