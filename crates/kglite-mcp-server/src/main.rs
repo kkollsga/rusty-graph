@@ -193,16 +193,24 @@ async fn main() -> Result<()> {
     let mut server = McpServer::new(options);
     tools::register(&mut server, graph_state.clone());
 
-    // Manifest python: tools + custom embedder. The framework returns
-    // the embedder PyObject; we bind it to the active graph here so
-    // `text_score()` queries work post-load.
+    // Manifest python: tools + custom embedder. As of mcp-methods
+    // 0.3.22 the framework returns an `Arc<EmbedderHandle>` (load /
+    // unload / embed + idle-watch tracking) instead of a raw
+    // `Py<PyAny>`. We pull the underlying Python instance out of
+    // the handle and bind that to the active graph — kglite's
+    // per-batch `try_load_embedder` / `try_unload_embedder` in
+    // `vector.rs` then drives the same instance the framework's
+    // idle-watch task is observing. Both lifecycle layers operate
+    // on the same Python object; per-batch is the primary driver,
+    // idle-watch is a safety net (per the 0.3.22 ack).
     let py_ext = match manifest.as_ref() {
         Some(m) => apply_python_extensions(&mut server, m, cli.trust_tools)?,
         None => PythonExtensions::default(),
     };
-    if let Some(emb) = py_ext.embedder {
+    if let Some(handle) = py_ext.embedder {
+        let instance = pyo3::Python::attach(|py| handle.instance().clone_ref(py));
         graph_state
-            .bind_embedder(emb)
+            .bind_embedder(instance)
             .context("graph.set_embedder failed")?;
     }
 

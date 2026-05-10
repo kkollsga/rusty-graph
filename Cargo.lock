@@ -1338,8 +1338,8 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.21"
-source = "git+https://github.com/kkollsga/mcp-methods.git?rev=34d000a2a09d5e298d354db99189459490e08822#34d000a2a09d5e298d354db99189459490e08822"
+version = "0.3.22"
+source = "git+https://github.com/kkollsga/mcp-methods.git?rev=7b284dd4f1e540ab2e1308238e5fe089b968497b#7b284dd4f1e540ab2e1308238e5fe089b968497b"
 dependencies = [
  "fancy-regex",
  "grep-matcher",
@@ -1356,7 +1356,7 @@ dependencies = [
 [[package]]
 name = "mcp-server"
 version = "0.0.1"
-source = "git+https://github.com/kkollsga/mcp-methods.git?rev=34d000a2a09d5e298d354db99189459490e08822#34d000a2a09d5e298d354db99189459490e08822"
+source = "git+https://github.com/kkollsga/mcp-methods.git?rev=7b284dd4f1e540ab2e1308238e5fe089b968497b#7b284dd4f1e540ab2e1308238e5fe089b968497b"
 dependencies = [
  "anyhow",
  "clap",

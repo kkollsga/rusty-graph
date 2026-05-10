@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`kglite-mcp-server` now pins mcp-methods 0.3.22** (rev `7b284dd`).
+  The release brings `.env` auto-loading, GitHub-tool drill-down via
+  `element_id`, honest tool listing gated on `GITHUB_TOKEN`,
+  `inventory.json` `last_built_sha` + auto-rebuild gating on
+  `repo_management(update=True)`, `workspace.kind: local` mode, and a
+  `mcp_methods.fastmcp` Python helper submodule
+  (`register_overview` / `register_cypher_query` /
+  `register_source_tools` / `register_save_graph` /
+  `serve_csv_via_http`). Existing YAML manifests parse unchanged —
+  every schema addition is optional.
+- The framework's embedder factory now hands back an
+  `Arc<EmbedderHandle>` (load/unload/embed/touch + idle tracking)
+  instead of a raw `Py<PyAny>`. The shim extracts the underlying
+  Python instance via `handle.instance()` and binds that to the
+  active graph; kglite's per-batch `set_embedder` lifecycle drives
+  the same instance the framework's idle-watch task observes.
+
 ### Fixed
 
 - **`import_embeddings()` no longer silently drops mismatched files.**

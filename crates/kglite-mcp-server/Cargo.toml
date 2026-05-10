@@ -17,7 +17,7 @@ path = "src/main.rs"
 # is taken on crates.io by the official Anthropic SDK, so we ship via git
 # until the framework is published under a different name. Pinned by rev
 # for reproducibility; bump in lockstep with mcp-methods releases.
-mcp-server = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "34d000a2a09d5e298d354db99189459490e08822" }
+mcp-server = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "7b284dd4f1e540ab2e1308238e5fe089b968497b" }
 
 # Same kglite crate the Python wheel builds from. We want it as an rlib
 # (pure Rust API), no PyO3 extension features.
