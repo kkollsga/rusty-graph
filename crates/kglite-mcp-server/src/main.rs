@@ -23,11 +23,12 @@ use mcp_server::manifest::{find_sibling_manifest, find_workspace_manifest, Manif
 use mcp_server::server::{McpServer, ServerOptions};
 use mcp_server::{
     apply_python_extensions, init_tracing, maybe_watch, resolve_source_roots, watch, workspace,
-    Manifest, PythonExtensions,
+    Manifest, PythonExtensions, WorkspaceKind,
 };
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
+mod cypher_tools;
 mod tools;
 use crate::tools::GraphState;
 
@@ -65,10 +66,26 @@ struct Cli {
 
 #[derive(Debug, Clone)]
 enum Mode {
-    Graph { path: PathBuf },
-    SourceRoot { dir: PathBuf },
-    Workspace { dir: PathBuf },
-    Watch { dir: PathBuf },
+    Graph {
+        path: PathBuf,
+    },
+    SourceRoot {
+        dir: PathBuf,
+    },
+    Workspace {
+        dir: PathBuf,
+    },
+    /// `manifest.workspace.kind: local`. Equivalent to `--workspace`
+    /// but bound to a fixed local directory (no clone) and with
+    /// `set_root_dir` registered for runtime root swap. Manifest
+    /// declaration wins over the `--workspace` CLI flag.
+    LocalWorkspace {
+        root: PathBuf,
+        watch: bool,
+    },
+    Watch {
+        dir: PathBuf,
+    },
     Bare,
 }
 
@@ -91,6 +108,7 @@ fn fallback_name(mode: &Mode) -> &'static str {
         Mode::Graph { .. } => "KGLite (single-graph)",
         Mode::SourceRoot { .. } => "KGLite (source-root)",
         Mode::Workspace { .. } => "KGLite (workspace)",
+        Mode::LocalWorkspace { .. } => "KGLite (local-workspace)",
         Mode::Watch { .. } => "KGLite (watch)",
         Mode::Bare => "KGLite",
     }
@@ -100,6 +118,7 @@ fn default_manifest_path(mode: &Mode) -> Option<PathBuf> {
     match mode {
         Mode::Graph { path } => find_sibling_manifest(path),
         Mode::Workspace { dir } | Mode::Watch { dir } => find_workspace_manifest(dir),
+        Mode::LocalWorkspace { root, .. } => find_workspace_manifest(root),
         Mode::SourceRoot { .. } | Mode::Bare => None,
     }
 }
@@ -125,7 +144,7 @@ fn load_manifest(cli: &Cli, mode: &Mode) -> Result<Option<Manifest>, ManifestErr
 async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
-    let mode = pick_mode(&cli);
+    let mut mode = pick_mode(&cli);
 
     if let Mode::Graph { path } = &mode {
         if !path.is_file() {
@@ -142,6 +161,33 @@ async fn main() -> Result<()> {
     }
 
     let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
+
+    // Manifest `workspace.kind: local` wins over CLI flags — promote
+    // before mode-specific binding runs so the rest of the boot path
+    // sees `Mode::LocalWorkspace`. Mirrors the framework's own
+    // `mcp-server` binary (`crates/mcp-server/src/main.rs` in 0.3.23+).
+    if let Some(m) = manifest.as_ref() {
+        if let Some(wcfg) = m.workspace.as_ref() {
+            if wcfg.kind == WorkspaceKind::Local {
+                let raw_root = wcfg.root.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("manifest.workspace.kind=local is missing required `root`")
+                })?;
+                let base = m
+                    .yaml_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let resolved = base.join(raw_root).canonicalize().with_context(|| {
+                    format!("workspace.root {raw_root:?} resolves to a path that does not exist")
+                })?;
+                mode = Mode::LocalWorkspace {
+                    root: resolved,
+                    watch: wcfg.watch,
+                };
+            }
+        }
+    }
+
     let mut options = ServerOptions::from_manifest(manifest.as_ref(), fallback_name(&mode));
     if cli.name.is_some() {
         options.name = cli.name.clone();
@@ -179,6 +225,16 @@ async fn main() -> Result<()> {
                 .context("workspace init failed")?;
             options = options.with_workspace(ws);
         }
+        Mode::LocalWorkspace { root, .. } => {
+            let gs = graph_state.clone();
+            let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
+                tracing::info!(repo = name, "code_tree::build on local-workspace activate");
+                gs.build_code_tree(path)
+            });
+            let ws = workspace::Workspace::open_local(root.clone(), Some(hook))
+                .context("local-workspace init failed")?;
+            options = options.with_workspace(ws);
+        }
         Mode::Bare => {
             if let Some(m) = manifest.as_ref() {
                 if !m.source_roots.is_empty() {
@@ -214,18 +270,46 @@ async fn main() -> Result<()> {
             .context("graph.set_embedder failed")?;
     }
 
-    // Watch handler: rebuild on every debounced change batch.
-    let watch_handle = if let Mode::Watch { dir } = &mode {
-        let canon = dir.canonicalize()?;
-        let gs = graph_state.clone();
-        let cb: watch::ChangeHandler = Arc::new(move |_paths| {
-            if let Err(e) = gs.build_code_tree(&canon) {
-                tracing::warn!(error = %e, "code_tree rebuild failed");
-            }
-        });
-        maybe_watch(Some(dir), Some(cb))?
-    } else {
-        None
+    // YAML-declared `tools[].cypher` entries. The mcp-methods framework
+    // parses them into `manifest.tools` but stays domain-agnostic and
+    // doesn't know how to run Cypher — so the kglite shim owns the
+    // registration loop, using the framework's now-public
+    // `build_tool_attr` plus an in-shim runner that dispatches into the
+    // active graph's `cypher(template, params=args)` method.
+    if let Some(m) = manifest.as_ref() {
+        let runner = cypher_tools::make_runner(graph_state.clone());
+        let registered = cypher_tools::register_cypher_tools(&mut server, m, runner)
+            .context("YAML cypher tool registration failed")?;
+        if registered > 0 {
+            tracing::info!(count = registered, "manifest cypher tools registered");
+        }
+    }
+
+    // Watch handler: rebuild on every debounced change batch. Both
+    // explicit `--watch DIR` and `manifest.workspace.kind: local` with
+    // `watch: true` wire the same change-handler shape.
+    let watch_handle = match &mode {
+        Mode::Watch { dir } => {
+            let canon = dir.canonicalize()?;
+            let gs = graph_state.clone();
+            let cb: watch::ChangeHandler = Arc::new(move |_paths| {
+                if let Err(e) = gs.build_code_tree(&canon) {
+                    tracing::warn!(error = %e, "code_tree rebuild failed");
+                }
+            });
+            maybe_watch(Some(dir), Some(cb))?
+        }
+        Mode::LocalWorkspace { root, watch: true } => {
+            let canon = root.clone();
+            let gs = graph_state.clone();
+            let cb: watch::ChangeHandler = Arc::new(move |_paths| {
+                if let Err(e) = gs.build_code_tree(&canon) {
+                    tracing::warn!(error = %e, "code_tree rebuild failed (local workspace)");
+                }
+            });
+            maybe_watch(Some(root), Some(cb))?
+        }
+        _ => None,
     };
     let _watch_handle = watch_handle;
 
@@ -244,6 +328,11 @@ fn print_boot_summary(mode: &Mode, manifest: Option<&Manifest>, graph_state: &Gr
         Mode::Graph { path } => format!("graph [{}]", path.display()),
         Mode::SourceRoot { dir } => format!("source-root [{}]", dir.display()),
         Mode::Workspace { dir } => format!("workspace [{}]", dir.display()),
+        Mode::LocalWorkspace { root, watch } => format!(
+            "local-workspace [{}{}]",
+            root.display(),
+            if *watch { " +watch" } else { "" }
+        ),
         Mode::Watch { dir } => format!("watch [{}]", dir.display()),
         Mode::Bare => "bare".to_string(),
     };

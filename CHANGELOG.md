@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **YAML `tools[].cypher` entries are now wired into MCP.** The
+  `kglite-mcp-server` shim adds a `cypher_tools` module that
+  registers each manifest-declared parameterised Cypher tool as a
+  first-class MCP tool, dispatching to `graph.cypher(template,
+  params=args)` on the active graph. Closes the wishlist gap that
+  blocked all five production manifests' `tools:` sections from
+  reaching agents post-0.9.13. Schema is taken from the YAML
+  `parameters:` block when present, otherwise an empty object schema.
+- **`manifest.workspace.kind: local` is now honored.** The shim
+  promotes a manifest-declared local workspace into a new internal
+  `Mode::LocalWorkspace` before mode-specific binding, with
+  `set_root_dir` registered for runtime root swap and an optional
+  debounced watch loop on `watch: true`. Manifest declaration wins
+  over the `--workspace` CLI flag, mirroring the framework's own
+  binary. Lets users retire `code_review_mcp_server.py`-style
+  custom Python servers in favour of a YAML manifest.
+
+### Changed
+
+- **`kglite-mcp-server` now pins mcp-methods 0.3.23** (rev `e45a282`).
+  0.3.23 makes `build_tool_attr` public so the shim can register
+  dynamic tools, and filters empty-string `GITHUB_TOKEN` so an
+  operator who wants to disable GitHub tools at runtime can clear
+  the env var without unsetting it. Both findings came out of the
+  smoke-suite work below.
+
 ### Fixed
 
 - **`save_disk` no longer fails with `OSError: Invalid argument (os error 22)`

@@ -535,15 +535,6 @@ class TestGithubTools:
 # ── Test: YAML manifest (parameterised Cypher tools + overview_prefix) ─────
 
 
-@pytest.mark.skip(
-    reason="kglite-mcp-server shim does not yet wire YAML `tools[].cypher` "
-    "entries through to MCP tools. The framework parses them into "
-    "`manifest.tools` but exposes no public helper to register them; "
-    "we'd need to either replicate `build_tool_attr` from "
-    "mcp-methods/crates/mcp-server/src/python.rs or get the framework "
-    "to expose a `register_cypher_tools(server, manifest, callback)` "
-    "helper. Tracked as a follow-up against mcp-methods."
-)
 class TestYamlManifest:
     """A `<basename>_mcp.yaml` next to the .kgl auto-extends the tool surface."""
 
@@ -589,16 +580,6 @@ class TestYamlManifest:
 # ── Test: workspace.kind: local (new in 0.3.22) ───────────────────────────
 
 
-@pytest.mark.skip(
-    reason="kglite-mcp-server shim does not yet honor `manifest.workspace.kind: local`. "
-    "The framework parses it into `manifest.workspace`, but the shim's "
-    "main.rs `pick_mode` only reacts to CLI flags (`--graph`, "
-    "`--workspace`, `--watch`, `--source-root`), never promoting a "
-    "manifest-declared local workspace into Mode::Workspace. The "
-    "framework's own mcp-server binary does this — port the same logic "
-    "into kglite's main.rs (early-bind manifest.workspace before "
-    "pick_mode) to close this gap."
-)
 class TestLocalWorkspace:
     """`workspace.kind: local` registers `set_root_dir` for runtime root swap."""
 

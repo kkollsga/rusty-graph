@@ -105,6 +105,70 @@ impl GraphState {
             None => NO_GRAPH.to_string(),
         }
     }
+
+    /// Run a parameterised Cypher template against the active graph.
+    /// Used by the YAML-declared `tools[].cypher` registration path
+    /// (see `crate::cypher_tools::register_cypher_tools`). The agent's
+    /// argument map is forwarded as `params=...` to `graph.cypher`,
+    /// which substitutes `$name` placeholders in the template.
+    ///
+    /// Returns the rendered tool body (or the standard "no graph"
+    /// message / a Cypher error string).
+    pub fn run_cypher_template(
+        &self,
+        template: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let guard = self.inner.read().unwrap();
+        let Some(active) = guard.as_ref() else {
+            return NO_GRAPH.to_string();
+        };
+        Python::attach(|py| -> PyResult<String> {
+            let kwargs = PyDict::new(py);
+            let params = PyDict::new(py);
+            for (k, v) in args {
+                params.set_item(k, json_to_py(py, v)?)?;
+            }
+            kwargs.set_item("params", params)?;
+            let result = active
+                .py_obj
+                .call_method(py, "cypher", (template,), Some(&kwargs))?;
+            format_cypher_result(py, &result)
+        })
+        .unwrap_or_else(|e| format!("Cypher error: {e}"))
+    }
+}
+
+/// Format a `g.cypher(...)` Python return value into a tool body string.
+/// String returns (CSV / EXPLAIN) pass through; iterable returns are
+/// repr'd row-by-row with a 15-row inline cap, matching `cypher_query`.
+fn format_cypher_result(py: Python<'_>, result: &Py<PyAny>) -> PyResult<String> {
+    let bound = result.bind(py);
+    if let Ok(s) = bound.extract::<String>() {
+        return Ok(s);
+    }
+    let len: usize = bound
+        .call_method0("__len__")
+        .ok()
+        .and_then(|v| v.extract().ok())
+        .unwrap_or(0);
+    if len == 0 {
+        return Ok("No results.".to_string());
+    }
+    let header = if len > 15 {
+        format!("{len} row(s) (showing first 15):\n")
+    } else {
+        format!("{len} row(s):\n")
+    };
+    let mut out = header;
+    for (i, row) in bound.try_iter()?.enumerate() {
+        if i >= 15 {
+            break;
+        }
+        out.push_str(&row?.repr()?.to_string());
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -158,32 +222,7 @@ pub fn register(server: &mut McpServer, state: GraphState) {
 fn run_cypher(graph: &ActiveGraph, query: &str) -> String {
     Python::attach(|py| -> PyResult<String> {
         let result = graph.py_obj.call_method1(py, "cypher", (query,))?;
-        let bound = result.bind(py);
-        if let Ok(s) = bound.extract::<String>() {
-            return Ok(s);
-        }
-        let len: usize = bound
-            .call_method0("__len__")
-            .ok()
-            .and_then(|v| v.extract().ok())
-            .unwrap_or(0);
-        if len == 0 {
-            return Ok("No results.".to_string());
-        }
-        let header = if len > 15 {
-            format!("{len} row(s) (showing first 15):\n")
-        } else {
-            format!("{len} row(s):\n")
-        };
-        let mut out = header;
-        for (i, row) in bound.try_iter()?.enumerate() {
-            if i >= 15 {
-                break;
-            }
-            out.push_str(&row?.repr()?.to_string());
-            out.push('\n');
-        }
-        Ok(out)
+        format_cypher_result(py, &result)
     })
     .unwrap_or_else(|e| format!("Cypher error: {e}"))
 }
