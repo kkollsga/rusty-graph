@@ -155,10 +155,20 @@ prompt = f"You have a knowledge graph:\n{xml}\nAnswer via graph.cypher()."
 ```
 
 ```bash
-# Or serve the whole graph over MCP — installed as a console script.
-pip install "kglite[mcp]"
+# Or serve the whole graph over MCP. Since 0.9.14 the server is a
+# Rust-native single binary; install from a kglite source clone:
+git clone https://github.com/kkollsga/kglite && cd kglite
+cargo install --path crates/kglite-mcp-server
 kglite-mcp-server --graph path/to/graph.kgl
 ```
+
+> **Migrating from `pip install "kglite[mcp]"`?** The 0.9.13 Python
+> server was replaced by the Rust binary in 0.9.14. The YAML manifest
+> schema is unchanged — drop your existing `<basename>_mcp.yaml` next
+> to a `.kgl` and the new binary picks it up. Update any pinned paths
+> (`~/.claude.json`, `~/.claude/settings.json`) from the old
+> conda-bin location to wherever cargo placed the new binary,
+> typically `~/.cargo/bin/kglite-mcp-server`.
 
 Drop a `<basename>_mcp.yaml` next to the graph to auto-extend the
 tool surface — `source_root:` for read/grep/list over your source
