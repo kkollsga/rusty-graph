@@ -25,7 +25,7 @@ pub mod parallel_bz2;
 pub mod parser;
 pub mod writer;
 
-pub use column_builder::ColumnTypeMeta;
+pub use column_builder::{ColMapEntry, ColumnTypeMeta, FixedColMeta, RegionMeta, StrColMeta};
 pub use loader::load_ntriples;
 
 /// Per-counter value carried by [`ProgressEvent`]. Pure Rust — the

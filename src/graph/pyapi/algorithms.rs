@@ -1322,6 +1322,113 @@ impl KnowledgeGraph {
         Ok(dict.into())
     }
 
+    /// Variant of `_save_subset_filtered_by_edge_type` that produces
+    /// the *induced* subgraph: the kept-node set is still computed from
+    /// edges whose connection type matches one of `edge_types` (Pass A),
+    /// but the output keeps **every** edge between any two kept nodes,
+    /// not just the filter edge type itself.
+    ///
+    /// Useful for "all relations between articles and their authors":
+    /// `_save_subset_induced_by_edge_type(out, ["P50"])` keeps all P50
+    /// author edges *and* article→article citations (P2860), authorship-
+    /// shaped edges of other types (P2093 stated-author, P98 editor),
+    /// human→human relations between coauthors, etc. — every edge in
+    /// the source whose source and target are both endpoints of some
+    /// P50 edge.
+    ///
+    /// Output is bigger than the simple filter (often 2–5× more edges)
+    /// but matches the "subgraph induced by these node-set" intuition.
+    /// Disk-backed sources only.
+    #[pyo3(signature = (path, edge_types))]
+    fn _save_subset_induced_by_edge_type(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        edge_types: Vec<String>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::graph::mutation::subgraph_streaming::{
+            pass_a_scan, save_subset_streaming_disk, SubsetSpec,
+        };
+        use crate::graph::storage::backend::GraphBackend;
+        use std::collections::HashMap;
+
+        let spec = SubsetSpec {
+            edge_types: Some(
+                edge_types
+                    .iter()
+                    .map(|s| crate::graph::storage::interner::InternedKey::from_str(s))
+                    .collect(),
+            ),
+        };
+
+        let inner = self.inner.clone();
+        let path_owned = path.to_string();
+        let (scan_secs, kept_node_count, group_secs, save_secs, kept_edge_count_written) = py
+            .detach(move || -> PyResult<(f64, u64, f64, f64, u64)> {
+                let disk = match &inner.graph {
+                    GraphBackend::Disk(dg) => dg.as_ref(),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "_save_subset_induced_by_edge_type requires a disk-backed source.",
+                        ));
+                    }
+                };
+
+                let scan_t0 = std::time::Instant::now();
+                let pass_a = pass_a_scan(disk, &spec);
+                let scan_secs = scan_t0.elapsed().as_secs_f64();
+
+                let group_t0 = std::time::Instant::now();
+                let mut kept_per_type: HashMap<String, Vec<u32>> = HashMap::new();
+                for (type_name, type_nodes) in inner.type_indices.iter() {
+                    let mut kept: Vec<u32> = Vec::new();
+                    for nid in type_nodes.iter() {
+                        let id = nid.index();
+                        if pass_a.kept_nodes.get(id) {
+                            kept.push(id as u32);
+                        }
+                    }
+                    if !kept.is_empty() {
+                        kept_per_type.insert(type_name.to_string(), kept);
+                    }
+                }
+                let group_secs = group_t0.elapsed().as_secs_f64();
+
+                // Edge filter is None — keeps every edge whose endpoints
+                // are both in the kept-node set (the rank index drops
+                // edges whose endpoints are out of scope automatically).
+                let save_t0 = std::time::Instant::now();
+                save_subset_streaming_disk(
+                    &inner,
+                    &kept_per_type,
+                    None,
+                    std::path::Path::new(&path_owned),
+                )
+                .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+                let save_secs = save_t0.elapsed().as_secs_f64();
+
+                // We don't know the written edge count without re-scanning;
+                // report 0 here. Stats consumers can ask the loaded graph.
+                Ok((
+                    scan_secs,
+                    pass_a.stats.kept_node_count,
+                    group_secs,
+                    save_secs,
+                    0,
+                ))
+            })?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("pass_a_scan_secs", scan_secs)?;
+        dict.set_item("group_per_type_secs", group_secs)?;
+        dict.set_item("save_secs", save_secs)?;
+        dict.set_item("kept_node_count", kept_node_count)?;
+        // kept_edge_count for induced mode is "all edges among kept nodes" —
+        // not known without re-scanning. Caller can query the output graph.
+        let _ = kept_edge_count_written;
+        Ok(dict.into())
+    }
+
     /// Get statistics about the subgraph that would be extracted.
     ///
     /// Returns information about what would be included in a subgraph extraction

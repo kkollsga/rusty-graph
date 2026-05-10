@@ -1590,6 +1590,27 @@ impl DirGraph {
         // 0.8.12 phase-1: PR1 phase 4 moved `columns.bin` under
         // `seg_000/`, so the presence check covers both the root (legacy
         // flat layout) and `seg_000/` (post-phase-4 segmented layout).
+        // Mode-3 (new in 0.9.15): no preexisting `columns.bin` AND
+        // we have in-memory `column_stores` (typical fresh save:
+        // streaming carve, save_subset, mutation persist of an
+        // in-memory build). Emit the unified mega-file format that
+        // the loader's mmap fast path consumes — same layout the
+        // ntriples builder produces — so the saved graph loads with
+        // the same speed as a freshly-built one. Without this, a
+        // saved DiskGraph fell into the per-type zstd sidecar path
+        // and took ~70 s to load on a 17 M-node Wikidata carve vs.
+        // ~150 ms for the full graph.
+        let preexisting_columns_bin =
+            dir.join("seg_000/columns.bin").exists() || dir.join("columns.bin").exists();
+        if !preexisting_columns_bin && !self.column_stores.is_empty() {
+            crate::graph::io::unified_columns::write_unified_columns(
+                dir,
+                &self.column_stores,
+                &self.interner,
+            )
+            .map_err(|e| format!("unified columns write failed: {}", e))?;
+        }
+
         let columns_meta_path = {
             let seg0_bin = dir.join("seg_000/columns_meta.bin.zst");
             let seg0_json = dir.join("seg_000/columns_meta.json");

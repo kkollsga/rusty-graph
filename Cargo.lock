@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.9.14"
+version = "0.9.15"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "fancy-regex",
  "grep-matcher",

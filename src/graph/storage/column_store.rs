@@ -1548,6 +1548,32 @@ impl ColumnStore {
         &self.columns
     }
 
+    /// Access the optional id sidecar column.
+    pub fn id_column_ref(&self) -> Option<&TypedColumn> {
+        self.id_column.as_ref()
+    }
+
+    /// Access the optional title sidecar column.
+    pub fn title_column_ref(&self) -> Option<&TypedColumn> {
+        self.title_column.as_ref()
+    }
+
+    /// Raw bytes of the overflow_offsets array (u64 values, native
+    /// endian). Returns `None` when no overflow bag is installed.
+    pub fn overflow_offsets_bytes(&self) -> Option<Vec<u8>> {
+        self.overflow_offsets
+            .as_ref()
+            .map(|o| o.as_raw_bytes().to_vec())
+    }
+
+    /// Raw bytes of the overflow_data blob. Returns `None` when no
+    /// overflow bag is installed.
+    pub fn overflow_data_bytes(&self) -> Option<Vec<u8>> {
+        self.overflow_data
+            .as_ref()
+            .map(|d| d.as_raw_bytes().to_vec())
+    }
+
     // ── External-builder accessors ──────────────────────────────────
     //
     // The streaming subgraph filter (`save_subset`) builds a destination
@@ -1580,6 +1606,59 @@ impl ColumnStore {
     #[allow(dead_code)]
     pub fn replace_title_column(&mut self, col: TypedColumn) {
         self.title_column = Some(col);
+    }
+
+    /// Replace the overflow bag (offsets + data blob).
+    ///
+    /// Used by the streaming subgraph carve to persist non-schema
+    /// properties that the source had stored as per-row overflow
+    /// blobs. The wire format matches what `write_packed` emits and
+    /// `load_packed` reads back via the `__overflow_offsets__` /
+    /// `__overflow_data__` pseudo-columns.
+    pub fn replace_overflow_bag(&mut self, offsets: MmapOrVec<u64>, data: MmapBytes) {
+        self.overflow_offsets = Some(offsets);
+        self.overflow_data = Some(data);
+    }
+
+    /// Borrowed-value equivalent of [`Self::serialize_overflow_value`]
+    /// for hot-path callers that already hold a `BorrowedValue` slice
+    /// (avoids the clone into `Value`).
+    pub fn serialize_overflow_value_borrowed(
+        buf: &mut Vec<u8>,
+        key: InternedKey,
+        value: &crate::datatypes::values::BorrowedValue<'_>,
+    ) {
+        use crate::datatypes::values::BorrowedValue;
+        buf.extend_from_slice(&key.as_u64().to_le_bytes());
+        match value {
+            BorrowedValue::Null => buf.push(0),
+            BorrowedValue::Int64(v) => {
+                buf.push(1);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            BorrowedValue::Float64(v) => {
+                buf.push(2);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            BorrowedValue::UniqueId(v) => {
+                buf.push(3);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            BorrowedValue::Boolean(v) => {
+                buf.push(4);
+                buf.push(*v as u8);
+            }
+            BorrowedValue::DateTime(d) => {
+                buf.push(5);
+                let days = (*d - UNIX_EPOCH_DATE).num_days() as i32;
+                buf.extend_from_slice(&days.to_le_bytes());
+            }
+            BorrowedValue::String(s) => {
+                buf.push(6);
+                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
+        }
     }
 
     /// Set the row count after wiring up replaced columns. The store's

@@ -1494,10 +1494,28 @@ fn load_column_sidecars(
     dir: &std::path::Path,
     graph: &mut crate::graph::dir_graph::DirGraph,
 ) -> io::Result<()> {
+    use rayon::prelude::*;
+
     let columns_dir = dir.join("columns");
     if !columns_dir.exists() {
         return Ok(());
     }
+
+    // Collect job descriptors so the heavy work (read + zstd decode +
+    // ColumnStore::load_packed) can run in a rayon thread pool. On a
+    // 17M-node Wikidata article-author carve with ~4,500 distinct
+    // types, the previous sequential loop spent ~70 s in zstd alone;
+    // parallelising drops it to a few seconds on a 16-core machine.
+    struct Job {
+        type_name: String,
+        col_file: std::path::PathBuf,
+        schema: Arc<crate::graph::schema::TypeSchema>,
+        type_meta: std::collections::HashMap<String, String>,
+        // Pre-fetched fallback row-count for legacy (pre-0.8.12) sidecars.
+        legacy_row_count: u32,
+    }
+
+    let mut jobs: Vec<Job> = Vec::new();
     for entry in std::fs::read_dir(&columns_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -1512,25 +1530,6 @@ fn load_column_sidecars(
         if !col_file.exists() {
             continue;
         }
-        let compressed = std::fs::read(&col_file)?;
-        let decoded = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-        // New format: `KGLCOLv1` + row_count: u32 + packed bytes.
-        // Old format (pre-0.8.12): raw packed bytes. Dispatch via the
-        // magic tag. Old-format row_count is derived from
-        // `type_indices[type].len()` — wrong after DELETE tombstones
-        // (0.8.12 CHANGELOG F2), but best effort for legacy graphs.
-        let (packed_slice, row_count): (&[u8], u32) =
-            if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
-                let rc = u32::from_le_bytes(decoded[8..12].try_into().unwrap());
-                (&decoded[12..], rc)
-            } else {
-                let rc = graph
-                    .type_indices
-                    .get(&type_name)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
-                (decoded.as_slice(), rc)
-            };
         let schema = graph
             .type_schemas
             .get(&type_name)
@@ -1541,14 +1540,55 @@ fn load_column_sidecars(
             .get(&type_name)
             .cloned()
             .unwrap_or_default();
-        let store = crate::graph::storage::column_store::ColumnStore::load_packed(
+        let legacy_row_count = graph
+            .type_indices
+            .get(&type_name)
+            .map(|v| v.len() as u32)
+            .unwrap_or(0);
+        jobs.push(Job {
+            type_name,
+            col_file,
             schema,
-            &type_meta,
-            &graph.interner,
-            packed_slice,
-            row_count,
-            None,
-        )?;
+            type_meta,
+            legacy_row_count,
+        });
+    }
+
+    // Decompress + load_packed each sidecar in parallel.
+    let interner = &graph.interner;
+    let results: Vec<io::Result<(String, crate::graph::storage::column_store::ColumnStore)>> = jobs
+        .into_par_iter()
+        .map(
+            |job| -> io::Result<(String, crate::graph::storage::column_store::ColumnStore)> {
+                let compressed = std::fs::read(&job.col_file)?;
+                let decoded = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+                // New format: `KGLCOLv1` + row_count: u32 + packed bytes.
+                // Old format (pre-0.8.12): raw packed bytes. Dispatch via the
+                // magic tag. Old-format row_count is derived from
+                // `type_indices[type].len()` — wrong after DELETE tombstones
+                // (0.8.12 CHANGELOG F2), but best effort for legacy graphs.
+                let (packed_slice, row_count): (&[u8], u32) =
+                    if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
+                        let rc = u32::from_le_bytes(decoded[8..12].try_into().unwrap());
+                        (&decoded[12..], rc)
+                    } else {
+                        (decoded.as_slice(), job.legacy_row_count)
+                    };
+                let store = crate::graph::storage::column_store::ColumnStore::load_packed(
+                    job.schema,
+                    &job.type_meta,
+                    interner,
+                    packed_slice,
+                    row_count,
+                    None,
+                )?;
+                Ok((job.type_name, store))
+            },
+        )
+        .collect();
+
+    for r in results {
+        let (type_name, store) = r?;
         graph.column_stores.insert(type_name, Arc::new(store));
     }
     Ok(())

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.15] — 2026-05-10
+
+### Added
+
+- `KnowledgeGraph._save_subset_induced_by_edge_type(path, edge_types)`
+  — variant of `_save_subset_filtered_by_edge_type` that produces the
+  *induced* subgraph: the kept-node set is still derived from edges
+  matching `edge_types` (Pass A), but the output keeps **every** edge
+  between any two kept nodes, not just the filter edge type. On the
+  Wikidata `articles_authors` carve this expands the result from a
+  single P50 layer to ~174 M edges across 20 distinct types
+  (P2860 citations, P2093 stated authors, P98 editor, etc.) while
+  still pinning the node set to "articles + their authors". Disk
+  source only.
+
+### Fixed
+
+- **Streaming subgraph carve now round-trips non-schema properties.**
+  The disk-to-disk `save_subset_streaming_disk` writer dropped any
+  property whose key wasn't in the type's schema — Wikidata stores
+  most low-cardinality properties (P356 DOI, P577 publication date,
+  P304 page numbers, …) in a per-row overflow bag, and those were
+  silently lost on save. `TypeWriter` now accumulates an overflow
+  blob in the same wire format the source uses
+  (`[u16 num_entries] + [u64 key | u8 type_tag | value]`), and
+  `RowVisitor` routes non-schema keys into it instead of dropping
+  them. `ColumnStore::replace_overflow_bag` is the new setter.
+
+- **Saved DiskGraphs now load with mmap-fast-path speed.** A graph
+  built in memory and persisted via `save_disk` previously emitted
+  per-type zstd sidecars under `columns/<type>/columns.zst`, which
+  the loader rebuilt eagerly on every open — ~70 s on a 17 M-node
+  carve vs. ~150 ms for the same data when produced by the ntriples
+  builder. `save_disk` now emits the unified `seg_000/columns.bin`
+  mega-file format the loader's mmap fast path consumes (new
+  `crate::graph::io::unified_columns` module), so saved subgraphs
+  load in tens of milliseconds. Existing sidecar-format graphs still
+  load via the legacy path.
+
+### Performance
+
+- Legacy sidecar column loader (still used for pre-mega-file files)
+  parallelised via rayon — read + zstd decode + `load_packed` now
+  run per-type concurrently. ~2.3× faster on a 16-core machine for
+  the rare case of opening a sidecar-format graph.
+
 ## [0.9.14] — 2026-05-09
 
 ### Added

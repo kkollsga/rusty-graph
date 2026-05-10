@@ -63,6 +63,20 @@ pub(super) struct TypeWriter {
     /// `__title__` column. Pre-created as Str.
     title_col: ColumnWriter,
     row_count: u32,
+    /// Per-row offsets into [`Self::overflow_data`]. Length =
+    /// `row_count + 1` once `finalize` is called (with the final entry
+    /// being the past-the-end offset, matching the source's wire
+    /// format — see [`crate::graph::storage::column_store::ColumnStore::scan_overflow_blob`]).
+    overflow_offsets: Vec<u64>,
+    /// Concatenated per-row overflow blobs. Each row's blob is
+    /// `[u16 LE: num_entries] + entries…` where each entry is
+    /// `[u64 LE: key] + [u8: type_tag] + [type-specific value bytes]`.
+    /// Format mirrors [`crate::graph::io::ntriples::column_builder`].
+    overflow_data: Vec<u8>,
+    /// True once any property has been routed to overflow on any row.
+    /// Avoids emitting an overflow bag at all on types whose source
+    /// stored everything in schema slots.
+    overflow_used: bool,
 }
 
 /// Per-typed-column streaming writer. Each variant owns the open
@@ -152,6 +166,10 @@ impl TypeWriter {
         let id_col = ColumnWriter::open(id_type, "__id__", &out_dir)?;
         let title_col = ColumnWriter::open(title_type, "__title__", &out_dir)?;
 
+        // Overflow offsets always start with offset 0 for row 0; final
+        // past-the-end offset gets pushed in `finalize()`.
+        let overflow_offsets = vec![0u64];
+
         Ok(Self {
             schema,
             meta,
@@ -160,6 +178,9 @@ impl TypeWriter {
             id_col,
             title_col,
             row_count: 0,
+            overflow_offsets,
+            overflow_data: Vec::new(),
+            overflow_used: false,
         })
     }
 
@@ -220,11 +241,19 @@ impl TypeWriter {
         self.id_col.push_borrowed(id)?;
         self.title_col.push_borrowed(title)?;
 
+        // Per-row overflow scratch buffer. Starts with a 2-byte
+        // num_entries placeholder; finalised after the closure runs.
+        let mut row_overflow: Vec<u8> = Vec::new();
+        row_overflow.extend_from_slice(&0u16.to_le_bytes());
+        let mut row_overflow_count: u16 = 0;
+
         let filled = {
             let mut visitor = RowVisitor {
                 schema: &self.schema,
                 columns: &mut self.columns,
                 filled: SmallBitmap::new(self.schema.len()),
+                overflow_buf: &mut row_overflow,
+                overflow_count: &mut row_overflow_count,
             };
             f(&mut visitor)?;
             visitor.filled
@@ -234,6 +263,17 @@ impl TypeWriter {
                 self.columns[slot].push_borrowed(BorrowedValue::Null)?;
             }
         }
+
+        // Finalise the row's overflow blob: backfill the entry count.
+        // Append unconditionally — every row needs an entry in
+        // overflow_data so the offsets array stays in step with
+        // row_count, even when this row had no overflow keys.
+        if row_overflow_count > 0 {
+            self.overflow_used = true;
+        }
+        row_overflow[0..2].copy_from_slice(&row_overflow_count.to_le_bytes());
+        self.overflow_data.extend_from_slice(&row_overflow);
+        self.overflow_offsets.push(self.overflow_data.len() as u64);
 
         let row_id = self.row_count;
         self.row_count = self
@@ -262,6 +302,20 @@ impl TypeWriter {
         store.replace_title_column(title_typed);
         store.set_row_count(row_count);
 
+        // Install the overflow bag if any row touched it. The offsets
+        // array invariant is `len == row_count + 1` — the trailing
+        // entry is the past-the-end byte offset, which the read path
+        // uses to bound the last row's blob. We've been pushing
+        // `overflow_data.len()` after each row, so the invariant
+        // already holds.
+        if self.overflow_used {
+            use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
+            let offsets_vec = MmapOrVec::from_vec(self.overflow_offsets);
+            let mut data_bytes = MmapBytes::new();
+            data_bytes.extend(&self.overflow_data);
+            store.replace_overflow_bag(offsets_vec, data_bytes);
+        }
+
         // Discard out_dir reference — the open file handles live inside
         // the mmaps held by `store`. They keep the files alive as long
         // as the Arc is alive.
@@ -273,16 +327,25 @@ impl TypeWriter {
 /// Visitor handed to `push_row_borrowed`'s closure. Forwards each
 /// property to its schema slot's column writer and tracks which
 /// slots have been filled this row, so unfilled slots get nulls
-/// after the closure returns.
+/// after the closure returns. Properties whose key isn't in the
+/// schema are routed to the per-row overflow buffer in the same
+/// wire format the source's `MmapColumnStore` uses, so they
+/// round-trip through reload.
 pub(super) struct RowVisitor<'a> {
     schema: &'a Arc<TypeSchema>,
     columns: &'a mut Vec<ColumnWriter>,
     filled: SmallBitmap,
+    /// Scratch buffer for this row's overflow blob. Pre-seeded with a
+    /// 2-byte LE entry-count placeholder; `push_row_borrowed` writes
+    /// the real count back after the closure returns.
+    overflow_buf: &'a mut Vec<u8>,
+    /// Number of entries appended to `overflow_buf` this row.
+    overflow_count: &'a mut u16,
 }
 
 impl<'a> RowVisitor<'a> {
-    /// Push a borrowed property into its schema slot, if any.
-    /// Non-schema keys are silently dropped.
+    /// Push a borrowed property into its schema slot, or into the
+    /// per-row overflow buffer when the key is not in the schema.
     pub(super) fn push_property(
         &mut self,
         key: InternedKey,
@@ -301,6 +364,16 @@ impl<'a> RowVisitor<'a> {
             }
             self.columns[s].push_borrowed(value)?;
             self.filled.set(s);
+        } else {
+            // Non-schema key: route to the per-row overflow buffer.
+            // Skip Null entries — they round-trip as "absent" anyway
+            // and just bloat the blob (matches the column_builder's
+            // matches!(value, Value::Null) skip on the ntriples
+            // ingestion path).
+            if !matches!(value, BorrowedValue::Null) {
+                ColumnStore::serialize_overflow_value_borrowed(self.overflow_buf, key, &value);
+                *self.overflow_count = self.overflow_count.saturating_add(1);
+            }
         }
         Ok(())
     }
