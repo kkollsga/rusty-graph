@@ -344,8 +344,15 @@ pub fn write_unified_columns(
 
     // ── Pass 2: allocate + write ──────────────────────────────────
     let total_bytes = cursor;
-    if total_bytes == 0 && unhandled.is_empty() {
+    if total_bytes == 0 {
         // Nothing to write; clean up any stale mega-file artifacts.
+        // Note: the previous gate also required `unhandled.is_empty()`,
+        // but unhandled types only need sidecar fallback (not anything
+        // here in the mega-file), so the right gate is "no bytes
+        // planned". Skipping with non-empty unhandled used to fall
+        // through to `mmap::map_mut` of a 0-byte file, which returns
+        // EINVAL on every Unix and broke disk-graph save_disk in 0.9.15
+        // (every test in test_disk_property_index was a failure mode).
         let _ = fs::remove_file(&bin_path);
         let _ = fs::remove_file(&json_path);
         return Ok(WriteResult {

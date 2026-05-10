@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`save_disk` no longer fails with `OSError: Invalid argument (os error 22)`
+  on disk-backed graphs whose column stores are empty.** The unified
+  mega-file writer added in 0.9.15 had an early-return gate that
+  required *both* `total_bytes == 0` *and* `unhandled.is_empty()` —
+  but unhandled types only need sidecar fallback, never bytes in the
+  mega-file. With non-zero `unhandled` and zero planned bytes, the
+  code fell through to `mmap::map_mut` on a 0-byte file, which is
+  `EINVAL` on every Unix. Triggered on every fresh disk graph
+  (`KnowledgeGraph(storage="disk", ...).add_nodes(...).save(...)`) —
+  the entire `tests/test_disk_property_index.py` suite was failing.
+
 ### Changed
 
 - **`kglite-mcp-server` now pins mcp-methods 0.3.22** (rev `7b284dd`).
