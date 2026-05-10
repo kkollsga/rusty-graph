@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kglite-mcp-server` now actually loads `.env` files.** The
+  shim's `main.rs` never invoked mcp-methods'
+  `load_env_for_mode()` — so the framework's walk-up + `env_file:`
+  YAML key support, although present in mcp-methods 0.3.22+, never
+  fired under the kglite binary. Operators ran into "GITHUB_TOKEN
+  not set" with a `.env` one directory up from their workspace,
+  which should have been auto-discovered. Now wired: walk-up from
+  `--graph` parent / `--source-root` / `--workspace` /
+  `--watch` / `workspace.kind: local` root / cwd-in-bare, with
+  explicit `env_file:` in the manifest as override. The boot
+  summary line on stderr now names the `.env` actually loaded
+  (or reports `(no .env found)` when the walk-up came up empty),
+  closing the gap between "token missing" and "token present but
+  unreadable".
 - **`embedding_diagnostics()` now sees columnar properties.** The
   0.9.16 implementation iterated `NodeData::property_iter()`, which
   yields nothing for `PropertyStorage::Columnar` — the variant nodes

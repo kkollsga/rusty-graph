@@ -22,8 +22,8 @@ use clap::Parser;
 use mcp_server::manifest::{find_sibling_manifest, find_workspace_manifest, ManifestError};
 use mcp_server::server::{McpServer, ServerOptions};
 use mcp_server::{
-    apply_python_extensions, init_tracing, maybe_watch, resolve_source_roots, watch, workspace,
-    Manifest, PythonExtensions, WorkspaceKind,
+    apply_python_extensions, init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots,
+    watch, workspace, Manifest, PythonExtensions, WorkspaceKind,
 };
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
@@ -188,6 +188,25 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Load `.env` before anything reads env vars (notably the GitHub
+    // tools' `GITHUB_TOKEN` auth check). Walk-up start point matches
+    // the framework binary's choice in `mcp-server`'s own main: the
+    // mode's directory for source-aware modes, cwd for bare. Explicit
+    // `env_file:` in the manifest overrides walk-up. Returns the path
+    // actually loaded so the boot summary can name it.
+    let env_start_dir: PathBuf = match &mode {
+        Mode::Graph { path } => path
+            .canonicalize()
+            .ok()
+            .and_then(|p| p.parent().map(PathBuf::from))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        Mode::SourceRoot { dir } | Mode::Workspace { dir } | Mode::Watch { dir } => dir.clone(),
+        Mode::LocalWorkspace { root, .. } => root.clone(),
+        Mode::Bare => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    let env_file_loaded = load_env_for_mode(manifest.as_ref(), &env_start_dir)
+        .context("manifest env_file load failed")?;
+
     let mut options = ServerOptions::from_manifest(manifest.as_ref(), fallback_name(&mode));
     if cli.name.is_some() {
         options.name = cli.name.clone();
@@ -313,7 +332,12 @@ async fn main() -> Result<()> {
     };
     let _watch_handle = watch_handle;
 
-    print_boot_summary(&mode, manifest.as_ref(), &graph_state);
+    print_boot_summary(
+        &mode,
+        manifest.as_ref(),
+        &graph_state,
+        env_file_loaded.as_deref(),
+    );
 
     let service = server
         .serve(stdio())
@@ -323,7 +347,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_boot_summary(mode: &Mode, manifest: Option<&Manifest>, graph_state: &GraphState) {
+fn print_boot_summary(
+    mode: &Mode,
+    manifest: Option<&Manifest>,
+    graph_state: &GraphState,
+    env_file_loaded: Option<&std::path::Path>,
+) {
     let label = match mode {
         Mode::Graph { path } => format!("graph [{}]", path.display()),
         Mode::SourceRoot { dir } => format!("source-root [{}]", dir.display()),
@@ -337,6 +366,11 @@ fn print_boot_summary(mode: &Mode, manifest: Option<&Manifest>, graph_state: &Gr
         Mode::Bare => "bare".to_string(),
     };
     let mut parts = vec![format!("mode: {label}")];
+    if let Some(p) = env_file_loaded {
+        parts.push(format!("env: {}", p.display()));
+    } else {
+        parts.push("env: (no .env found)".to_string());
+    }
     if let Some(m) = manifest {
         parts.push(format!("manifest: {}", m.yaml_path.display()));
     }

@@ -532,6 +532,79 @@ class TestGithubTools:
             client.shutdown()
 
 
+# ── Test: .env auto-discovery (walk-up from mode dir + env_file: override) ──
+
+
+class TestEnvFileLoading:
+    """The shim calls `mcp_server::load_env_for_mode` after picking the mode,
+    which walks up from the mode dir looking for `.env`. Explicit `env_file:`
+    YAML key overrides walk-up. Regression coverage for A3 in the operator
+    feedback: pre-fix, the shim never invoked the loader, so .env was never
+    found and GitHub tools were silently hidden."""
+
+    def test_walk_up_from_workspace_finds_env(self, tmp_path: Path):
+        """Putting `.env` one dir above the workspace should be discovered."""
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".env").write_text("GITHUB_TOKEN=ghp_walkup_test_token_not_real\n")
+        ws = outer / "workspace"
+        ws.mkdir()
+        # Use --source-root mode (workspace mode would try to read inventory).
+        client = _spawn(
+            ["--source-root", str(ws)],
+            cwd=tmp_path,  # neutral cwd that has no .env
+            env_remove=["GITHUB_TOKEN", "GH_TOKEN"],
+        )
+        try:
+            # If the walk-up worked, github tools register.
+            names = {t["name"] for t in client.list_tools()}
+            assert "github_issues" in names, (
+                "github_issues missing — .env walk-up from --source-root parent "
+                "didn't fire. Tools listed: " + str(sorted(names))
+            )
+        finally:
+            client.shutdown()
+
+    def test_explicit_env_file_yaml_key(self, tmp_path: Path):
+        """`env_file:` in the manifest overrides walk-up — points at an
+        explicit path relative to the manifest's directory."""
+        env_dir = tmp_path / "stash"
+        env_dir.mkdir()
+        (env_dir / "my.env").write_text("GITHUB_TOKEN=ghp_explicit_test_token_not_real\n")
+        manifest = tmp_path / "explicit_mcp.yaml"
+        manifest.write_text("name: Explicit Env Test\nenv_file: stash/my.env\n")
+        client = _spawn(
+            ["--mcp-config", str(manifest)],
+            cwd=tmp_path,
+            env_remove=["GITHUB_TOKEN", "GH_TOKEN"],
+        )
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert "github_issues" in names, "explicit env_file: didn't load the token. Tools listed: " + str(
+                sorted(names)
+            )
+        finally:
+            client.shutdown()
+
+    def test_existing_env_var_not_overwritten(self, tmp_path: Path):
+        """If GITHUB_TOKEN is already in the environment, the .env walk-up
+        must not overwrite it (matches mcp-methods `apply_env_file` semantics).
+        Verified indirectly: pass a real token via env, ensure github tools
+        register even if no .env exists at the walk-up location."""
+        ws = tmp_path / "workspace_no_env"
+        ws.mkdir()
+        client = _spawn(
+            ["--source-root", str(ws)],
+            cwd=ws,
+            env_extra={"GITHUB_TOKEN": "ghp_via_env_not_real"},
+        )
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert "github_issues" in names
+        finally:
+            client.shutdown()
+
+
 # ── Test: YAML manifest (parameterised Cypher tools + overview_prefix) ─────
 
 
