@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/kglite-mcp-server"]
+members = ["."]
+# `crates/kglite-mcp-server` is excluded from the workspace because it
+# depends on a path-dep `mcp-server` from the sibling `mcp-methods`
+# checkout, which only exists in dev environments. Build the binary
+# standalone with `cargo install --path crates/kglite-mcp-server`.
+exclude = ["crates/kglite-mcp-server"]
 resolver = "2"
 
 [package]
