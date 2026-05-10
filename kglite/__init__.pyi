@@ -3656,6 +3656,55 @@ class KnowledgeGraph:
         """
         ...
 
+    def export_embeddings(
+        self,
+        path: str,
+        node_types: Union[list[str], dict[str, list[str]], None] = None,
+    ) -> dict[str, int]:
+        """Export embeddings to a standalone ``.kgle`` file, keyed by node ID.
+
+        Args:
+            path: Output ``.kgle`` file path.
+            node_types: Optional filter.
+
+                - ``None`` (default): export all stores.
+                - ``list[str]``: only stores whose ``node_type`` is in the list.
+                - ``dict[str, list[str]]``: per-type list of text columns to export.
+
+        Returns:
+            Dict with ``stores`` (count of stores written) and
+            ``embeddings`` (total embedding vectors written).
+        """
+        ...
+
+    def import_embeddings(self, path: str) -> dict[str, int]:
+        """Import embeddings from a ``.kgle`` file.
+
+        Matches embeddings to nodes by ``(node_type, node_id)``. Embeddings
+        whose node ID doesn't exist in the current graph are skipped.
+
+        When all embeddings — or whole per-type stores — fail to match,
+        a ``UserWarning`` is emitted to surface the silent-drop case. This
+        most commonly indicates the ``.kgle`` file was exported from a
+        different graph, or that the node ID schema has drifted (e.g. the
+        ``code_tree`` qualified-name format changed across kglite versions).
+
+        Args:
+            path: Path to a ``.kgle`` file previously created by
+                ``export_embeddings()``.
+
+        Returns:
+            Dict with:
+
+            - ``stores``: number of stores actually inserted.
+            - ``imported``: total embedding vectors matched to current nodes.
+            - ``skipped``: total entries in the file that didn't match.
+            - ``dropped_stores``: number of per-type stores in the file that
+              contained entries but had zero matches (so the store was
+              not inserted).
+        """
+        ...
+
     def remove_embeddings(self, node_type: str, text_column: str) -> None:
         """Remove an embedding store.
 

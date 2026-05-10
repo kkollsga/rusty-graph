@@ -3,6 +3,7 @@
 import math
 import os
 import tempfile
+import warnings
 
 import pandas as pd
 import pytest
@@ -1385,3 +1386,126 @@ class TestStoredMetric:
 
         assert result_default.iloc[0]["id"] == result_explicit.iloc[0]["id"]
         assert result_default.iloc[0]["score"] == pytest.approx(result_explicit.iloc[0]["score"], abs=1e-6)
+
+
+class TestImportEmbeddingsSilentDrop:
+    """Regression: import_embeddings should warn when imported=0 and the file
+    contained data, so users notice the silent-drop case (e.g. .kgle exported
+    from a graph with different IDs / types — the symptom the MCP-servers
+    project's wishlist flagged with 1923 skipped, 0 imported)."""
+
+    def _build_source_graph(self, tmp_path):
+        """Source: 3 articles with embeddings, exported to a .kgle path."""
+        src = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": ["a1", "a2", "a3"],
+                "title": ["A1", "A2", "A3"],
+                "summary": ["s1", "s2", "s3"],
+            }
+        )
+        src.add_nodes(df, "Article", "id", "title")
+        src.set_embeddings(
+            "Article",
+            "summary",
+            {"a1": [1.0, 0.0], "a2": [0.0, 1.0], "a3": [0.5, 0.5]},
+        )
+        kgle = os.path.join(tmp_path, "src.kgle")
+        src.export_embeddings(kgle)
+        return kgle
+
+    def test_round_trip_succeeds_silently(self, tmp_path):
+        """Same-graph re-import: no warning, all embeddings imported."""
+        kgle = self._build_source_graph(tmp_path)
+
+        target = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": ["a1", "a2", "a3"],
+                "title": ["A1", "A2", "A3"],
+                "summary": ["s1", "s2", "s3"],
+            }
+        )
+        target.add_nodes(df, "Article", "id", "title")
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            stats = target.import_embeddings(kgle)
+        user_warnings = [w for w in captured if issubclass(w.category, UserWarning)]
+        assert user_warnings == [], (
+            f"Did not expect a UserWarning on a clean round-trip, got: {[str(w.message) for w in user_warnings]}"
+        )
+        assert stats["imported"] == 3
+        assert stats["skipped"] == 0
+        assert stats["dropped_stores"] == 0
+        assert stats["stores"] == 1
+
+    def test_warns_when_all_ids_mismatch(self, tmp_path):
+        """imported=0, skipped>0 → loud UserWarning, dropped_stores reported."""
+        kgle = self._build_source_graph(tmp_path)
+
+        target = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": ["x1", "x2"], "title": ["X1", "X2"], "summary": ["s", "s"]})
+        target.add_nodes(df, "Article", "id", "title")
+
+        with pytest.warns(UserWarning, match="imported 0 embeddings"):
+            stats = target.import_embeddings(kgle)
+        assert stats["imported"] == 0
+        assert stats["skipped"] == 3
+        assert stats["dropped_stores"] == 1
+        assert stats["stores"] == 0
+
+    def test_warns_when_node_type_missing(self, tmp_path):
+        """File has Article but target only has Author → store dropped, warn."""
+        kgle = self._build_source_graph(tmp_path)
+
+        target = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": ["p1"], "title": ["P1"], "bio": ["b"]})
+        target.add_nodes(df, "Author", "id", "title")
+
+        with pytest.warns(UserWarning, match="imported 0 embeddings"):
+            stats = target.import_embeddings(kgle)
+        assert stats["imported"] == 0
+        assert stats["dropped_stores"] == 1
+
+    def test_partial_drop_warns(self, tmp_path):
+        """Two stores; one type matches, the other is missing → per-store warning."""
+        src = kglite.KnowledgeGraph()
+        df_articles = pd.DataFrame({"id": ["a1", "a2"], "title": ["A1", "A2"], "summary": ["s1", "s2"]})
+        df_authors = pd.DataFrame({"id": ["p1"], "title": ["P1"], "bio": ["b1"]})
+        src.add_nodes(df_articles, "Article", "id", "title")
+        src.add_nodes(df_authors, "Author", "id", "title")
+        src.set_embeddings("Article", "summary", {"a1": [1.0, 0.0], "a2": [0.0, 1.0]})
+        src.set_embeddings("Author", "bio", {"p1": [0.5, 0.5]})
+        kgle = os.path.join(tmp_path, "two_stores.kgle")
+        src.export_embeddings(kgle)
+
+        target = kglite.KnowledgeGraph()
+        target.add_nodes(df_articles, "Article", "id", "title")
+
+        with pytest.warns(UserWarning, match="dropped"):
+            stats = target.import_embeddings(kgle)
+        assert stats["imported"] == 2
+        assert stats["skipped"] == 1
+        assert stats["dropped_stores"] == 1
+        assert stats["stores"] == 1
+
+    def test_empty_file_no_warning(self, tmp_path):
+        """Edge case: file with zero embeddings shouldn't warn (nothing to drop)."""
+        src = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": ["a1"], "title": ["A1"]})
+        src.add_nodes(df, "Article", "id", "title")
+        # No set_embeddings call → file will contain no stores.
+        kgle = os.path.join(tmp_path, "empty.kgle")
+        src.export_embeddings(kgle)
+
+        target = kglite.KnowledgeGraph()
+        target.add_nodes(df, "Article", "id", "title")
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            stats = target.import_embeddings(kgle)
+        user_warnings = [w for w in captured if issubclass(w.category, UserWarning)]
+        assert user_warnings == []
+        assert stats["imported"] == 0
+        assert stats["skipped"] == 0
+        assert stats["dropped_stores"] == 0

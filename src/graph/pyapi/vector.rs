@@ -344,22 +344,66 @@ impl KnowledgeGraph {
     /// Import embeddings from a .kgle file.
     ///
     /// Matches embeddings to nodes by (node_type, node_id). Embeddings whose
-    /// node ID doesn't exist in the current graph are silently skipped.
+    /// node ID doesn't exist in the current graph are skipped. When all
+    /// embeddings (or all stores) are skipped — a strong signal that the
+    /// .kgle file was exported from a graph with different IDs or types —
+    /// a ``UserWarning`` is emitted so the silent-drop case becomes visible.
     ///
     /// Args:
     ///     path: Path to a .kgle file previously created by export_embeddings.
     ///
     /// Returns:
-    ///     Dict with 'stores' (int), 'imported' (int), and 'skipped' (int) counts.
+    ///     Dict with 'stores' (int), 'imported' (int), 'skipped' (int), and
+    ///     'dropped_stores' (int) counts. ``dropped_stores`` is the number
+    ///     of per-type stores that contained entries but had zero matches.
     fn import_embeddings(&mut self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
         let g = Arc::make_mut(&mut self.inner);
         let stats = file::import_embeddings_from_file(g, path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
+        // Surface silent-drop cases: if the file contained entries but none
+        // matched nodes in the current graph, the user almost always wants
+        // to know — they're importing into the wrong graph or against an
+        // ID schema that has drifted (e.g. code_tree qualified-name format
+        // changes between releases). Emit a UserWarning that's visible by
+        // default but still suppressible via the standard `warnings` module.
+        if stats.imported == 0 && stats.skipped > 0 {
+            let msg = format!(
+                "import_embeddings('{}'): imported 0 embeddings, skipped {} — \
+                 no node IDs in the file match the current graph. The file \
+                 may have been exported from a different graph, or the node \
+                 ID/type schema has changed since export.",
+                path, stats.skipped
+            );
+            let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+            let _ = PyErr::warn(
+                py,
+                py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                cmsg.as_c_str(),
+                1,
+            );
+        } else if stats.dropped_stores > 0 {
+            let msg = format!(
+                "import_embeddings('{}'): {} embedding store(s) had zero \
+                 matches and were dropped (imported={}, skipped={}, \
+                 stores_kept={}). Some types in the file don't exist in \
+                 the current graph, or their node IDs don't match.",
+                path, stats.dropped_stores, stats.imported, stats.skipped, stats.stores
+            );
+            let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+            let _ = PyErr::warn(
+                py,
+                py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                cmsg.as_c_str(),
+                1,
+            );
+        }
+
         let result = PyDict::new(py);
         result.set_item("stores", stats.stores)?;
         result.set_item("imported", stats.imported)?;
         result.set_item("skipped", stats.skipped)?;
+        result.set_item("dropped_stores", stats.dropped_stores)?;
         result.into_py_any(py)
     }
 

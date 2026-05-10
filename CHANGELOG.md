@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`import_embeddings()` no longer silently drops mismatched files.**
+  When `imported == 0` but the `.kgle` file contained data, or when
+  a per-type store had zero matches, the call now emits a
+  `UserWarning` describing the mismatch (file path, counts, likely
+  cause). The result dict gains a `dropped_stores` key so callers
+  can detect partial-drop cases programmatically. Reported via the
+  MCP-servers wishlist after a 7 MB embedding file silently became
+  `{stores: 0, imported: 0, skipped: 1923}` against a graph whose
+  `code_tree` qualified-name format had drifted.
+
+### Added
+
+- Type stubs for `import_embeddings()` and `export_embeddings()` —
+  both methods existed but were missing from `kglite/__init__.pyi`.
+
 ## [0.9.15] — 2026-05-10
 
 ### Added

@@ -1821,6 +1821,13 @@ pub struct ImportStats {
     pub stores: usize,
     pub imported: usize,
     pub skipped: usize,
+    /// Number of stores in the file whose entries all failed to match
+    /// nodes in the current graph (so the store was dropped and not
+    /// inserted into `graph.embeddings`). Surfaces the silent-drop
+    /// case where the .kgle file was exported from a graph with
+    /// different node IDs or types — the count of such stores would
+    /// otherwise be invisible to callers.
+    pub dropped_stores: usize,
 }
 
 /// Export embeddings to a standalone .kgle file, keyed by node ID.
@@ -1936,6 +1943,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
     let mut total_imported = 0usize;
     let mut total_skipped = 0usize;
     let mut stores_count = 0usize;
+    let mut dropped_stores = 0usize;
 
     for exported in exported_stores {
         // Build ID index for this node type so lookup_by_id works
@@ -1965,6 +1973,8 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
             let key = (exported.node_type, format!("{}_emb", exported.text_column));
             graph.embeddings.insert(key, store);
             stores_count += 1;
+        } else if !exported.entries.is_empty() {
+            dropped_stores += 1;
         }
 
         total_imported += imported;
@@ -1975,5 +1985,6 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         stores: stores_count,
         imported: total_imported,
         skipped: total_skipped,
+        dropped_stores,
     })
 }
