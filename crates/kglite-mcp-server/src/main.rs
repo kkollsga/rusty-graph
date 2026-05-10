@@ -28,6 +28,7 @@ use mcp_server::{
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
+mod code_source;
 mod cypher_tools;
 mod tools;
 use crate::tools::GraphState;
@@ -265,8 +266,20 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Snapshot the dynamic source-roots provider before we move
+    // `options` into the McpServer. The `read_code_source` tool
+    // queries it on every call so workspace-mode active-repo swaps
+    // immediately re-target file resolution.
+    let source_roots_provider = options.source_roots.clone();
+
     let mut server = McpServer::new(options);
     tools::register(&mut server, graph_state.clone());
+    code_source::register(
+        &mut server,
+        graph_state.clone(),
+        source_roots_provider.clone(),
+    )
+    .context("read_code_source registration failed")?;
 
     // Manifest python: tools + custom embedder. As of mcp-methods
     // 0.3.22 the framework returns an `Arc<EmbedderHandle>` (load /

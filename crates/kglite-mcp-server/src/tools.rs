@@ -106,6 +106,89 @@ impl GraphState {
         }
     }
 
+    /// Resolve a code-entity qualified name to its source location via
+    /// `graph.source(qualified_name, node_type)`. Used by the
+    /// `read_code_source` tool to bridge the qualified-name → file path
+    /// lookup that the framework's `read_source` can't do on its own.
+    /// Returns the resolved `(file_path, line_number, end_line)` or an
+    /// error message describing what went wrong (no graph, name not
+    /// found, ambiguous match, missing line metadata).
+    pub fn source_lookup(
+        &self,
+        qualified_name: &str,
+        node_type: Option<&str>,
+    ) -> Result<crate::code_source::SourceLookup, String> {
+        let guard = self.inner.read().unwrap();
+        let Some(active) = guard.as_ref() else {
+            return Err(NO_GRAPH.to_string());
+        };
+        Python::attach(|py| -> Result<crate::code_source::SourceLookup, String> {
+            let args =
+                pyo3::types::PyTuple::new(py, [qualified_name]).map_err(|e| e.to_string())?;
+            let kwargs = PyDict::new(py);
+            if let Some(nt) = node_type {
+                kwargs
+                    .set_item("node_type", nt)
+                    .map_err(|e| e.to_string())?;
+            }
+            let result = active
+                .py_obj
+                .call_method(py, "source", args, Some(&kwargs))
+                .map_err(|e| format!("graph.source({qualified_name:?}) failed: {e}"))?;
+            let dict = result
+                .bind(py)
+                .cast::<PyDict>()
+                .map_err(|_| format!("graph.source({qualified_name:?}) did not return a dict"))?
+                .clone();
+            // `{"error": "..."}` or `{"ambiguous": true, "matches": [...]}` —
+            // surface either with the body shape so the agent gets the
+            // actual graph message rather than a generic error.
+            if let Ok(Some(err)) = dict.get_item("error") {
+                return Err(err.extract::<String>().unwrap_or_else(|_| {
+                    format!("graph.source({qualified_name:?}) returned an error")
+                }));
+            }
+            if let Ok(Some(amb)) = dict.get_item("ambiguous") {
+                if amb.extract::<bool>().unwrap_or(false) {
+                    let matches: String = dict
+                        .get_item("matches")
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.repr().ok().map(|r| r.to_string()))
+                        .unwrap_or_default();
+                    return Err(format!(
+                        "ambiguous qualified_name {qualified_name:?}; matches: {matches}. \
+                         Pass `node_type` to narrow."
+                    ));
+                }
+            }
+            let file_path: String = dict
+                .get_item("file_path")
+                .ok()
+                .flatten()
+                .ok_or_else(|| format!("graph.source({qualified_name:?}) returned no file_path"))?
+                .extract()
+                .map_err(|e| format!("file_path extraction failed: {e}"))?;
+            let line_number: usize = dict
+                .get_item("line_number")
+                .ok()
+                .flatten()
+                .and_then(|v| v.extract::<usize>().ok())
+                .unwrap_or(1);
+            let end_line: usize = dict
+                .get_item("end_line")
+                .ok()
+                .flatten()
+                .and_then(|v| v.extract::<usize>().ok())
+                .unwrap_or(line_number);
+            Ok(crate::code_source::SourceLookup {
+                file_path,
+                line_number,
+                end_line,
+            })
+        })
+    }
+
     /// Run a parameterised Cypher template against the active graph.
     /// Used by the YAML-declared `tools[].cypher` registration path
     /// (see `crate::cypher_tools::register_cypher_tools`). The agent's

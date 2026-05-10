@@ -686,6 +686,99 @@ class TestLocalWorkspace:
             client.shutdown()
 
 
+# ── Test: read_code_source (qualified_name → file slice) ───────────────────
+
+
+class TestReadCodeSource:
+    """The kglite shim adds `read_code_source(qualified_name)` to bridge
+    the code-graph qualified-name → file-slice lookup that the framework's
+    file-only `read_source` can't do alone. Reported as A1 in the
+    MCP-operator feedback after 0.9.16 dropped the qualified_name surface."""
+
+    @pytest.fixture
+    def code_graph_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Build a code-tree graph from a tiny Python module and save it."""
+        try:
+            from kglite import code_tree
+        except ImportError:
+            pytest.skip("kglite.code_tree (tree-sitter) not installed")
+        project = tmp_path / "demo_proj"
+        project.mkdir()
+        src = project / "demo_mod.py"
+        src.write_text(
+            "def greet(name):\n"
+            '    """Return a greeting."""\n'
+            "    return f'Hello, {name}'\n"
+            "\n"
+            "\n"
+            "def shout(name):\n"
+            '    """Greet then upper-case."""\n'
+            "    return greet(name).upper()\n"
+        )
+        g = code_tree.build(str(project))
+        # Save the .kgl inside the project dir so the --graph mode's
+        # auto-bound source root (parent of the .kgl) lines up with
+        # the project root that code_tree's file_path entries are
+        # relative to.
+        kgl = project / "demo_code.kgl"
+        g.save(str(kgl))
+        return kgl, project
+
+    def test_lists_read_code_source(self, code_graph_fixture):
+        kgl, _ = code_graph_fixture
+        client = _spawn(["--graph", str(kgl)])
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert "read_code_source" in names
+        finally:
+            client.shutdown()
+
+    def test_resolves_qualified_name(self, code_graph_fixture):
+        kgl, _ = code_graph_fixture
+        client = _spawn(["--graph", str(kgl)])
+        try:
+            r = client.call_tool("read_code_source", {"qualified_name": "demo_proj.demo_mod.greet"})
+            text = _text_content(r)
+            assert "demo_mod" in text
+            assert "greet" in text
+            assert "Hello," in text
+        finally:
+            client.shutdown()
+
+    def test_grep_filter(self, code_graph_fixture):
+        kgl, _ = code_graph_fixture
+        client = _spawn(["--graph", str(kgl)])
+        try:
+            r = client.call_tool(
+                "read_code_source",
+                {
+                    "qualified_name": "demo_proj.demo_mod.greet",
+                    "grep": r"return",
+                },
+            )
+            text = _text_content(r)
+            assert "return" in text
+        finally:
+            client.shutdown()
+
+    def test_missing_qualified_name_arg(self, code_graph_fixture):
+        kgl, _ = code_graph_fixture
+        client = _spawn(["--graph", str(kgl)])
+        try:
+            # Tool returns a friendly error body (success envelope) on
+            # missing required arg, OR rmcp rejects at protocol level —
+            # either is acceptable as long as the operator sees a clear
+            # message about the missing parameter.
+            try:
+                r = client.call_tool("read_code_source", {})
+                text = _text_content(r)
+                assert "missing" in text.lower() or "qualified_name" in text
+            except RuntimeError as e:
+                assert "qualified_name" in str(e)
+        finally:
+            client.shutdown()
+
+
 # ── Test: no-graph framework boot (just `ping`) ───────────────────────────
 
 

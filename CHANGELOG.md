@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`read_code_source(qualified_name=...)` MCP tool** — kglite-side
+  companion to the framework's `read_source(file_path=...)`. Resolves a
+  fully-qualified entity name through the active graph's
+  `graph.source()` (which uses the code-tree node attributes), then
+  reads the corresponding file slice from the configured source root(s).
+  Equivalent to cypher → graph.source → read_source in a single MCP
+  call. Same line-range / grep / max_chars filters as `read_source`.
+  Restores the qualified-name flow operators relied on pre-0.9.14;
+  reported as A1 in the MCP-servers follow-up after the 0.9.14
+  framework take-over trimmed `read_source` to `file_path`-only.
+
 ### Fixed
 
 - **`kglite-mcp-server` now actually loads `.env` files.** The
