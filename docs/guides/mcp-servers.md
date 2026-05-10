@@ -31,6 +31,60 @@ be available on `PYTHONPATH` (`pip install kglite` covers this) so
 the binary can call into it for `cypher_query` / `graph_overview` /
 `save_graph` dispatch.
 
+### Where does the binary find Python? (read this before `pip install`)
+
+PyO3 statically picks **one** Python at build time and links the
+binary against that interpreter's shared library. The binary cannot
+later be redirected to a different Python — there is no
+`--python /path/to/python` flag, by design.
+
+This matters when you have multiple Pythons on the system (system
+Python, conda envs, pyenv versions): the **same Python the binary
+links against is the only one whose `pip install kglite` is visible
+to the binary**. If you `pip install kglite` into a conda env but the
+binary linked to a different one, `cypher_query` works (kglite gets
+loaded from the linked env if installed there) but custom embedders
+that depend on env-specific packages (`torch`, `sentence-transformers`)
+will fail with `ModuleNotFoundError` because they live in the conda
+env the binary doesn't see.
+
+**Discover which Python the binary picked**:
+
+```bash
+# macOS
+otool -L $(which kglite-mcp-server) | grep -i python
+# Linux
+ldd $(which kglite-mcp-server) | grep -i python
+```
+
+**Install your deps into that Python**:
+
+```bash
+# Pin the python the binary uses; install kglite + your embedder deps there
+$(otool -L $(which kglite-mcp-server) | grep -i python | head -1 | \
+    awk '{print $1}' | xargs dirname | xargs -I{} ls {}/../bin/python*) \
+    -m pip install kglite torch sentence-transformers
+```
+
+**Force a specific Python at install time** (if you'd rather control
+which interpreter PyO3 picks rather than discover it):
+
+```bash
+# Install kglite-mcp-server linked against an explicit Python.
+PYO3_PYTHON=/opt/miniconda3/envs/embeddings/bin/python \
+    cargo install --path kglite/crates/kglite-mcp-server
+```
+
+After that one-line export the binary will use the embeddings env's
+Python for everything — including your custom embedder factory.
+
+If you skip this and just `pip install kglite` into a sub-env, you'll
+see error messages like *"No module named 'kglite'"* at startup or
+*"No module named 'torch'"* the first time a `text_score()` query
+fires. The fix is always to install into the env the binary linked
+against (discovered via `otool` / `ldd` above) — not the other way
+around.
+
 ### 2. Point it at a graph file
 
 ```bash

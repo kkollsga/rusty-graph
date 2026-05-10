@@ -170,6 +170,16 @@ kglite-mcp-server --graph path/to/graph.kgl
 > conda-bin location to wherever cargo placed the new binary,
 > typically `~/.cargo/bin/kglite-mcp-server`.
 
+> **Multiple Pythons on your system?** PyO3 statically links the
+> binary against one Python at build time. **Install kglite + embedder
+> deps into _that_ Python**, not a sub-env. Discover which one:
+> `otool -L $(which kglite-mcp-server) | grep -i python` (macOS),
+> `ldd $(which kglite-mcp-server) | grep -i python` (Linux). To force
+> a specific interpreter at install time, prefix the cargo install
+> with `PYO3_PYTHON=/abs/path/to/python`. See the
+> [MCP guide](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html#where-does-the-binary-find-python-read-this-before-pip-install)
+> for the long version.
+
 Drop a `<basename>_mcp.yaml` next to the graph to auto-extend the
 tool surface — `source_root:` for read/grep/list over your source
 files, inline Cypher templates as named tools, optional Python hooks
