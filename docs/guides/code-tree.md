@@ -75,6 +75,66 @@ graph.toc("src/graph/mod.rs")
 
 **Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module), `USES_TYPE`, `EXPOSES` (Module→item)
 
+## Qualified-name format
+
+Every code entity carries a `qualified_name` property which is also
+its **node ID** — the key `import_embeddings()` matches against, the
+first thing `find()` and `source()` look up, and the durable identifier
+embeddings are keyed by. The format is per-language:
+
+| Language | Separator | Example |
+|----------|-----------|---------|
+| Rust | `::` | `crate::graph::cypher::executor::CypherExecutor::execute` |
+| C++ | `::` | `myproject::Widget::render` |
+| Python | `.` | `kglite.code_tree.builder.build` |
+| TypeScript / JavaScript | `.` | `src.lib.parser.parseFile` |
+| Java | `.` | `com.example.Widget.render` |
+| C# | `.` | `MyProject.Widget.Render` |
+| Go | `.` | `package.Widget.Render` |
+| C | `/` | `src/parser/main.c/parse_file` |
+
+The general shape is always `<module-path><separator><owner><separator><name>`,
+where `<owner>` is the enclosing class/struct/trait when applicable. A
+top-level function in a Python module is `module.fn`; a method on a
+class is `module.Class.fn`.
+
+### Why this matters for embeddings
+
+`set_embeddings` / `export_embeddings` / `import_embeddings` all use
+`(node_type, qualified_name)` as the lookup key. Any change to the
+qualified-name format — adding a `crate::` prefix in Rust, switching
+between forward- and dotted-paths in C, dropping the file portion of
+a Python module path — invalidates the keys in a `.kgle` file
+exported under the older format.
+
+**0.9.15 surfaces the mismatch automatically.** When `import_embeddings`
+finds zero matches against the file's keys, it raises a
+`UserWarning` naming the file and the counts; when only some stores
+fail, the result dict's `dropped_stores` field reports how many. Use
+that warning to detect when the format has drifted under you. The
+`embedding_diagnostics()` companion (planned, see CHANGELOG) will
+add per-type reasons.
+
+### Stability commitment
+
+The qualified-name format is **stable within a kglite minor release**
+(0.9.x → 0.9.y will not change the format). Cross-minor changes will
+be called out in the CHANGELOG with a clear "rebuild embeddings"
+note. Existing graph files (`.kgl`) are not affected — they carry
+the IDs that match their build, and embeddings exported from the
+same graph round-trip without warning.
+
+### Recovering from a format change
+
+If `import_embeddings` warns about a mismatch:
+
+1. Rebuild the graph from source with the current kglite (`kglite.code_tree.build(...)`).
+2. Re-run your embedder over the new nodes (`embed_texts(...)`).
+3. Re-export to a fresh `.kgle` (`export_embeddings(path)`).
+
+For `bge-m3`-class models on a typical codebase this is minutes, not
+hours — the embedder's warm cache makes re-runs fast.
+
 ## Options
 
 ```python
