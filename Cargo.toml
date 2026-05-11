@@ -71,7 +71,14 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # build. The `kglite-mcp-server` binary enables this feature so the
 # Rust-only deployment path supports `text_score()` semantic search
 # without a Python embedder.
-fastembed = { version = "5", optional = true }
+#
+# 0.9.19 perf: turn off `image-models` from fastembed's default
+# feature set — pulls in the heavy `image` crate (+jpeg/png/webp
+# decoders) for a code path we don't use. Saves ~3-4 min/wheel of
+# compile time. Keep `ort-download-binaries-native-tls` (prebuilt
+# ONNX Runtime binary — already not-compiled) and `hf-hub-native-tls`
+# (model downloads, system OpenSSL).
+fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 bincode = "1.3"

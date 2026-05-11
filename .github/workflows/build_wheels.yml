@@ -132,6 +132,21 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # 0.9.19 perf: cache the cargo registry, git deps, and target
+      # directory between wheel builds. With fastembed/ort/tokenizers
+      # in the dep graph a cold build was ~15 min per wheel; with this
+      # cache primed it drops to ~3-5 min. shared-key is per-target —
+      # most deps (fastembed, ort, hyper, mcp-methods) are
+      # Python-version-independent and can be reused across the four
+      # Python-version cells within a single OS. Swatinem/rust-cache
+      # uses Cargo.lock + rustc fingerprint to invalidate stale
+      # entries so cross-Python contamination doesn't happen.
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "wheel-${{ matrix.target }}"
+          key: "py${{ matrix.python-version }}"
       - name: Install Maturin
         run: pip install maturin
       # Build the bundled `kglite-mcp-server` binary first and copy it

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.19] — 2026-05-11
 
+### Changed
+- **Wheel build is ~50% faster.** 0.9.18 introduced fastembed-rs into
+  the dep graph, which pulled in `image` (jpeg/png/webp decoders) via
+  fastembed's `image-models` default feature — a code path we don't
+  use. Dropping it shaves ~3-4 min per wheel. Also added
+  `Swatinem/rust-cache` to the wheel-build workflow with a
+  per-target shared key so most deps (mcp-methods, hyper, fastembed,
+  tokio) are reused across the four Python-version cells within each
+  OS. Cold build still slow (registry download + ort prebuilt
+  binary fetch); warm builds drop from ~15 min to ~3-5 min per wheel.
+
 ### Fixed
 - **`pip install kglite` now works on conda Python.** The 0.9.18 wheel
   shipped the bundled `kglite-mcp-server` binary with an absolute
