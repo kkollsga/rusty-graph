@@ -18,6 +18,26 @@ use graph::pyapi::blueprint::from_blueprint_rust;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::{KnowledgeGraph, Transaction};
 
+/// Curated Rust-side façade for downstream binaries (notably
+/// `kglite-mcp-server`). This module is the **only** stable Rust API
+/// kglite promises to keep — the underlying `pub mod graph` /
+/// `pub mod code_tree` are public for tooling but their internals can
+/// move between minor releases. New consumers should import from
+/// `kglite::api::*`; existing breakage there is a semver concern.
+///
+/// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is
+/// independent — it stays as the wheel's primary surface.
+pub mod api {
+    pub use crate::graph::dir_graph::DirGraph;
+    pub use crate::graph::introspection::describe::compute_description;
+    pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
+    pub use crate::graph::io::file::load_file;
+    pub use crate::graph::languages::cypher::executor::write::execute_mutable;
+    pub use crate::graph::languages::cypher::executor::CypherExecutor;
+    pub use crate::graph::languages::cypher::result::CypherResult;
+    pub use crate::graph::{KnowledgeGraph, SourceLocation, SourceLookup};
+}
+
 #[pyfunction]
 fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
     py.detach(|| load_file(&path))

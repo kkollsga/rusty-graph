@@ -204,6 +204,12 @@ impl Drop for DirGraph {
     }
 }
 
+impl Default for DirGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DirGraph {
     pub fn new() -> Self {
         DirGraph {

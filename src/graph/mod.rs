@@ -178,6 +178,46 @@ impl TemporalContext {
     }
 }
 
+/// Resolved code-entity location returned by [`KnowledgeGraph::source_location`].
+/// All optional fields mirror what `code_tree` stores on the node — graphs
+/// built from non-code-tree sources may have fewer populated.
+#[derive(Debug, Clone)]
+pub struct SourceLocation {
+    pub type_name: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub file_path: Option<String>,
+    pub line_number: Option<i64>,
+    pub end_line: Option<i64>,
+    pub signature: Option<String>,
+}
+
+/// Outcome of a [`KnowledgeGraph::source_location`] lookup.
+#[derive(Debug, Clone)]
+pub enum SourceLookup {
+    Found(SourceLocation),
+    /// Multiple code entities matched the given (name, node_type). The
+    /// payload lists each match's qualified_name so the caller can ask
+    /// the agent to disambiguate.
+    Ambiguous(Vec<String>),
+    NotFound,
+}
+
+/// Render a `Value` into a `String` for the pure-Rust source-location
+/// API. Mirrors `py_out::value_to_py`'s coercion for the field types
+/// `code_tree` actually emits (String / Int64 / UniqueId).
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Int64(n) => n.to_string(),
+        Value::UniqueId(u) => u.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Null => String::new(),
+        other => format!("{:?}", other),
+    }
+}
+
 impl KnowledgeGraph {
     /// Create a fresh in-memory KnowledgeGraph without going through PyO3.
     /// Used by internal Rust modules (e.g. code_tree) that need to build a
@@ -512,6 +552,66 @@ impl KnowledgeGraph {
         }
 
         Ok(dict.into())
+    }
+
+    /// Pure-Rust counterpart of `source_one` for `kglite::api` consumers
+    /// (notably the kglite-mcp-server `read_code_source` tool). Returns
+    /// an enum so callers can format ambiguous / not-found cases their
+    /// own way without unpacking a PyDict.
+    ///
+    /// Mirrors the data shape `source_one` populates but with Rust types
+    /// (Strings + i64) — see [`SourceLocation`] / [`SourceLookup`].
+    pub fn source_location(&self, name: &str, node_type: Option<&str>) -> SourceLookup {
+        let (resolved, matches) = self.resolve_code_entity(name, node_type);
+
+        if let Some(target_idx) = resolved {
+            let node = match self.inner.get_node(target_idx) {
+                Some(n) => n,
+                None => return SourceLookup::NotFound,
+            };
+            let type_name = node.get_node_type_ref(&self.inner.interner).to_string();
+            let entity_name = value_to_string(&node.title());
+            let qname = value_to_string(&node.id());
+            let file_path = node
+                .get_field_ref("file_path")
+                .as_deref()
+                .map(value_to_string);
+            let line_number = node
+                .get_field_ref("line_number")
+                .as_deref()
+                .and_then(|v| match v {
+                    Value::Int64(n) => Some(*n),
+                    _ => None,
+                });
+            let end_line = node
+                .get_field_ref("end_line")
+                .as_deref()
+                .and_then(|v| match v {
+                    Value::Int64(n) => Some(*n),
+                    _ => None,
+                });
+            let signature = node
+                .get_field_ref("signature")
+                .as_deref()
+                .map(value_to_string);
+            SourceLookup::Found(SourceLocation {
+                type_name,
+                name: entity_name,
+                qualified_name: qname,
+                file_path,
+                line_number,
+                end_line,
+                signature,
+            })
+        } else if matches.is_empty() {
+            SourceLookup::NotFound
+        } else {
+            let qnames: Vec<String> = matches
+                .iter()
+                .map(|(_, info)| value_to_string(&info.id))
+                .collect();
+            SourceLookup::Ambiguous(qnames)
+        }
     }
 
     /// Check if a node's field value contains the given lowercase string (case-insensitive).
