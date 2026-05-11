@@ -131,6 +131,7 @@ impl GraphState {
         &self,
         template: &str,
         args: &serde_json::Map<String, serde_json::Value>,
+        csv_http: Option<&crate::csv_http::CsvHttpConfig>,
     ) -> String {
         let guard = self.inner.read().unwrap();
         let Some(active) = guard.as_ref() else {
@@ -140,7 +141,7 @@ impl GraphState {
         for (k, v) in args {
             params.insert(k.clone(), json_to_value(v));
         }
-        match run_cypher_inner(&active.kg, template, params) {
+        match run_cypher_inner(&active.kg, template, params, csv_http) {
             Ok(body) => body,
             Err(e) => format!("Cypher error: {e}"),
         }
@@ -179,6 +180,7 @@ fn run_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,
     params: std::collections::HashMap<String, Value>,
+    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
     let mut parsed =
         cypher::parse_cypher(query).map_err(|e| format!("Cypher syntax error: {e}"))?;
@@ -255,7 +257,25 @@ fn run_cypher_inner(
     };
 
     if output_csv {
-        Ok(result.to_csv())
+        let csv = result.to_csv();
+        if let Some(cfg) = csv_http {
+            match crate::csv_http::write_csv(cfg, &csv) {
+                Ok(name) => {
+                    let url = cfg.url_for(&name);
+                    let rows = result.rows.len();
+                    Ok(format!(
+                        "FORMAT CSV: {rows} row(s) written to {url}\n\
+                         Fetch with: curl {url}"
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "csv_http write_csv failed; falling back to inline");
+                    Ok(csv)
+                }
+            }
+        } else {
+            Ok(csv)
+        }
     } else {
         Ok(format_cypher_inline(&result))
     }
@@ -352,14 +372,26 @@ pub struct Builtins {
     pub temp_cleanup_on_overview: bool,
 }
 
-pub fn register(server: &mut McpServer, state: GraphState, builtins: Builtins) {
+pub fn register(
+    server: &mut McpServer,
+    state: GraphState,
+    builtins: Builtins,
+    csv_http: Option<Arc<crate::csv_http::CsvHttpConfig>>,
+) {
     let s = state.clone();
-    server.register_typed_tool::<CypherArgs, _>(
-        "cypher_query",
+    let csv = csv_http.clone();
+    let cypher_desc: &'static str = if csv.is_some() {
         "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
-         inline; append FORMAT CSV to export full results to a CSV string.",
-        move |args| s.with_active(|g| run_cypher_tool(g, &args.query)),
-    );
+         inline; append FORMAT CSV to export results — large CSVs are written to the \
+         csv_http_server directory and returned as a fetch URL."
+    } else {
+        "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
+         inline; append FORMAT CSV to export full results to a CSV string."
+    };
+    server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
+        let csv = csv.clone();
+        s.with_active(|g| run_cypher_tool(g, &args.query, csv.as_deref()))
+    });
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
     server.register_typed_tool::<OverviewArgs, _>(
@@ -412,8 +444,12 @@ fn wipe_temp_dir() {
     }
 }
 
-fn run_cypher_tool(graph: &ActiveGraph, query: &str) -> String {
-    match run_cypher_inner(&graph.kg, query, std::collections::HashMap::new()) {
+fn run_cypher_tool(
+    graph: &ActiveGraph,
+    query: &str,
+    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+) -> String {
+    match run_cypher_inner(&graph.kg, query, std::collections::HashMap::new(), csv_http) {
         Ok(s) => s,
         Err(e) => format!("Cypher error: {e}"),
     }

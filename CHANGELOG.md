@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.18] — 2026-05-11
+
+### Changed
+- **MCP server is now pure-Rust at the source level.** `kglite-mcp-server`
+  no longer calls PyO3 anywhere — every tool handler goes through the
+  new `kglite::api` façade (Cypher pipeline, `compute_description`,
+  `build_code_tree`, `source_location`). The mcp-methods Python
+  feature is off, so the framework's Python tool surface isn't on
+  the binary's dep graph either. The bundled binary still links to
+  libpython transitively through kglite's own PyO3 layer (kglite is a
+  Python library — that's by design), so the wheel matrix stays at
+  3 OS × 4 Python = 12 wheels per release.
+- **Embedder backend switched to fastembed-rs.** The framework-level
+  `embedder:` Python factory is gone. Configure with
+  `extensions.embedder: { backend: fastembed, model: BAAI/bge-m3 }`
+  instead — bge-m3, bge-small/base/large-en-v1.5, all-MiniLM-L6-v2,
+  and multilingual-e5 supported out of the box. ONNX weights are
+  downloaded to `~/.cache/fastembed/` on first use; no `torch` /
+  `sentence-transformers` install needed.
+
+### Added
+- `kglite::api` — curated Rust façade for downstream binaries. Exposes
+  `KnowledgeGraph` + `DirGraph` + `Embedder` + `FastEmbedAdapter` +
+  the Cypher parse/plan/execute surface + `compute_description` +
+  `compute_schema` + `load_file` + `build_code_tree` +
+  `SourceLocation`/`SourceLookup`.
+- `extensions.csv_http_server` — opt-in localhost HTTP listener that
+  serves `FORMAT CSV` exports as URLs instead of inline strings.
+  Useful for million-row exports that would blow the MCP response
+  budget. Bound to 127.0.0.1, path-traversal hardened, no write
+  surface, CORS-enabled.
+- `KnowledgeGraph::set_embedder_native(Arc<dyn Embedder>)` — pure-Rust
+  counterpart to the `set_embedder` pymethod; lets downstream Rust
+  binaries bind embedders without a `Py<PyAny>`.
+- `KnowledgeGraph::source_location(name, node_type)` — pure-Rust
+  counterpart to `graph.source()` used by the `read_code_source` tool.
+
+### Removed
+- `tools[].python` manifest entries — Python tool hooks no longer
+  loadable. Move tool logic into a `tools[].cypher` template or a
+  downstream Rust binary that embeds the kglite crate directly.
+- `embedder:` top-level manifest key — replaced by
+  `extensions.embedder:` (see Changed).
+- Pre-0.9.18 install-UX workarounds (`PYO3_PYTHON=`,
+  `install_name_tool -add_rpath`, conda-env symlinks) are no longer
+  needed; `pip install kglite` ships `kglite-mcp-server` on `PATH`
+  directly.
+
 ## [0.9.17] — 2026-05-11
 
 ### Added

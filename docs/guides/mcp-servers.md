@@ -18,72 +18,22 @@ automatically. **No fork required for most customisation.**
 
 ## Quick Start
 
-### 1. Build the binary
+### 1. Install
 
 ```bash
-git clone https://github.com/kkollsga/kglite
-cargo install --path kglite/crates/kglite-mcp-server
+pip install kglite
 ```
 
-CPython is embedded into the binary via PyO3 — `python:` tools and
-custom embedder factories work out of the box. `kglite` itself must
-be available on `PYTHONPATH` (`pip install kglite` covers this) so
-the binary can call into it for `cypher_query` / `graph_overview` /
-`save_graph` dispatch.
+`kglite-mcp-server` ships with the wheel — it lands on your `PATH`
+automatically through the `[project.scripts]` entry point. No `cargo
+install`, no `PYO3_PYTHON=` dance, no `install_name_tool` patching.
+Run `kglite-mcp-server --help` to confirm.
 
-### Where does the binary find Python? (read this before `pip install`)
-
-PyO3 statically picks **one** Python at build time and links the
-binary against that interpreter's shared library. The binary cannot
-later be redirected to a different Python — there is no
-`--python /path/to/python` flag, by design.
-
-This matters when you have multiple Pythons on the system (system
-Python, conda envs, pyenv versions): the **same Python the binary
-links against is the only one whose `pip install kglite` is visible
-to the binary**. If you `pip install kglite` into a conda env but the
-binary linked to a different one, `cypher_query` works (kglite gets
-loaded from the linked env if installed there) but custom embedders
-that depend on env-specific packages (`torch`, `sentence-transformers`)
-will fail with `ModuleNotFoundError` because they live in the conda
-env the binary doesn't see.
-
-**Discover which Python the binary picked**:
-
-```bash
-# macOS
-otool -L $(which kglite-mcp-server) | grep -i python
-# Linux
-ldd $(which kglite-mcp-server) | grep -i python
-```
-
-**Install your deps into that Python**:
-
-```bash
-# Pin the python the binary uses; install kglite + your embedder deps there
-$(otool -L $(which kglite-mcp-server) | grep -i python | head -1 | \
-    awk '{print $1}' | xargs dirname | xargs -I{} ls {}/../bin/python*) \
-    -m pip install kglite torch sentence-transformers
-```
-
-**Force a specific Python at install time** (if you'd rather control
-which interpreter PyO3 picks rather than discover it):
-
-```bash
-# Install kglite-mcp-server linked against an explicit Python.
-PYO3_PYTHON=/opt/miniconda3/envs/embeddings/bin/python \
-    cargo install --path kglite/crates/kglite-mcp-server
-```
-
-After that one-line export the binary will use the embeddings env's
-Python for everything — including your custom embedder factory.
-
-If you skip this and just `pip install kglite` into a sub-env, you'll
-see error messages like *"No module named 'kglite'"* at startup or
-*"No module named 'torch'"* the first time a `text_score()` query
-fires. The fix is always to install into the env the binary linked
-against (discovered via `otool` / `ldd` above) — not the other way
-around.
+The binary itself is built in Rust against `kglite::api` and goes
+through no Python boundary at tool-call time. The `extensions.embedder`
+backend uses [fastembed-rs](https://github.com/Anush008/fastembed-rs)
+to run ONNX embedding models directly — no `torch` or
+`sentence-transformers` required in your venv.
 
 ### 2. Point it at a graph file
 
@@ -242,56 +192,22 @@ Manifest Cypher tools cap output at 15 rows / 2k chars. For full
 result exports, agents use the bundled `cypher_query` with
 `FORMAT CSV`.
 
-### `python:` — custom hook tools (trust-gated)
+### `python:` — custom hook tools (removed in 0.9.18)
 
-When inline Cypher isn't enough — you want tool logic that does HTTP
-fetches, transforms results, or wraps non-Cypher Python — declare a
-hook pointing at a `.py` file:
+Earlier releases let manifests load Python tool functions
+(`tools[].python: ./tools.py`) and Python embedder factories
+(`embedder: { module, class }`) through an in-process CPython runtime.
+0.9.18 dropped both: the binary no longer embeds Python, and the
+mcp-methods Python interface isn't on its dep graph. If you need
+custom tool logic, write the tool against `kglite::api` in a
+downstream Rust binary (see **Building a downstream binary** below)
+or fold the logic into a parameterised Cypher template.
 
-```yaml
-trust:
-  allow_python_tools: true
-
-tools:
-  - name: session_detail
-    description: Full source JSON for a session by id.
-    python: ./tools.py
-    function: session_detail
-```
-
-```python
-# tools.py
-import json
-from pathlib import Path
-
-DATA = json.loads(Path(__file__).parent.joinpath("data/sessions.json").read_text())
-
-def session_detail(session_id: str) -> str:
-    """Return the canonical session record."""
-    record = next((s for s in DATA["sessions"] if s["id"] == session_id), None)
-    return json.dumps(record, indent=2) if record else f"Session {session_id} not found."
-```
-
-The function's signature, type hints, and docstring are introspected
-via Python's `inspect.signature()` and converted to a JSON Schema for
-the MCP wire format — no synthesis layer.
-
-**Loading requires both signals**:
-
-1. Manifest declares `trust.allow_python_tools: true`
-2. CLI started with `--trust-tools`
-
-Either alone refuses to load with a startup error. The two-signal
-design means the manifest *can* request Python execution, and the
-operator independently authorises it. CI / daemons that should never
-load arbitrary code just leave `--trust-tools` off.
-
-```bash
-kglite-mcp-server --graph demo.kgl --trust-tools
-```
-
-File paths resolve relative to the manifest, same contract as
-`source_root`.
+For embedders, see `extensions.embedder:` in the next section — the
+operator-facing shape is the same single-block declaration, but the
+runtime uses [fastembed-rs](https://github.com/Anush008/fastembed-rs)
+to run BAAI/bge-m3 (or any of fastembed's catalog) natively without
+Python.
 
 ### Top-level fields
 
@@ -300,8 +216,16 @@ name: My Graph                        # Server display name (optional)
 instructions: |                       # Replaces default instructions (optional)
   Custom prompt shown to the agent at server-info time.
 source_root: ./data                   # OR source_roots: [./data, ../alt]
-trust:
-  allow_python_tools: false           # Default: false
+builtins:
+  save_graph: false                   # Default false — gate write-back tool.
+  temp_cleanup: on_overview           # Wipe temp/ on every bare graph_overview().
+extensions:                           # kglite-specific addons (see matrix below).
+  embedder:
+    backend: fastembed
+    model: BAAI/bge-m3
+  csv_http_server:
+    port: 8765
+    dir: temp/
 tools:
   - name: ...                         # See sections above
 ```
@@ -489,3 +413,91 @@ See [Semantic Search](semantic-search.md) for the embedder protocol.
 ```python
 graph.cypher("MATCH (n) WHERE n.name = $name RETURN n", params={"name": user_input})
 ```
+
+## Field-by-mode reference
+
+Quick lookup of which manifest keys take effect in which CLI mode.
+"—" means the key is parsed and validated but has no behavioural
+effect in that mode (it's preserved so the same YAML can be moved
+between modes without edits).
+
+| Manifest key | `--graph` | `--workspace` | `--watch` | `--source-root` | bare |
+|---|---|---|---|---|---|
+| `name`, `instructions` | yes | yes | yes | yes | yes |
+| `source_root` / `source_roots` | yes (overrides parent-of-`.kgl`) | — | — | yes (canonical mode) | yes |
+| `workspace.kind: local` | — | — | — | — | promoted into workspace mode |
+| `env_file` | yes | yes | yes | yes | yes |
+| `tools[].cypher` | yes | yes | yes | — (no graph) | — |
+| `tools[].python`, `embedder:` | removed in 0.9.18 — see migration below |
+| `trust.allow_*` | parsed, no-op | parsed, no-op | parsed, no-op | parsed, no-op | parsed, no-op |
+| `builtins.save_graph: true` | yes | — | — | — | — |
+| `builtins.temp_cleanup: on_overview` | yes | yes | yes | yes | yes |
+| `extensions.embedder` (fastembed) | yes | yes | yes | — (no graph) | — |
+| `extensions.csv_http_server` | yes | yes | yes | yes | yes |
+| `extensions.<other>` (passthrough) | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
+
+## Migration: 0.9.17 → 0.9.18
+
+### Embedders: `embedder:` → `extensions.embedder:`
+
+The framework-level `embedder:` block (Python class factory) is gone.
+Replace with `extensions.embedder:` (Rust-native fastembed-rs):
+
+```yaml
+# Before (0.9.17 and earlier — no longer parsed)
+embedder:
+  module: ./embedder.py
+  class: BgeM3Embedder
+trust:
+  allow_embedder: true
+
+# After (0.9.18+)
+extensions:
+  embedder:
+    backend: fastembed
+    model: BAAI/bge-m3            # or any fastembed catalog name
+```
+
+Operators with custom `embedder.py` files don't need them any more —
+fastembed-rs supports BAAI/bge-m3, bge-small/base/large-en-v1.5,
+all-MiniLM-L6-v2, and the multilingual-e5 family natively, downloading
+ONNX weights on first use to `~/.cache/fastembed/`.
+
+### `tools[].python:` → Rust shim or Cypher template
+
+Python tool hooks are removed in 0.9.18. Two replacements depending
+on shape:
+
+- If the function is mostly Cypher with light parameter munging,
+  promote it to a `tools[].cypher` entry with a `$param` template.
+- If it has real logic (HTTP fetch, file parse), write a small
+  downstream Rust binary that embeds the kglite crate directly —
+  see **Building a downstream binary** above. The binary calls
+  `kglite::api::CypherExecutor` / `compute_description` / etc.
+  without any Python boundary.
+
+### Wheel install
+
+`pip install kglite` now lands `kglite-mcp-server` on `PATH` directly.
+The 0.9.17-era discovery flow (`otool -L`, `PYO3_PYTHON=`,
+`install_name_tool -add_rpath`) is unnecessary. If your shell still
+points at an old `cargo install` binary, drop it and let `pip` win.
+
+### CSV-over-HTTP
+
+The new `extensions.csv_http_server` block opts into a localhost HTTP
+listener that serves `FORMAT CSV` exports as URLs instead of inline
+strings:
+
+```yaml
+extensions:
+  csv_http_server:
+    port: 8765
+    dir: temp/                    # relative to the manifest
+    cors_origin: "*"              # optional, defaults to "*"
+```
+
+With this set, a `cypher_query` that ends in `FORMAT CSV` writes the
+result to `temp/kglite-<hash>.csv` and returns a `http://127.0.0.1:8765/...`
+URL the agent can fetch when ready. Useful for million-row exports
+that would otherwise blow the MCP response budget.

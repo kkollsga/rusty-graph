@@ -35,10 +35,15 @@ pub type CypherRunner =
 
 /// Build a runner backed by the given `GraphState`. The runner forwards
 /// to [`GraphState::run_cypher_template`] which calls into the pure-Rust
-/// kglite Cypher pipeline (no PyO3 boundary).
-pub fn make_runner(state: GraphState) -> CypherRunner {
+/// kglite Cypher pipeline (no PyO3 boundary). When `csv_http` is set,
+/// `FORMAT CSV` results from the template are routed through the
+/// CSV-over-HTTP server (URL return) instead of inlined.
+pub fn make_runner(
+    state: GraphState,
+    csv_http: Option<Arc<crate::csv_http::CsvHttpConfig>>,
+) -> CypherRunner {
     Arc::new(move |template: &str, args: &Map<String, Value>| {
-        Ok(state.run_cypher_template(template, args))
+        Ok(state.run_cypher_template(template, args, csv_http.as_deref()))
     })
 }
 

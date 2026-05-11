@@ -31,6 +31,7 @@ use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
 mod code_source;
+mod csv_http;
 mod cypher_tools;
 mod tools;
 use crate::tools::GraphState;
@@ -318,8 +319,41 @@ async fn main() -> Result<()> {
             .unwrap_or(false),
     };
 
+    // `extensions.csv_http_server:` opt-in CSV-over-HTTP listener.
+    // When configured we spawn a tokio task to serve files out of
+    // the directory; the `cypher_query` tool sees the same config
+    // and writes `FORMAT CSV` results to that directory, returning
+    // a URL instead of an inline CSV blob.
+    let csv_http_cfg = match manifest.as_ref() {
+        Some(m) => {
+            let base = m
+                .yaml_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            match m.extensions.get("csv_http_server") {
+                Some(raw) => csv_http::CsvHttpConfig::from_manifest_value(raw, &base)
+                    .context("extensions.csv_http_server parse failed")?,
+                None => None,
+            }
+        }
+        None => None,
+    };
+    if let Some(cfg) = csv_http_cfg.as_ref() {
+        csv_http::spawn(cfg.clone())
+            .await
+            .context("csv_http_server failed to bind")?;
+    }
+
+    let csv_http_arc = csv_http_cfg.map(Arc::new);
+
     let mut server = McpServer::new(options);
-    tools::register(&mut server, graph_state.clone(), builtins);
+    tools::register(
+        &mut server,
+        graph_state.clone(),
+        builtins,
+        csv_http_arc.clone(),
+    );
     code_source::register(
         &mut server,
         graph_state.clone(),
@@ -348,7 +382,7 @@ async fn main() -> Result<()> {
     // `build_tool_attr` plus an in-shim runner that dispatches into the
     // active graph's `cypher(template, params=args)` method.
     if let Some(m) = manifest.as_ref() {
-        let runner = cypher_tools::make_runner(graph_state.clone());
+        let runner = cypher_tools::make_runner(graph_state.clone(), csv_http_arc.clone());
         let registered = cypher_tools::register_cypher_tools(&mut server, m, runner)
             .context("YAML cypher tool registration failed")?;
         if registered > 0 {
