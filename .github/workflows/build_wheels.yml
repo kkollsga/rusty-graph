@@ -69,40 +69,97 @@ jobs:
           wait-interval: 15
 
   build:
-    name: Build abi3 wheel - ${{ matrix.os }} - ${{ matrix.target }}
+    name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}
     needs: [ci-gate, version-check]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    # 0.9.18 introduces bundled `kglite-mcp-server` binary in the
+    # wheel, which means per-Python-version wheels (we can't keep
+    # abi3 since the binary is linked against a specific libpython).
+    # Matrix: 3 OS × 4 Python versions = 12 wheels per release,
+    # mirroring mcp-methods' pattern.
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            python-version: '3.10'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            python-version: '3.11'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            python-version: '3.12'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            python-version: '3.13'
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            python-version: '3.10'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python-version: '3.11'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python-version: '3.12'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python-version: '3.13'
           - os: macos-latest
             target: aarch64-apple-darwin
+            python-version: '3.10'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.11'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.12'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.13'
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Python 3.10 (abi3 floor)
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: ${{ matrix.python-version }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install Maturin
         run: pip install maturin
-      - name: Build abi3 wheel
+      # Build the bundled `kglite-mcp-server` binary first and copy it
+      # into kglite/_bin/. Maturin's `include` config in pyproject.toml
+      # then force-packages it into the wheel — without this step the
+      # wheel ships with an unresolvable entry point pointing at a
+      # missing file. Pattern mirrors mcp-methods 0.3.25's wheel build.
+      - name: Build + bundle kglite-mcp-server binary
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p kglite-mcp-server
+          if (!(Test-Path -Path "kglite/_bin")) { New-Item -ItemType Directory -Path "kglite/_bin" -Force }
+          if ($IsWindows) {
+            Copy-Item "target/${{ matrix.target }}/release/kglite-mcp-server.exe" "kglite/_bin/kglite-mcp-server.exe"
+          } else {
+            Copy-Item "target/${{ matrix.target }}/release/kglite-mcp-server" "kglite/_bin/kglite-mcp-server"
+          }
+        shell: pwsh
+      - name: Build wheel
+        # `--no-default-features --features python-extension` disables
+        # abi3 so the wheel is tagged for this specific Python version,
+        # matching the bundled binary's libpython link. Without
+        # disabling abi3, the wheel would advertise "Python 3.10+
+        # compatible" but ship a binary that only works with the
+        # build-time Python — a packaging lie that breaks for users
+        # on a mismatched Python.
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
-          maturin build --release --target ${{ matrix.target }} --out wheels
+          maturin build --release --target ${{ matrix.target }} --interpreter python --no-default-features --features python-extension --out wheels
         shell: pwsh
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
@@ -110,7 +167,7 @@ jobs:
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}-py${{ matrix.python-version }}
           path: wheels/*.whl
 
   publish:

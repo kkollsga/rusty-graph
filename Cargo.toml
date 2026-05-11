@@ -17,8 +17,14 @@ license = "MIT"
 # (via plain cargo) can share the same kglite rlib. Maturin is wired
 # to enable it; cargo build leaves it off.
 [features]
-default = []
+default = ["abi3"]
 python-extension = ["pyo3/extension-module"]
+# Single-cdylib-for-many-Pythons mode. On by default so existing
+# `cargo build` / `cargo install` / `maturin develop` flows behave
+# exactly as before. The wheel-build workflow disables this with
+# `--no-default-features --features python-extension` to produce
+# per-Python-version wheels alongside the bundled binary.
+abi3 = ["pyo3/abi3-py310"]
 
 [lib]
 name = "kglite"
@@ -40,7 +46,18 @@ path = "src/bin/bz2_bench.rs"
 required-features = []
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["multiple-pymethods", "abi3-py310"] }
+# `abi3-py310` is feature-gated so the wheel-build can opt in/out:
+# - On (default-on via `abi3` feature): single cdylib for Python 3.10+.
+#   Used by users who do `cargo build` / `maturin develop` without the
+#   bundled-binary path, and by `make dev` for local development.
+# - Off (when bundling `kglite-mcp-server` into per-Python-version
+#   wheels): the wheel-build workflow disables this so each wheel is
+#   tagged for a single Python version, matching the bundled binary's
+#   libpython link. Without this gate, an abi3 wheel claiming
+#   compatibility with Python 3.10+ ships a binary linked against one
+#   specific libpython — a packaging lie that breaks on mismatched
+#   Python versions.
+pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

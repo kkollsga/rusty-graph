@@ -4,11 +4,27 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev test test-rust test-py bench bench-save bench-compare check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
 	$(ACTIVATE) && maturin develop
+
+## Dev install with the bundled `kglite-mcp-server` binary on PATH.
+## Builds the binary via cargo, copies it into kglite/_bin/, then runs
+## `maturin develop`. The same sequence is what CI runs at wheel-build
+## time. Use this if you want `which kglite-mcp-server` to resolve to
+## the wheel-installed binary during local development.
+dev-with-bin: bundle-bin
+	$(ACTIVATE) && maturin develop --release
+
+## Build the kglite-mcp-server binary and copy it into kglite/_bin/.
+## Idempotent. Used by `dev-with-bin` locally and by the wheel-build
+## workflow in CI.
+bundle-bin:
+	cargo build --release -p kglite-mcp-server
+	mkdir -p kglite/_bin
+	cp target/release/kglite-mcp-server kglite/_bin/kglite-mcp-server
 
 ## Run all tests (Rust + Python)
 test: test-rust test-py
