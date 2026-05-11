@@ -132,6 +132,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # 0.9.19 perf: use the mold linker on Linux. ld bundled with
+      # GH Actions runners spends ~1-2 min linking the kglite cdylib
+      # + binary at the end of each wheel build because of the
+      # fastembed/ort/tokenizers dep graph. mold is a drop-in
+      # replacement that links the same artifact in ~10s. Sets
+      # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER for the rest of
+      # the job. macOS and Windows have their own platform linkers
+      # we don't replace.
+      - name: Install mold linker (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        uses: rui314/setup-mold@v1
       # 0.9.19 perf: cache the cargo registry, git deps, and target
       # directory between wheel builds. With fastembed/ort/tokenizers
       # in the dep graph a cold build was ~15 min per wheel; with this
