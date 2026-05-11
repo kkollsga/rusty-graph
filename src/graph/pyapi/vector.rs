@@ -703,7 +703,14 @@ impl KnowledgeGraph {
         bound.getattr("embed").map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyAttributeError, _>("model must have an 'embed' method")
         })?;
-        self.embedder = Some(model);
+        // 0.9.18: wrap the user's Python embedder in PyEmbedderAdapter
+        // so the rest of kglite (cypher engine, embed_texts,
+        // search_text) calls through the generic Embedder trait. The
+        // adapter holds the Py<PyAny> and acquires the GIL inside its
+        // trait methods — same semantics as the pre-0.9.18 direct
+        // `Py<PyAny>` path.
+        let adapter = crate::graph::embedder::py_adapter::PyEmbedderAdapter::new(py, model)?;
+        self.embedder = Some(Arc::new(adapter));
         Ok(())
     }
 
@@ -736,24 +743,17 @@ impl KnowledgeGraph {
         show_progress: Option<bool>,
         replace: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let model = self.get_embedder_or_error(py)?;
+        let model = self.get_embedder_or_error()?;
         let embedding_property = format!("{}_emb", text_column);
         let batch_size = batch_size.unwrap_or(256);
         let replace = replace.unwrap_or(false);
 
         // Load model if it has a load() lifecycle method
-        Self::try_load_embedder(&model)?;
+        model
+            .load()
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
-        // Get model dimension
-        let dimension: usize = match model.getattr("dimension").and_then(|d| d.extract()) {
-            Ok(dim) => dim,
-            Err(_) => {
-                Self::try_unload_embedder(&model);
-                return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                    "model must have an int 'dimension' attribute",
-                ));
-            }
-        };
+        let dimension: usize = model.dimension();
 
         // Collect (node_index, text) for nodes that need embedding
         let mut node_texts: Vec<(NodeIndex, String)> = Vec::new();
@@ -796,7 +796,7 @@ impl KnowledgeGraph {
         }
 
         if node_texts.is_empty() {
-            Self::try_unload_embedder(&model);
+            model.unload();
             let result = PyDict::new(py);
             result.set_item("embedded", 0)?;
             result.set_item("skipped", skipped)?;
@@ -830,29 +830,18 @@ impl KnowledgeGraph {
         };
 
         for batch in node_texts.chunks(batch_size) {
-            let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-            let py_texts = PyList::new(py, &texts)?;
+            let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
 
-            let embeddings_result = match model.call_method1("embed", (py_texts,)) {
-                Ok(r) => r,
+            // Release the GIL while embedding — PyEmbedderAdapter
+            // reacquires inside, fastembed never needs it.
+            let embeddings = match py.detach(|| model.embed(&texts)) {
+                Ok(v) => v,
                 Err(e) => {
                     if let Some(ref bar) = progress_bar {
                         let _ = bar.call_method0("close");
                     }
-                    Self::try_unload_embedder(&model);
-                    return Err(e);
-                }
-            };
-            let embeddings: Vec<Vec<f32>> = match embeddings_result.extract() {
-                Ok(v) => v,
-                Err(_) => {
-                    if let Some(ref bar) = progress_bar {
-                        let _ = bar.call_method0("close");
-                    }
-                    Self::try_unload_embedder(&model);
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "model.embed() must return list[list[float]]",
-                    ));
+                    model.unload();
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e));
                 }
             };
 
@@ -860,7 +849,7 @@ impl KnowledgeGraph {
                 if let Some(ref bar) = progress_bar {
                     let _ = bar.call_method0("close");
                 }
-                Self::try_unload_embedder(&model);
+                model.unload();
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "model.embed() returned {} vectors for {} texts",
                     embeddings.len(),
@@ -873,7 +862,7 @@ impl KnowledgeGraph {
                     if let Some(ref bar) = progress_bar {
                         let _ = bar.call_method0("close");
                     }
-                    Self::try_unload_embedder(&model);
+                    model.unload();
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "model.embed() returned vector of dimension {} (expected {})",
                         vec.len(),
@@ -895,7 +884,7 @@ impl KnowledgeGraph {
         }
 
         // Unload model after embedding is complete
-        Self::try_unload_embedder(&model);
+        model.unload();
 
         let embedded = node_texts.len();
         let g = Arc::make_mut(&mut self.inner);
@@ -935,22 +924,19 @@ impl KnowledgeGraph {
         metric: Option<&str>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let model = self.get_embedder_or_error(py)?;
+        let model = self.get_embedder_or_error()?;
 
         // Load model if it has a load() lifecycle method
-        Self::try_load_embedder(&model)?;
+        model
+            .load()
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
-        // Embed the query text, then unload regardless of success/failure
-        let py_texts = PyList::new(py, [query])?;
-        let embed_result = model.call_method1("embed", (py_texts,));
-        Self::try_unload_embedder(&model);
-        let embeddings_result = embed_result?;
-
-        let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "model.embed() must return list[list[float]]",
-            )
-        })?;
+        // Embed the query text, then unload regardless of success/failure.
+        // Release the GIL while the embedder runs.
+        let texts = vec![query.to_string()];
+        let embed_result = py.detach(|| model.embed(&texts));
+        model.unload();
+        let embeddings = embed_result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
         if embeddings.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

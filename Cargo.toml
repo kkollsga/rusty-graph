@@ -25,6 +25,10 @@ python-extension = ["pyo3/extension-module"]
 # `--no-default-features --features python-extension` to produce
 # per-Python-version wheels alongside the bundled binary.
 abi3 = ["pyo3/abi3-py310"]
+# Rust-native embedder backend (BAAI/bge-m3 et al via fastembed-rs).
+# Enabled by `kglite-mcp-server` so the pure-Rust binary can support
+# `text_score()` semantic search without needing a Python embedder.
+fastembed = ["dep:fastembed"]
 
 [lib]
 name = "kglite"
@@ -59,6 +63,15 @@ required-features = []
 #   Python versions.
 pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
+# Rust-native embedder backend behind the `fastembed` Cargo feature.
+# Downloads ONNX model weights on first use (cached at
+# `~/.cache/fastembed/`). Off by default — the Python wheel relies on
+# user-provided Python embedder classes via `PyEmbedderAdapter`, and
+# we don't want to pull a 100-200 MB ONNX runtime into every wheel
+# build. The `kglite-mcp-server` binary enables this feature so the
+# Rust-only deployment path supports `text_score()` semantic search
+# without a Python embedder.
+fastembed = { version = "5", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 bincode = "1.3"

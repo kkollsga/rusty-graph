@@ -14,6 +14,7 @@ pub mod algorithms;
 pub mod blueprint;
 pub mod core;
 pub mod dir_graph;
+pub mod embedder;
 pub mod features;
 pub mod introspection;
 pub mod io;
@@ -143,8 +144,14 @@ pub struct KnowledgeGraph {
     pub(crate) selection: CowSelection, // Using Cow wrapper for copy-on-write semantics
     pub(crate) reports: OperationReports,
     pub(crate) last_mutation_stats: Option<cypher::result::MutationStats>,
-    /// Registered Python embedding model (not serialized — re-set after load).
-    pub(crate) embedder: Option<Py<PyAny>>,
+    /// Registered embedding model (not serialized — re-set after load).
+    /// Backend-agnostic via [`embedder::Embedder`] trait: Python
+    /// embedders flow through [`embedder::py_adapter::PyEmbedderAdapter`];
+    /// Rust-native embedders (e.g. fastembed-rs) implement the trait
+    /// directly. Switched from `Option<Py<PyAny>>` in 0.9.18 so
+    /// downstream Rust binaries (kglite-mcp-server) don't inherit a
+    /// libpython dep transitively.
+    pub(crate) embedder: Option<Arc<dyn embedder::Embedder>>,
     /// Temporal context for auto-filtering temporal nodes/connections.
     /// Set via `date()` method. Default = Today (resolve at query time).
     pub(crate) temporal_context: TemporalContext,
@@ -243,7 +250,7 @@ impl Clone for KnowledgeGraph {
             selection: self.selection.clone(), // Arc clone - O(1), shares data
             reports: self.reports.clone(),
             last_mutation_stats: self.last_mutation_stats.clone(),
-            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            embedder: self.embedder.as_ref().map(Arc::clone),
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
@@ -368,32 +375,14 @@ impl KnowledgeGraph {
     }
 
     /// Get the registered embedder or return a helpful error with a skeleton.
-    pub(crate) fn get_embedder_or_error<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    /// Returns an `Arc<dyn Embedder>` — call sites can downcast or just
+    /// use the trait surface (`embed`, `dimension`, `load`, `unload`).
+    pub(crate) fn get_embedder_or_error(&self) -> PyResult<Arc<dyn embedder::Embedder>> {
         match &self.embedder {
-            Some(model) => Ok(model.bind(py).clone()),
+            Some(model) => Ok(Arc::clone(model)),
             None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 EMBEDDER_SKELETON_MSG,
             )),
-        }
-    }
-
-    /// Call `model.load()` if the method exists (optional lifecycle hook).
-    /// Errors propagate — if load() fails, the caller should not proceed.
-    pub(crate) fn try_load_embedder(model: &Bound<'_, PyAny>) -> PyResult<()> {
-        if model.hasattr("load")? {
-            model.call_method0("load")?;
-        }
-        Ok(())
-    }
-
-    /// Call `model.unload()` if the method exists (optional lifecycle hook).
-    /// Best-effort: errors are silently ignored since this is cleanup.
-    pub(crate) fn try_unload_embedder(model: &Bound<'_, PyAny>) {
-        if model.hasattr("unload").unwrap_or(false) {
-            let _ = model.call_method0("unload");
         }
     }
 

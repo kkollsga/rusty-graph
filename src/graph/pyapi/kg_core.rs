@@ -1242,8 +1242,8 @@ impl KnowledgeGraph {
         // Embed collected query texts if any (skip for EXPLAIN)
         if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
             let this = slf.borrow();
-            let model = match &this.embedder {
-                Some(m) => m.bind(py).clone(),
+            let model: std::sync::Arc<dyn crate::graph::embedder::Embedder> = match &this.embedder {
+                Some(m) => std::sync::Arc::clone(m),
                 None => {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         "text_score() requires a registered embedding model. \
@@ -1251,22 +1251,22 @@ impl KnowledgeGraph {
                     ))
                 }
             };
-            Self::try_load_embedder(&model)?;
+            model
+                .load()
+                .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
-            let texts: Vec<&str> = rewrite
+            let texts: Vec<String> = rewrite
                 .texts_to_embed
                 .iter()
-                .map(|(_, t)| t.as_str())
+                .map(|(_, t)| t.clone())
                 .collect();
-            let py_texts = PyList::new(py, &texts)?;
-            let embed_result = model.call_method1("embed", (py_texts,));
-            Self::try_unload_embedder(&model);
-            let embeddings_result = embed_result?;
-            let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "model.embed() must return list[list[float]]",
-                )
-            })?;
+            // Release the GIL while the embedder runs — PyEmbedderAdapter
+            // will reacquire it inside its `embed`; FastEmbedAdapter
+            // doesn't need Python at all.
+            let embed_result = py.detach(|| model.embed(&texts));
+            model.unload();
+            let embeddings: Vec<Vec<f32>> =
+                embed_result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
             if embeddings.len() != texts.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(

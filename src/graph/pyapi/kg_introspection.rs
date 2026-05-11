@@ -907,7 +907,7 @@ impl KnowledgeGraph {
             },
             reports: self.reports.clone(), // Copy over existing reports
             last_mutation_stats: None,
-            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            embedder: self.embedder.as_ref().map(Arc::clone),
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
@@ -982,7 +982,7 @@ impl KnowledgeGraph {
             },
             reports: self.reports.clone(),
             last_mutation_stats: None,
-            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            embedder: self.embedder.as_ref().map(Arc::clone),
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
@@ -1093,7 +1093,7 @@ impl KnowledgeGraph {
             },
             reports: self.reports.clone(),
             last_mutation_stats: None,
-            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            embedder: self.embedder.as_ref().map(Arc::clone),
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
@@ -1215,9 +1215,7 @@ impl KnowledgeGraph {
                         },
                         reports: self.reports.clone(), // Copy existing reports
                         last_mutation_stats: None,
-                        embedder: Python::attach(|py| {
-                            self.embedder.as_ref().map(|m| m.clone_ref(py))
-                        }),
+                        embedder: self.embedder.as_ref().map(Arc::clone),
                         temporal_context: self.temporal_context.clone(),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
@@ -1368,7 +1366,7 @@ impl KnowledgeGraph {
                 },
                 reports: self.reports.clone(), // Copy existing reports
                 last_mutation_stats: None,
-                embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+                embedder: self.embedder.as_ref().map(Arc::clone),
                 temporal_context: self.temporal_context.clone(),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
@@ -1534,7 +1532,7 @@ impl KnowledgeGraph {
             selection: CowSelection::new(),
             reports: OperationReports::new(),
             last_mutation_stats: None,
-            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            embedder: self.embedder.as_ref().map(Arc::clone),
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
