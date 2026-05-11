@@ -1,0 +1,85 @@
+"""extensions.embedder builder — fastembed Python backend.
+
+Mirrors `crates/kglite-mcp-server/src/main.rs::build_embedder_from_manifest`
+and the kglite Rust trait `Embedder { dimension, embed, load, unload }`.
+The kglite Python API's `g.set_embedder(model)` requires a duck-typed
+object with `dimension: int` and `embed(texts) -> list[list[float]]`
+(see kglite/__init__.pyi).
+
+We wrap `fastembed.TextEmbedding` with lazy load + unload semantics so
+the ~1 GB of ONNX weights can be released between queries. Same model
+catalogue as the Rust fastembed adapter (BAAI/bge-m3 et al), so the
+operator's YAMLs don't change.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+log = logging.getLogger("kglite.mcp_server.embedder")
+
+# Map of accepted YAML model names → dimensions. Mirrors
+# `src/graph/embedder/fastembed.rs::resolve_model` so operators can
+# move between Rust and Python implementations without YAML edits.
+KNOWN_MODELS = {
+    "BAAI/bge-m3": 1024,
+    "BAAI/bge-small-en-v1.5": 384,
+    "bge-small-en-v1.5": 384,
+    "BAAI/bge-base-en-v1.5": 768,
+    "bge-base-en-v1.5": 768,
+    "BAAI/bge-large-en-v1.5": 1024,
+    "bge-large-en-v1.5": 1024,
+    "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "all-MiniLM-L6-v2": 384,
+    "intfloat/multilingual-e5-large": 1024,
+    "multilingual-e5-large": 1024,
+    "intfloat/multilingual-e5-base": 768,
+    "multilingual-e5-base": 768,
+}
+
+
+class FastEmbedAdapter:
+    """Duck-typed Embedder for kglite. Lazy-init on first `embed()`."""
+
+    def __init__(self, model_name: str) -> None:
+        if model_name not in KNOWN_MODELS:
+            raise ValueError(f"unsupported fastembed model name: {model_name!r}. Known: {sorted(KNOWN_MODELS.keys())}")
+        self._model_name = model_name
+        self.dimension = KNOWN_MODELS[model_name]
+        self._inner: Any = None
+
+    def load(self) -> None:
+        if self._inner is None:
+            from fastembed import TextEmbedding
+
+            self._inner = TextEmbedding(model_name=self._model_name)
+
+    def unload(self) -> None:
+        # Drop the ONNX session to free GPU/CPU memory between idle
+        # periods. Re-materialises from `~/.cache/fastembed/` on next
+        # load — no re-download.
+        self._inner = None
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.load()
+        # fastembed returns an iterator of numpy arrays.
+        return [vec.tolist() for vec in self._inner.embed(texts)]
+
+
+def from_manifest_value(value: Any) -> FastEmbedAdapter | None:
+    """Parse `extensions.embedder` from the manifest. Returns None if
+    the block is absent."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"extensions.embedder must be a mapping (got {value!r})")
+    backend = value.get("backend", "fastembed")
+    if backend != "fastembed":
+        raise ValueError(f"extensions.embedder.backend = {backend!r} is not supported. Known: fastembed.")
+    model = value.get("model")
+    if not model:
+        raise ValueError("extensions.embedder.model is required for the fastembed backend")
+    adapter = FastEmbedAdapter(model)
+    log.info("registered fastembed embedder (model=%s)", model)
+    return adapter

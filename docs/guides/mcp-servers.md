@@ -21,19 +21,25 @@ automatically. **No fork required for most customisation.**
 ### 1. Install
 
 ```bash
-pip install kglite
+pip install 'kglite[mcp]'
 ```
 
-`kglite-mcp-server` ships with the wheel — it lands on your `PATH`
-automatically through the `[project.scripts]` entry point. No `cargo
-install`, no `PYO3_PYTHON=` dance, no `install_name_tool` patching.
+`kglite-mcp-server` ships with the wheel as a Python console-script
+entry point. No `cargo install`, no `PYO3_PYTHON=` dance, no
+`install_name_tool` patching, no per-Python-version wheel matrix.
 Run `kglite-mcp-server --help` to confirm.
 
-The binary itself is built in Rust against `kglite::api` and goes
-through no Python boundary at tool-call time. The `extensions.embedder`
-backend uses [fastembed-rs](https://github.com/Anush008/fastembed-rs)
-to run ONNX embedding models directly — no `torch` or
-`sentence-transformers` required in your venv.
+Under the hood the entry point is `kglite.mcp_server.server:main` —
+a Python implementation that calls the existing kglite Python API
+(`graph.cypher` / `graph.describe` / `graph.source`). Cypher
+execution still happens in pure Rust under the GIL release inside
+`cypher()`, so hot-path performance is identical to the
+pre-0.9.20 bundled-binary release.
+
+The `[mcp]` extras pull `mcp` (the official Python SDK),
+`fastembed`, `aiohttp`, `pyyaml`, and `watchdog` — only installed
+when you actually want to run the server. Plain `pip install kglite`
+gives you the graph engine without the server deps.
 
 ### 2. Point it at a graph file
 
@@ -435,6 +441,30 @@ between modes without edits).
 | `extensions.embedder` (fastembed) | yes | yes | yes | — (no graph) | — |
 | `extensions.csv_http_server` | yes | yes | yes | yes | yes |
 | `extensions.<other>` (passthrough) | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
+
+## Migration: 0.9.19 → 0.9.20
+
+`kglite-mcp-server` is now a Python entry point instead of a bundled
+Rust binary. Operator action:
+
+```bash
+pip install --upgrade 'kglite[mcp]'
+```
+
+YAMLs unchanged. Tool surface unchanged. fastembed cache directory
+unchanged (`~/.cache/fastembed/`). Performance unchanged (kglite's
+Python `cypher()` releases the GIL for execution, so the wrapping
+layer is sub-microsecond).
+
+What disappeared:
+- `kglite/_bin/kglite-mcp-server` binary inside the wheel (no
+  longer built).
+- `install_name_tool` / `patchelf` / mold / per-Python-version
+  wheel matrix in CI (no longer needed).
+- The 0.9.18 conda install_name regression (impossible by
+  construction — there's no binary to mis-link).
+
+Wheel matrix is back to 3 abi3 wheels per release, same as pre-0.9.18.
 
 ## Migration: 0.9.17 → 0.9.18
 

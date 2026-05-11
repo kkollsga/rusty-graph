@@ -38,24 +38,31 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
-# Embedder factory deps (BAAI/bge-m3-style semantic search via
-# `text_score()` in Cypher). Install with `pip install kglite[embeddings]`
-# to get torch + sentence-transformers in the same Python the
-# kglite-mcp-server binary will use at runtime.
-embeddings = [
-    "torch>=2.0",
-    "sentence-transformers>=2.2",
+# Deps for `kglite-mcp-server` and the manifest-driven server tools.
+# Install with `pip install 'kglite[mcp]'`. 0.9.20+: the server is a
+# Python entry point (no bundled binary) so these are the only runtime
+# deps it pulls. fastembed handles `extensions.embedder` (same ONNX
+# backend as the 0.9.18/0.9.19 Rust fastembed-rs path, same
+# `~/.cache/fastembed/` cache). aiohttp powers `extensions.csv_http_server`.
+mcp = [
+    "mcp>=1.0",
+    "pyyaml>=6.0",
+    "fastembed>=0.4",
+    "aiohttp>=3.9",
+    "watchdog>=4.0",
 ]
 
-# `pip install kglite` → `kglite-mcp-server` on PATH. The entry point
-# resolves to a Python launcher (`kglite._cli:main`) which execs the
-# native Rust binary bundled under `kglite/_bin/kglite-mcp-server`.
-# The native binary is built by the wheel-build workflow (cargo build
-# --release --bin kglite-mcp-server) and copied into this directory
-# before maturin packages the Python tree. Pattern cribbed from
-# mcp-methods 0.3.25.
+# `pip install kglite` → `kglite-mcp-server` on PATH. 0.9.20+: the
+# entry point resolves to the Python implementation under
+# `kglite.mcp_server.server:main`. Pre-0.9.20 this pointed at a
+# launcher that exec'd a bundled Rust binary — that approach was
+# retired because it forced a per-Python-version wheel matrix (no
+# abi3 escape for binaries linking pyo3). The Python entry point
+# wraps the existing kglite Python API; Cypher execution still
+# happens under the GIL release inside `cypher()`, so hot-path
+# performance is unchanged.
 [project.scripts]
-kglite-mcp-server = "kglite._cli:main"
+kglite-mcp-server = "kglite.mcp_server.server:main"
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"
@@ -70,20 +77,6 @@ Issues = "https://github.com/kkollsga/kglite/issues"
 # symbol visibility even outside maturin builds.
 features = ["python-extension"]
 python-source = "."
-
-# Force-include the bundled `kglite-mcp-server` binary into the wheel.
-# Lives under `kglite/_bin/` after the wheel-build workflow's
-# "build + copy binary" step (or `make bundle-bin` locally). The path
-# is `.gitignore`d (would pollute git with platform-specific outputs),
-# and maturin would skip ignored files by default — this override
-# tells it the file is part of the wheel. POSIX builds package
-# `kglite-mcp-server`; Windows packages `kglite-mcp-server.exe`. Only
-# one exists per platform, but listing both keeps the config
-# platform-agnostic.
-include = [
-    { path = "kglite/_bin/kglite-mcp-server", format = "wheel" },
-    { path = "kglite/_bin/kglite-mcp-server.exe", format = "wheel" },
-]
 
 [tool.ruff]
 line-length = 120

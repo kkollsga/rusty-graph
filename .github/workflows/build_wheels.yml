@@ -74,172 +74,47 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
-    # 0.9.18 introduces bundled `kglite-mcp-server` binary in the
-    # wheel, which means per-Python-version wheels (we can't keep
-    # abi3 since the binary is linked against a specific libpython).
-    # Matrix: 3 OS × 4 Python versions = 12 wheels per release,
-    # mirroring mcp-methods' pattern.
+    # 0.9.20: the bundled binary was retired in favour of a Python
+    # entry point (kglite.mcp_server.server:main). With no binary in
+    # the wheel, there's nothing forcing a per-Python-version build —
+    # the kglite cdylib uses pyo3's abi3-py310 feature and the same
+    # `.so` serves all Python 3.10+. Matrix collapses back to 3 cells
+    # (one per OS). See `docs/guides/mcp-servers.md` for the
+    # architectural rationale.
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            python-version: '3.10'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.11'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.12'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.13'
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            python-version: '3.10'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.11'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.12'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.13'
           - os: macos-latest
             target: aarch64-apple-darwin
-            python-version: '3.10'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.11'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.12'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.13'
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.10 (abi3 floor)
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.10'
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # 0.9.19 perf: use the mold linker on Linux. ld bundled with
-      # GH Actions runners spends ~1-2 min linking the kglite cdylib
-      # + binary at the end of each wheel build because of the
-      # fastembed/ort/tokenizers dep graph. mold is a drop-in
-      # replacement that links the same artifact in ~10s. Sets
-      # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER for the rest of
-      # the job. macOS and Windows have their own platform linkers
-      # we don't replace.
-      - name: Install mold linker (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        uses: rui314/setup-mold@v1
-      # 0.9.19 perf: cache the cargo registry, git deps, and target
-      # directory between wheel builds. With fastembed/ort/tokenizers
-      # in the dep graph a cold build was ~15 min per wheel; with this
-      # cache primed it drops to ~3-5 min. shared-key is per-target —
-      # most deps (fastembed, ort, hyper, mcp-methods) are
-      # Python-version-independent and can be reused across the four
-      # Python-version cells within a single OS. Swatinem/rust-cache
-      # uses Cargo.lock + rustc fingerprint to invalidate stale
-      # entries so cross-Python contamination doesn't happen.
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
           shared-key: "wheel-${{ matrix.target }}"
-          key: "py${{ matrix.python-version }}"
       - name: Install Maturin
         run: pip install maturin
-      # Build the bundled `kglite-mcp-server` binary first and copy it
-      # into kglite/_bin/. Maturin's `include` config in pyproject.toml
-      # then force-packages it into the wheel — without this step the
-      # wheel ships with an unresolvable entry point pointing at a
-      # missing file. Pattern mirrors mcp-methods 0.3.25's wheel build.
-      - name: Build + bundle kglite-mcp-server binary
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p kglite-mcp-server
-          if (!(Test-Path -Path "kglite/_bin")) { New-Item -ItemType Directory -Path "kglite/_bin" -Force }
-          if ($IsWindows) {
-            Copy-Item "target/${{ matrix.target }}/release/kglite-mcp-server.exe" "kglite/_bin/kglite-mcp-server.exe"
-          } else {
-            Copy-Item "target/${{ matrix.target }}/release/kglite-mcp-server" "kglite/_bin/kglite-mcp-server"
-          }
-        shell: pwsh
-      # 0.9.19 fix: cargo links the binary against the build runner's
-      # libpython at an absolute path (Python.org's
-      # /Library/Frameworks/.../Python on macOS, the runner's
-      # libpython3.X.so.1.0 on Linux). That absolute path doesn't exist
-      # on conda installations — the dominant Python distro for data
-      # scientists — and `pip install kglite` fails with a dyld /
-      # ld.so error. Rewrite the install_name + soname to use
-      # @rpath / $ORIGIN relative to the binary's wheel install
-      # location (<env>/lib/pythonX.Y/site-packages/kglite/_bin/),
-      # plus add an rpath that walks up to the env's lib/ so dyld /
-      # ld.so finds the env-local libpython at runtime. Covers conda,
-      # venv, virtualenv, and Python.org system installs uniformly.
-      - name: Patch binary install_name (macOS — conda compat fix)
-        if: matrix.os == 'macos-latest'
-        run: |
-          BIN=kglite/_bin/kglite-mcp-server
-          PY=${{ matrix.python-version }}
-          echo "Before:"
-          otool -L "$BIN" | grep -i python || true
-          # Rewrite the absolute Python.framework path to @rpath/libpythonX.Y.dylib.
-          # Both Python.org and conda ship libpythonX.Y.dylib in their lib/
-          # directory; using a libname rather than the framework binary lets
-          # one install_name resolve under either layout.
-          OLD_INSTALL_NAME=$(otool -L "$BIN" | grep -i python | head -1 | awk '{print $1}')
-          install_name_tool -change "$OLD_INSTALL_NAME" "@rpath/libpython${PY}.dylib" "$BIN"
-          # rpath walking up from <site-packages>/kglite/_bin/ to <env>/lib/.
-          # Resolves to <env>/lib/libpythonX.Y.dylib under conda / venv / virtualenv.
-          install_name_tool -add_rpath '@loader_path/../../../..' "$BIN"
-          # Fallback for Python.org system installs — libpythonX.Y.dylib
-          # lives in the framework's lib/ subdirectory.
-          install_name_tool -add_rpath "/Library/Frameworks/Python.framework/Versions/${PY}/lib" "$BIN"
-          # Re-sign after install_name_tool surgery (required on Apple
-          # Silicon; codesign --remove-signature + ad-hoc re-sign).
-          codesign --remove-signature "$BIN" || true
-          codesign --sign - "$BIN"
-          echo "After:"
-          otool -L "$BIN" | grep -i python || true
-          otool -l "$BIN" | grep -A 2 LC_RPATH || true
-        shell: bash
-      - name: Patch binary RPATH (Linux — conda compat fix)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y patchelf
-          BIN=kglite/_bin/kglite-mcp-server
-          echo "Before:"
-          patchelf --print-rpath "$BIN" || true
-          patchelf --print-needed "$BIN" | grep -i python || true
-          # $ORIGIN walking up from <site-packages>/kglite/_bin/ to <env>/lib/.
-          # Resolves to <env>/lib/libpythonX.Y.so.1.0 under conda / venv.
-          patchelf --set-rpath '$ORIGIN/../../../..' "$BIN"
-          echo "After:"
-          patchelf --print-rpath "$BIN"
-        shell: bash
-      - name: Build wheel
-        # `--no-default-features --features python-extension` disables
-        # abi3 so the wheel is tagged for this specific Python version,
-        # matching the bundled binary's libpython link. Without
-        # disabling abi3, the wheel would advertise "Python 3.10+
-        # compatible" but ship a binary that only works with the
-        # build-time Python — a packaging lie that breaks for users
-        # on a mismatched Python.
+      - name: Build abi3 wheel
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
-          maturin build --release --target ${{ matrix.target }} --interpreter python --no-default-features --features python-extension --out wheels
+          maturin build --release --target ${{ matrix.target }} --out wheels
         shell: pwsh
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
@@ -247,7 +122,7 @@ jobs:
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}-py${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: wheels/*.whl
 
   publish:

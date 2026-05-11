@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.20] — 2026-05-11
+
+### Changed
+- **`kglite-mcp-server` is now a Python console-script entry point,
+  not a bundled Rust binary.** The 0.9.18/0.9.19 binary bundling
+  forced a 12-wheel (3 OS × 4 Python) build matrix because any
+  Rust binary that transitively depends on pyo3 links libpython at
+  a specific version — no abi3 escape for binaries. The Python
+  entry point bypasses that entirely. Wheel matrix back to 3 abi3
+  wheels per release (same as pre-0.9.18). Performance unchanged:
+  kglite's Python `cypher()` already releases the GIL inside
+  `py.detach()`, so the wrapping layer is sub-microsecond.
+- The 0.9.18 conda install_name regression and the 0.9.19
+  `install_name_tool` / `patchelf` / mold post-build surgery are
+  gone — there's no binary to mis-link.
+- Wheel deps: install via `pip install 'kglite[mcp]'` to pull the
+  server-time deps (mcp, pyyaml, fastembed, aiohttp, watchdog).
+  Plain `pip install kglite` skips them — for users who just want
+  the graph engine.
+
+### Removed
+- `kglite/_bin/` directory inside the wheel (was per-Python binary
+  drop site).
+- `kglite/_cli.py` (was the launcher that exec'd the bundled
+  binary).
+- Per-Python-version wheel build matrix axis.
+- `install_name_tool` / `patchelf` / mold steps from the CI
+  workflow.
+- `[project.optional-dependencies] embeddings` (torch +
+  sentence-transformers) — superseded by `[mcp]` which uses
+  fastembed natively.
+
+### Internal
+- `crates/kglite-mcp-server/` stays in the repo for direct Rust
+  consumers (Wikidata-scale deployments, Docker-vendored binaries)
+  but is no longer bundled into the wheel. Build via
+  `cargo build -p kglite-mcp-server` if you want it.
+
 ## [0.9.19] — 2026-05-11
 
 ### Changed

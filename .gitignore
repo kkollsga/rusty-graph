@@ -23,12 +23,6 @@ __pycache__/
 *.so
 *.pyd
 
-# Bundled native binary copied into the wheel build dir at CI time.
-# Platform-specific outputs (per-arch, per-Python-version) — never
-# checked in. Maturin's pyproject.toml `[tool.maturin] include = [...]`
-# overrides .gitignore at packaging time.
-/kglite/_bin/
-
 # IDE and editor settings
 .vscode/
 
