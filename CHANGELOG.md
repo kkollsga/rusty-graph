@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.17] — 2026-05-11
+
 ### Added
 
 - **`read_code_source(qualified_name=...)` MCP tool** — kglite-side
@@ -15,10 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `graph.source()` (which uses the code-tree node attributes), then
   reads the corresponding file slice from the configured source root(s).
   Equivalent to cypher → graph.source → read_source in a single MCP
-  call. Same line-range / grep / max_chars filters as `read_source`.
-  Restores the qualified-name flow operators relied on pre-0.9.14;
-  reported as A1 in the MCP-servers follow-up after the 0.9.14
-  framework take-over trimmed `read_source` to `file_path`-only.
+  call. Same `start_line` / `end_line` / `grep` / `max_chars` filters
+  as `read_source`. Restores the qualified-name flow operators relied
+  on pre-0.9.14; reported by the MCP-servers operator after the
+  0.9.14 framework take-over trimmed `read_source` to `file_path`-only.
+- Boot-summary line on stderr now names the `.env` file actually
+  loaded (or reports `(no .env found)` when walk-up came up empty),
+  closing the gap between "token missing" and "token present but
+  unreadable".
 
 ### Fixed
 
@@ -31,11 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which should have been auto-discovered. Now wired: walk-up from
   `--graph` parent / `--source-root` / `--workspace` /
   `--watch` / `workspace.kind: local` root / cwd-in-bare, with
-  explicit `env_file:` in the manifest as override. The boot
-  summary line on stderr now names the `.env` actually loaded
-  (or reports `(no .env found)` when the walk-up came up empty),
-  closing the gap between "token missing" and "token present but
-  unreadable".
+  explicit `env_file:` in the manifest as override.
 - **`embedding_diagnostics()` now sees columnar properties.** The
   0.9.16 implementation iterated `NodeData::property_iter()`, which
   yields nothing for `PropertyStorage::Columnar` — the variant nodes
@@ -48,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fixed by switching to `properties_cloned()`, which dispatches
   across all `PropertyStorage` variants. Two new regression tests
   cover the save+reload and filter-by-type paths.
+
+### Documentation
+
+- **Python linkage policy for `kglite-mcp-server`** — PyO3 picks one
+  interpreter at build time. New section in `docs/guides/mcp-servers.md`
+  ("Where does the binary find Python? — read this before
+  `pip install`") covers the discovery one-liners (`otool -L` /
+  `ldd`) and the `PYO3_PYTHON=...` install-time override. README has
+  a short callout pointing to the long version. Reported after an
+  operator landed 2 GB of `torch` in base conda because the binary
+  linked to base Python rather than the sub-env where they pip'd
+  `kglite`.
 
 ## [0.9.16] — 2026-05-10
 
