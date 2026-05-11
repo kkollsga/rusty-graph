@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.19] — 2026-05-11
+
+### Fixed
+- **`pip install kglite` now works on conda Python.** The 0.9.18 wheel
+  shipped the bundled `kglite-mcp-server` binary with an absolute
+  install_name pointing at `/Library/Frameworks/Python.framework/...`
+  (the actions/setup-python build path); conda installations don't
+  have that path and the binary failed to launch with a dyld error.
+  The wheel-build workflow now rewrites the install_name to
+  `@rpath/libpython3.X.dylib` and adds an rpath relative to the
+  binary's wheel install location so dyld finds the env-local
+  libpython under conda, venv, virtualenv, and Python.org installs
+  uniformly. Linux gets the same treatment via `patchelf --set-rpath
+  '$ORIGIN/../../../..'`.
+- **`builtins.temp_cleanup: on_overview` now actually wipes the
+  configured directory.** The 0.9.18 implementation hardcoded the
+  cleanup target to `./temp` (cwd-relative) which only worked when
+  the server was launched from the manifest's parent directory.
+  0.9.19 resolves the temp directory against the manifest base — and
+  reuses `extensions.csv_http_server.dir` when configured, so the
+  same place CSVs are written is also the place that gets swept.
+- **`FORMAT CSV` row-count status no longer reports `0 row(s) written`
+  for queries with `LIMIT N`.** The status counter read
+  `result.rows.len()`, which is empty when the planner's lazy
+  materialisation kicks in — even though the CSV body has the right
+  data. The count now comes from the CSV body itself.
+
 ## [0.9.18] — 2026-05-11
 
 ### Changed

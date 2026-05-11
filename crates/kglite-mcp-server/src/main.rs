@@ -303,6 +303,33 @@ async fn main() -> Result<()> {
     //     graph regardless of intent.
     //   - P4 `temp_cleanup: on_overview`: wipe `temp/` on every bare
     //     `graph_overview()`. Historically parsed-but-ignored.
+    // Manifest base dir — used by both csv_http_server (to resolve
+    // `dir:` against the YAML location) and temp_cleanup (to find the
+    // directory to wipe). Falls back to cwd when there's no manifest.
+    let manifest_base: PathBuf = manifest
+        .as_ref()
+        .and_then(|m| m.yaml_path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // `extensions.csv_http_server:` opt-in CSV-over-HTTP listener.
+    // When configured we spawn a tokio task to serve files out of
+    // the directory; the `cypher_query` tool sees the same config
+    // and writes `FORMAT CSV` results to that directory, returning
+    // a URL instead of an inline CSV blob.
+    let csv_http_cfg = match manifest.as_ref() {
+        Some(m) => match m.extensions.get("csv_http_server") {
+            Some(raw) => csv_http::CsvHttpConfig::from_manifest_value(raw, &manifest_base)
+                .context("extensions.csv_http_server parse failed")?,
+            None => None,
+        },
+        None => None,
+    };
+    if let Some(cfg) = csv_http_cfg.as_ref() {
+        csv_http::spawn(cfg.clone())
+            .await
+            .context("csv_http_server failed to bind")?;
+    }
+
     let builtins = tools::Builtins {
         save_graph: manifest
             .as_ref()
@@ -317,33 +344,19 @@ async fn main() -> Result<()> {
                 )
             })
             .unwrap_or(false),
+        // 0.9.19 fix: temp_cleanup target dir was hardcoded to `./temp`
+        // (cwd-relative) — that's the wrong place to look when the
+        // server's cwd doesn't match the manifest's parent. Resolve
+        // against the manifest base, reusing the csv_http_server
+        // directory when configured so both sides of the CSV pipeline
+        // agree on what counts as "the temp dir".
+        temp_dir: Some(
+            csv_http_cfg
+                .as_ref()
+                .map(|c| c.dir.clone())
+                .unwrap_or_else(|| manifest_base.join("temp")),
+        ),
     };
-
-    // `extensions.csv_http_server:` opt-in CSV-over-HTTP listener.
-    // When configured we spawn a tokio task to serve files out of
-    // the directory; the `cypher_query` tool sees the same config
-    // and writes `FORMAT CSV` results to that directory, returning
-    // a URL instead of an inline CSV blob.
-    let csv_http_cfg = match manifest.as_ref() {
-        Some(m) => {
-            let base = m
-                .yaml_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            match m.extensions.get("csv_http_server") {
-                Some(raw) => csv_http::CsvHttpConfig::from_manifest_value(raw, &base)
-                    .context("extensions.csv_http_server parse failed")?,
-                None => None,
-            }
-        }
-        None => None,
-    };
-    if let Some(cfg) = csv_http_cfg.as_ref() {
-        csv_http::spawn(cfg.clone())
-            .await
-            .context("csv_http_server failed to bind")?;
-    }
 
     let csv_http_arc = csv_http_cfg.map(Arc::new);
 

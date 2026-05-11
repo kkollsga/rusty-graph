@@ -262,9 +262,18 @@ fn run_cypher_inner(
             match crate::csv_http::write_csv(cfg, &csv) {
                 Ok(name) => {
                     let url = cfg.url_for(&name);
-                    let rows = result.rows.len();
+                    // 0.9.19 fix: count rows from the CSV body, not from
+                    // `result.rows.len()`. The planner's lazy_eligible
+                    // pass leaves `rows` empty for simple
+                    // MATCH-RETURN-LIMIT queries and materialises through
+                    // the lazy descriptor (or streaming pipeline) — the
+                    // CSV is correct but `rows.len()` reads 0 and the
+                    // operator-facing status says "0 row(s) written".
+                    // Counting newlines in the CSV agrees with what the
+                    // file actually contains.
+                    let row_count = count_csv_rows(&csv);
                     Ok(format!(
-                        "FORMAT CSV: {rows} row(s) written to {url}\n\
+                        "FORMAT CSV: {row_count} row(s) written to {url}\n\
                          Fetch with: curl {url}"
                     ))
                 }
@@ -307,6 +316,17 @@ fn format_cypher_inline(result: &cypher::CypherResult) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Count data rows in a CSV string, defined as (newline-terminated lines) - 1
+/// for the header. Trailing newlines after the last row don't add to the
+/// count. Handles the edge cases: empty string → 0, header-only → 0,
+/// header + N rows → N. Quoted newlines inside cells aren't recognised
+/// here — kglite's `csv_value` doesn't emit Value variants that contain
+/// embedded newlines, so a plain `lines()` count agrees with row count.
+fn count_csv_rows(csv: &str) -> usize {
+    let line_count = csv.lines().count();
+    line_count.saturating_sub(1)
 }
 
 fn push_value_repr(out: &mut String, val: &Value) {
@@ -366,10 +386,16 @@ struct OverviewArgs {
 struct SaveGraphArgs {}
 
 /// Builtins toggled by the manifest's `builtins:` block.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Builtins {
     pub save_graph: bool,
     pub temp_cleanup_on_overview: bool,
+    /// Directory wiped by `temp_cleanup: on_overview`. Resolved against
+    /// the manifest's parent in `main.rs` — when csv_http_server is
+    /// configured we reuse its directory (so the same place CSVs are
+    /// written is also the place they get swept). Falls back to
+    /// `<manifest_dir>/temp/` when csv_http_server isn't set.
+    pub temp_dir: Option<std::path::PathBuf>,
 }
 
 pub fn register(
@@ -394,6 +420,7 @@ pub fn register(
     });
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
+    let temp_dir = builtins.temp_dir.clone();
     server.register_typed_tool::<OverviewArgs, _>(
         "graph_overview",
         "Inspect the active graph's schema. With no args returns the inventory; pass \
@@ -404,7 +431,9 @@ pub fn register(
                 && args.connections.is_none()
                 && args.cypher.is_none()
             {
-                wipe_temp_dir();
+                if let Some(dir) = temp_dir.as_deref() {
+                    wipe_temp_dir(dir);
+                }
             }
             s.with_active(|g| run_overview(g, &args))
         },
@@ -419,18 +448,19 @@ pub fn register(
     }
 }
 
-fn wipe_temp_dir() {
-    let dir = std::path::Path::new("temp");
+fn wipe_temp_dir(dir: &std::path::Path) {
     if !dir.is_dir() {
+        tracing::debug!(dir = %dir.display(), "temp_cleanup: directory does not exist; nothing to wipe");
         return;
     }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            tracing::debug!(error = %e, "temp_cleanup: read_dir failed");
+            tracing::debug!(error = %e, dir = %dir.display(), "temp_cleanup: read_dir failed");
             return;
         }
     };
+    let mut wiped = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
         let res = if path.is_dir() {
@@ -438,9 +468,15 @@ fn wipe_temp_dir() {
         } else {
             std::fs::remove_file(&path)
         };
-        if let Err(e) = res {
-            tracing::debug!(path = %path.display(), error = %e, "temp_cleanup: remove failed");
+        match res {
+            Ok(()) => wiped += 1,
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "temp_cleanup: remove failed");
+            }
         }
+    }
+    if wiped > 0 {
+        tracing::info!(count = wiped, dir = %dir.display(), "temp_cleanup: wiped entries");
     }
 }
 

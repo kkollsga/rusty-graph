@@ -149,6 +149,60 @@ jobs:
             Copy-Item "target/${{ matrix.target }}/release/kglite-mcp-server" "kglite/_bin/kglite-mcp-server"
           }
         shell: pwsh
+      # 0.9.19 fix: cargo links the binary against the build runner's
+      # libpython at an absolute path (Python.org's
+      # /Library/Frameworks/.../Python on macOS, the runner's
+      # libpython3.X.so.1.0 on Linux). That absolute path doesn't exist
+      # on conda installations — the dominant Python distro for data
+      # scientists — and `pip install kglite` fails with a dyld /
+      # ld.so error. Rewrite the install_name + soname to use
+      # @rpath / $ORIGIN relative to the binary's wheel install
+      # location (<env>/lib/pythonX.Y/site-packages/kglite/_bin/),
+      # plus add an rpath that walks up to the env's lib/ so dyld /
+      # ld.so finds the env-local libpython at runtime. Covers conda,
+      # venv, virtualenv, and Python.org system installs uniformly.
+      - name: Patch binary install_name (macOS — conda compat fix)
+        if: matrix.os == 'macos-latest'
+        run: |
+          BIN=kglite/_bin/kglite-mcp-server
+          PY=${{ matrix.python-version }}
+          echo "Before:"
+          otool -L "$BIN" | grep -i python || true
+          # Rewrite the absolute Python.framework path to @rpath/libpythonX.Y.dylib.
+          # Both Python.org and conda ship libpythonX.Y.dylib in their lib/
+          # directory; using a libname rather than the framework binary lets
+          # one install_name resolve under either layout.
+          OLD_INSTALL_NAME=$(otool -L "$BIN" | grep -i python | head -1 | awk '{print $1}')
+          install_name_tool -change "$OLD_INSTALL_NAME" "@rpath/libpython${PY}.dylib" "$BIN"
+          # rpath walking up from <site-packages>/kglite/_bin/ to <env>/lib/.
+          # Resolves to <env>/lib/libpythonX.Y.dylib under conda / venv / virtualenv.
+          install_name_tool -add_rpath '@loader_path/../../../..' "$BIN"
+          # Fallback for Python.org system installs — libpythonX.Y.dylib
+          # lives in the framework's lib/ subdirectory.
+          install_name_tool -add_rpath "/Library/Frameworks/Python.framework/Versions/${PY}/lib" "$BIN"
+          # Re-sign after install_name_tool surgery (required on Apple
+          # Silicon; codesign --remove-signature + ad-hoc re-sign).
+          codesign --remove-signature "$BIN" || true
+          codesign --sign - "$BIN"
+          echo "After:"
+          otool -L "$BIN" | grep -i python || true
+          otool -l "$BIN" | grep -A 2 LC_RPATH || true
+        shell: bash
+      - name: Patch binary RPATH (Linux — conda compat fix)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y patchelf
+          BIN=kglite/_bin/kglite-mcp-server
+          echo "Before:"
+          patchelf --print-rpath "$BIN" || true
+          patchelf --print-needed "$BIN" | grep -i python || true
+          # $ORIGIN walking up from <site-packages>/kglite/_bin/ to <env>/lib/.
+          # Resolves to <env>/lib/libpythonX.Y.so.1.0 under conda / venv.
+          patchelf --set-rpath '$ORIGIN/../../../..' "$BIN"
+          echo "After:"
+          patchelf --print-rpath "$BIN"
+        shell: bash
       - name: Build wheel
         # `--no-default-features --features python-extension` disables
         # abi3 so the wheel is tagged for this specific Python version,
