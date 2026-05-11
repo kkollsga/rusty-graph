@@ -15,8 +15,8 @@
 use std::pin::Pin;
 
 use anyhow::Result;
-use mcp_server::source::{read_source, ReadOpts, SourceRootsProvider};
-use mcp_server::{build_tool_attr, McpServer};
+use mcp_methods::server::source::{read_source, ReadOpts, SourceRootsProvider};
+use mcp_methods::server::{build_tool_attr, McpServer};
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content};

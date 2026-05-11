@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
-use mcp_server::python::json_to_py;
-use mcp_server::server::McpServer;
+use mcp_methods::server::python::json_to_py;
+use mcp_methods::server::McpServer;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use serde::{Deserialize, Serialize};

@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use mcp_server::{build_tool_attr, Manifest, McpServer, ToolSpec};
+use mcp_methods::server::{build_tool_attr, Manifest, McpServer, ToolSpec};
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content};

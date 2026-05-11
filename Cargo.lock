@@ -1230,7 +1230,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kglite",
- "mcp-server",
+ "mcp-methods",
  "pyo3",
  "rmcp",
  "schemars",
@@ -1338,33 +1338,16 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.23"
-source = "git+https://github.com/kkollsga/mcp-methods.git?rev=e45a28284448a871677ce6ac581270399421712e#e45a28284448a871677ce6ac581270399421712e"
+version = "0.3.25"
+source = "git+https://github.com/kkollsga/mcp-methods.git?rev=dbc5db16e9e71d90d87570623baf09ee33b2931b#dbc5db16e9e71d90d87570623baf09ee33b2931b"
 dependencies = [
+ "anyhow",
+ "clap",
  "fancy-regex",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "ignore",
- "pyo3",
- "regex",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "mcp-server"
-version = "0.0.1"
-source = "git+https://github.com/kkollsga/mcp-methods.git?rev=e45a28284448a871677ce6ac581270399421712e#e45a28284448a871677ce6ac581270399421712e"
-dependencies = [
- "anyhow",
- "clap",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "mcp-methods",
  "notify",
  "notify-debouncer-mini",
  "pyo3",
@@ -1378,6 +1361,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

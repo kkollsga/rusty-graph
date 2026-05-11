@@ -12,12 +12,12 @@ path = "src/main.rs"
 
 [dependencies]
 # Generic MCP server framework (rmcp + manifest + source/github/python tools).
-# Git dep on kkollsga/mcp-methods — the framework crate lives at
-# `crates/mcp-server/` inside that workspace. The crate name `mcp-server`
-# is taken on crates.io by the official Anthropic SDK, so we ship via git
-# until the framework is published under a different name. Pinned by rev
-# for reproducibility; bump in lockstep with mcp-methods releases.
-mcp-server = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "e45a28284448a871677ce6ac581270399421712e" }
+# 0.3.25 consolidated `crates/mcp-server` into the root `mcp-methods` crate
+# under a `server` feature, with PyO3 demoted to an opt-in `python` feature.
+# We disable both default features so kglite-mcp-server gets framework
+# primitives without inheriting libpython (Phase 2 of our pip-install-out-
+# of-the-box goal). Pinned by rev for reproducibility.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "dbc5db16e9e71d90d87570623baf09ee33b2931b", default-features = false, features = ["server", "python"] }
 
 # Same kglite crate the Python wheel builds from. We want it as an rlib
 # (pure Rust API), no PyO3 extension features.

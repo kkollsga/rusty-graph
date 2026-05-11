@@ -19,12 +19,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mcp_server::manifest::{find_sibling_manifest, find_workspace_manifest, ManifestError};
-use mcp_server::server::{McpServer, ServerOptions};
-use mcp_server::{
+use mcp_methods::server::manifest::{
+    find_sibling_manifest, find_workspace_manifest, ManifestError,
+};
+use mcp_methods::server::{
     apply_python_extensions, init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots,
     watch, workspace, Manifest, PythonExtensions, WorkspaceKind,
 };
+use mcp_methods::server::{McpServer, ServerOptions};
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
@@ -136,7 +138,7 @@ fn load_manifest(cli: &Cli, mode: &Mode) -> Result<Option<Manifest>, ManifestErr
         None => default_manifest_path(mode),
     };
     match path {
-        Some(p) => Ok(Some(mcp_server::load_manifest(&p)?)),
+        Some(p) => Ok(Some(mcp_methods::server::load_manifest(&p)?)),
         None => Ok(None),
     }
 }
