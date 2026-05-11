@@ -1,7 +1,6 @@
 //! GitHub shallow-clone helper (ported from repo.py).
 
 use crate::graph::KnowledgeGraph;
-use pyo3::{exceptions::PyRuntimeError, PyResult};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,12 +14,12 @@ pub fn clone_and_build(
     verbose: bool,
     include_tests: bool,
     max_loc_per_file: Option<usize>,
-) -> PyResult<KnowledgeGraph> {
+) -> Result<KnowledgeGraph, String> {
     if !repo.contains('/') || repo.matches('/').count() != 1 {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+        return Err(format!(
             "repo must be in 'org/repo' format, got: {:?}",
             repo
-        )));
+        ));
     }
 
     let env_token: Option<String> = std::env::var("GITHUB_TOKEN").ok();
@@ -37,7 +36,7 @@ pub fn clone_and_build(
         );
     }
 
-    let tmp = tempfile::tempdir().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let repo_path = clone_repo(repo, tmp.path(), branch, token.as_deref(), verbose)?;
     crate::code_tree::builder::run_with_options(
         &repo_path,
@@ -54,10 +53,10 @@ fn clone_repo(
     branch: Option<&str>,
     token: Option<&str>,
     verbose: bool,
-) -> PyResult<PathBuf> {
-    let (org, name) = repo.split_once('/').ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("bad repo format: {:?}", repo))
-    })?;
+) -> Result<PathBuf, String> {
+    let (org, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("bad repo format: {:?}", repo))?;
     let repo_path = parent.join(org).join(name);
 
     if repo_path.exists() {
@@ -68,8 +67,7 @@ fn clone_repo(
     }
 
     if let Some(parent_dir) = repo_path.parent() {
-        std::fs::create_dir_all(parent_dir)
-            .map_err(|e| PyRuntimeError::new_err(format!("mkdir failed: {}", e)))?;
+        std::fs::create_dir_all(parent_dir).map_err(|e| format!("mkdir failed: {}", e))?;
     }
 
     let url = if let Some(t) = token {
@@ -91,17 +89,14 @@ fn clone_repo(
 
     let output = cmd
         .output()
-        .map_err(|e| PyRuntimeError::new_err(format!("git command failed: {}", e)))?;
+        .map_err(|e| format!("git command failed: {}", e))?;
 
     if !output.status.success() {
         let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if let Some(t) = token {
             stderr = stderr.replace(t, "***");
         }
-        return Err(PyRuntimeError::new_err(format!(
-            "git clone failed: {}",
-            stderr
-        )));
+        return Err(format!("git clone failed: {}", stderr));
     }
 
     if verbose {

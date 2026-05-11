@@ -4,24 +4,26 @@ version = "0.0.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
-description = "MCP server for kglite knowledge graphs — single-binary Rust frontend for cypher_query / graph_overview / save_graph plus the generic source / GitHub / python-tool surface from mcp-methods."
+description = "MCP server for kglite knowledge graphs — pure-Rust single-binary frontend for cypher_query / graph_overview / save_graph / read_code_source plus the generic source / GitHub surface from mcp-methods. No libpython link."
 
 [[bin]]
 name = "kglite-mcp-server"
 path = "src/main.rs"
 
 [dependencies]
-# Generic MCP server framework (rmcp + manifest + source/github/python tools).
-# 0.3.25 consolidated `crates/mcp-server` into the root `mcp-methods` crate
-# under a `server` feature, with PyO3 demoted to an opt-in `python` feature.
-# We disable both default features so kglite-mcp-server gets framework
-# primitives without inheriting libpython (Phase 2 of our pip-install-out-
-# of-the-box goal). Pinned by rev for reproducibility.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "dbc5db16e9e71d90d87570623baf09ee33b2931b", default-features = false, features = ["server", "python"] }
+# Generic MCP server framework (rmcp + manifest + source/github tools).
+# `default-features = false, features = ["server"]` — no `python` feature,
+# so the framework half has no PyO3 surface. Pinned to mcp-methods 0.3.25
+# (rev dbc5db1) which moved the framework into the root crate under the
+# `server` feature gate.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "dbc5db16e9e71d90d87570623baf09ee33b2931b", default-features = false, features = ["server"] }
 
-# Same kglite crate the Python wheel builds from. We want it as an rlib
-# (pure Rust API), no PyO3 extension features.
-kglite = { path = "../..", default-features = false }
+# kglite as a pure-Rust crate dep (no PyO3 extension features). The
+# `fastembed` feature pulls in the FastEmbedAdapter so the binary can
+# support `text_score()` semantic search without a Python embedder.
+# `default-features = false` opts out of abi3 — irrelevant here since
+# we're not building a Python extension module.
+kglite = { path = "../..", default-features = false, features = ["fastembed"] }
 
 # rmcp re-export for the dynamic tool registration path.
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "schemars"] }
@@ -39,8 +41,3 @@ clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Python embedding for cypher_query / graph_overview / save_graph dispatch.
-# kglite's public API is Python (PyO3 wrappers around Rust internals); this
-# binary calls those wrappers directly through the embedded interpreter.
-pyo3 = { version = "0.28", features = ["auto-initialize"] }

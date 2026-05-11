@@ -16,10 +16,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use mcp_methods::server::{build_tool_attr, Manifest, McpServer, ToolSpec};
+use mcp_methods::server::{Manifest, McpServer, ToolSpec};
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, Content, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{Map, Value};
 
@@ -34,7 +34,8 @@ pub type CypherRunner =
     Arc<dyn Fn(&str, &Map<String, Value>) -> Result<String> + Send + Sync + 'static>;
 
 /// Build a runner backed by the given `GraphState`. The runner forwards
-/// to `graph.cypher(template, params=args)` on the active Python graph.
+/// to [`GraphState::run_cypher_template`] which calls into the pure-Rust
+/// kglite Cypher pipeline (no PyO3 boundary).
 pub fn make_runner(state: GraphState) -> CypherRunner {
     Arc::new(move |template: &str, args: &Map<String, Value>| {
         Ok(state.run_cypher_template(template, args))
@@ -76,7 +77,13 @@ pub fn register_cypher_tools(
                 m.insert("properties".into(), Value::Object(Map::new()));
                 m
             });
-        let attr = build_tool_attr(&spec.name, spec.description.as_deref(), schema);
+        let attr = Tool::new_with_raw(
+            spec.name.clone(),
+            spec.description
+                .as_deref()
+                .map(|s| std::borrow::Cow::Owned(s.to_string())),
+            Arc::new(schema),
+        );
         let template = spec.cypher.clone();
         let name = spec.name.clone();
         let runner = runner.clone();

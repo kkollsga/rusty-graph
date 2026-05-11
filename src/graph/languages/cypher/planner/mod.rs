@@ -177,7 +177,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
 /// Avoids a fresh `HashSet::new()` allocation on every cypher call —
 /// negligible per-call (no heap alloc on empty), but the static is
 /// clearer about intent and removes per-call stack-frame setup.
-pub(crate) fn empty_disabled_set() -> &'static HashSet<String> {
+pub fn empty_disabled_set() -> &'static HashSet<String> {
     static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashSet::new)
 }

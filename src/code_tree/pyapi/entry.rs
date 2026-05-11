@@ -28,6 +28,7 @@ pub fn build(
             max_loc_per_file,
         )
     })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 /// Read a project manifest and return a dict of project metadata.
@@ -101,4 +102,5 @@ pub fn repo_tree(
             max_loc_per_file,
         )
     })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }

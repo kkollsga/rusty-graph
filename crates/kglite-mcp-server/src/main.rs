@@ -23,8 +23,8 @@ use mcp_methods::server::manifest::{
     find_sibling_manifest, find_workspace_manifest, ManifestError,
 };
 use mcp_methods::server::{
-    apply_python_extensions, init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots,
-    watch, workspace, Manifest, PythonExtensions, WorkspaceKind,
+    init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, watch, workspace, Manifest,
+    WorkspaceKind,
 };
 use mcp_methods::server::{McpServer, ServerOptions};
 use rmcp::transport::stdio;
@@ -62,6 +62,7 @@ struct Cli {
     #[arg(long)]
     name: Option<String>,
     #[arg(long = "trust-tools")]
+    #[allow(dead_code)]
     trust_tools: bool,
     #[arg(long = "stale-after-days", default_value_t = 7)]
     stale_after_days: u32,
@@ -222,9 +223,29 @@ async fn main() -> Result<()> {
         Mode::Graph { path } => {
             let canon = path.canonicalize()?;
             graph_state.load_kgl(&canon).context("kglite.load failed")?;
-            if let Some(parent) = canon.parent() {
-                options =
-                    options.with_static_source_roots(vec![parent.to_string_lossy().into_owned()]);
+            // P1 (operator feedback): honor the manifest's explicit
+            // `source_root:` / `source_roots:` declaration in `--graph`
+            // mode. The historical behaviour auto-bound the parent of
+            // the `.kgl` file as the source root, which silently
+            // overrode operators who declared a different root in
+            // YAML (e.g. when the .kgl lives in a build dir but the
+            // source files are elsewhere). Now: explicit YAML wins,
+            // auto-bind only when the manifest doesn't declare one.
+            let manifest_roots = manifest
+                .as_ref()
+                .filter(|m| !m.source_roots.is_empty())
+                .map(resolve_source_roots)
+                .transpose()
+                .context("manifest source_root resolution failed")?;
+            let roots = if let Some(rs) = manifest_roots {
+                rs
+            } else if let Some(parent) = canon.parent() {
+                vec![parent.to_string_lossy().into_owned()]
+            } else {
+                Vec::new()
+            };
+            if !roots.is_empty() {
+                options = options.with_static_source_roots(roots);
             }
         }
         Mode::SourceRoot { dir } | Mode::Watch { dir } => {
@@ -274,8 +295,31 @@ async fn main() -> Result<()> {
     // immediately re-target file resolution.
     let source_roots_provider = options.source_roots.clone();
 
+    // P4 + P5 (operator feedback): builtin toggles from the manifest.
+    //   - P5 `save_graph`: gate registration on
+    //     `builtins.save_graph: true`. Historically always-on,
+    //     exposing a destructive operation to the agent on every
+    //     graph regardless of intent.
+    //   - P4 `temp_cleanup: on_overview`: wipe `temp/` on every bare
+    //     `graph_overview()`. Historically parsed-but-ignored.
+    let builtins = tools::Builtins {
+        save_graph: manifest
+            .as_ref()
+            .map(|m| m.builtins.save_graph)
+            .unwrap_or(false),
+        temp_cleanup_on_overview: manifest
+            .as_ref()
+            .map(|m| {
+                matches!(
+                    m.builtins.temp_cleanup,
+                    mcp_methods::server::manifest::TempCleanup::OnOverview
+                )
+            })
+            .unwrap_or(false),
+    };
+
     let mut server = McpServer::new(options);
-    tools::register(&mut server, graph_state.clone());
+    tools::register(&mut server, graph_state.clone(), builtins);
     code_source::register(
         &mut server,
         graph_state.clone(),
@@ -283,25 +327,18 @@ async fn main() -> Result<()> {
     )
     .context("read_code_source registration failed")?;
 
-    // Manifest python: tools + custom embedder. As of mcp-methods
-    // 0.3.22 the framework returns an `Arc<EmbedderHandle>` (load /
-    // unload / embed + idle-watch tracking) instead of a raw
-    // `Py<PyAny>`. We pull the underlying Python instance out of
-    // the handle and bind that to the active graph — kglite's
-    // per-batch `try_load_embedder` / `try_unload_embedder` in
-    // `vector.rs` then drives the same instance the framework's
-    // idle-watch task is observing. Both lifecycle layers operate
-    // on the same Python object; per-batch is the primary driver,
-    // idle-watch is a safety net (per the 0.3.22 ack).
-    let py_ext = match manifest.as_ref() {
-        Some(m) => apply_python_extensions(&mut server, m, cli.trust_tools)?,
-        None => PythonExtensions::default(),
-    };
-    if let Some(handle) = py_ext.embedder {
-        let instance = pyo3::Python::attach(|py| handle.instance().clone_ref(py));
-        graph_state
-            .bind_embedder(instance)
-            .context("graph.set_embedder failed")?;
+    // `extensions.embedder:` in the manifest selects a Rust-native
+    // embedder backend (fastembed-rs in 0.9.18). The 0.9.17-and-prior
+    // `embedder:` block + Python embedder factories are gone — the
+    // binary has no libpython link at all and so cannot host a Python
+    // embedder class. See the 0.9.18 migration note in
+    // `docs/guides/mcp-servers.md` for the YAML schema change.
+    if let Some(m) = manifest.as_ref() {
+        if let Some(embedder) = build_embedder_from_manifest(m)? {
+            graph_state
+                .bind_embedder(embedder)
+                .context("graph.set_embedder_native failed")?;
+        }
     }
 
     // YAML-declared `tools[].cypher` entries. The mcp-methods framework
@@ -360,6 +397,44 @@ async fn main() -> Result<()> {
         .context("failed to start MCP service over stdio")?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Read `manifest.extensions.embedder.{backend, model, cooldown}` and
+/// build the corresponding Rust-native [`kglite::api::Embedder`]
+/// implementation. Returns `Ok(None)` when no `embedder:` is declared,
+/// `Err` on validation failures (unknown backend, missing fields).
+///
+/// 0.9.18 supports a single backend (`fastembed`) — a future release
+/// may add `candle` or `onnx-runtime` here without changing the YAML
+/// shape.
+fn build_embedder_from_manifest(
+    manifest: &Manifest,
+) -> Result<Option<Arc<dyn kglite::api::Embedder>>> {
+    let Some(raw) = manifest.extensions.get("embedder") else {
+        return Ok(None);
+    };
+    let obj = raw
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("extensions.embedder must be a mapping (got: {raw:?})"))?;
+    let backend = obj
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("fastembed");
+    match backend {
+        "fastembed" => {
+            let model = obj.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
+                anyhow::anyhow!("extensions.embedder.model is required for the fastembed backend")
+            })?;
+            let adapter = kglite::api::FastEmbedAdapter::new(model)
+                .map_err(|e| anyhow::anyhow!("fastembed init failed: {e}"))?;
+            tracing::info!(model, backend, "registered Rust-native embedder");
+            Ok(Some(Arc::new(adapter)))
+        }
+        other => anyhow::bail!(
+            "extensions.embedder.backend = {other:?} is not supported. \
+             Known: fastembed."
+        ),
+    }
 }
 
 fn print_boot_summary(

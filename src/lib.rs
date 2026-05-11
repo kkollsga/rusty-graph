@@ -28,14 +28,45 @@ use graph::{KnowledgeGraph, Transaction};
 /// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is
 /// independent — it stays as the wheel's primary surface.
 pub mod api {
+    pub use crate::code_tree::builder::run_with_options as build_code_tree;
+    pub use crate::datatypes::Value;
     pub use crate::graph::dir_graph::DirGraph;
+    #[cfg(feature = "fastembed")]
+    pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
+    pub use crate::graph::embedder::Embedder;
     pub use crate::graph::introspection::describe::compute_description;
+    pub use crate::graph::introspection::schema_overview::compute_schema;
+    pub use crate::graph::introspection::SchemaOverview;
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
     pub use crate::graph::io::file::load_file;
-    pub use crate::graph::languages::cypher::executor::write::execute_mutable;
-    pub use crate::graph::languages::cypher::executor::CypherExecutor;
-    pub use crate::graph::languages::cypher::result::CypherResult;
     pub use crate::graph::{KnowledgeGraph, SourceLocation, SourceLookup};
+
+    /// Cypher parser + planner + executor surface. Downstream Rust
+    /// consumers (notably `kglite-mcp-server`) build their own
+    /// parse → rewrite_text_score → optimize → execute pipeline using
+    /// these items; the Python boundary in
+    /// `src/graph/pyapi/kg_core.rs::cypher` is the canonical example.
+    pub mod cypher {
+        pub use crate::graph::languages::cypher::ast::OutputFormat;
+        pub use crate::graph::languages::cypher::executor::write::execute_mutable;
+        pub use crate::graph::languages::cypher::executor::CypherExecutor;
+        pub use crate::graph::languages::cypher::is_mutation_query;
+        pub use crate::graph::languages::cypher::parser::parse_cypher;
+        pub use crate::graph::languages::cypher::planner;
+        pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
+        pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
+        pub use crate::graph::languages::cypher::result::CypherResult;
+    }
+}
+
+/// Read-only accessor for the underlying [`DirGraph`] of a
+/// [`api::KnowledgeGraph`]. The struct field is private; this method
+/// gives downstream Rust binaries a stable handle to plug into the
+/// planner / executor surface in [`api::cypher`].
+impl crate::graph::KnowledgeGraph {
+    pub fn dir(&self) -> &std::sync::Arc<crate::graph::dir_graph::DirGraph> {
+        &self.inner
+    }
 }
 
 #[pyfunction]

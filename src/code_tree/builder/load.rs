@@ -176,8 +176,8 @@ fn bool_col(values: Vec<Option<bool>>) -> ColumnData {
     ColumnData::Boolean(values)
 }
 
-fn py_err<S: Into<String>>(msg: S) -> pyo3::PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err(msg.into())
+fn py_err<S: Into<String>>(msg: S) -> String {
+    msg.into()
 }
 
 /// Read a boolean flag from `FunctionInfo.metadata` with a `false` default.
@@ -1011,7 +1011,7 @@ fn defines_edges_df(edges: &[DefinesEdge]) -> HashMap<(String, String), DataFram
 pub fn load_into_graph(
     result: &ParseResult,
     project_info: Option<&ProjectInfo>,
-) -> pyo3::PyResult<KnowledgeGraph> {
+) -> Result<KnowledgeGraph, String> {
     let verbose = std::env::var_os("KGLITE_CODE_TREE_VERBOSE").is_some();
     let mark = |t: std::time::Instant, label: &str| {
         if verbose {

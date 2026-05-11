@@ -241,6 +241,22 @@ impl KnowledgeGraph {
             default_max_rows: None,
         }
     }
+
+    /// Bind an embedder implementing the [`embedder::Embedder`] trait.
+    /// The pure-Rust counterpart of the `set_embedder` pymethod —
+    /// used by `kglite-mcp-server` and other Rust consumers that
+    /// don't have a `Py<PyAny>` to hand. The pymethod wraps user
+    /// Python objects in `PyEmbedderAdapter` and ultimately stores
+    /// the same `Arc<dyn Embedder>` here.
+    pub fn set_embedder_native(&mut self, embedder: Arc<dyn embedder::Embedder>) {
+        self.embedder = Some(embedder);
+    }
+
+    /// Access the active backend, if any. Returns `None` until
+    /// `set_embedder` / `set_embedder_native` has been called.
+    pub fn embedder(&self) -> Option<&Arc<dyn embedder::Embedder>> {
+        self.embedder.as_ref()
+    }
 }
 
 impl Clone for KnowledgeGraph {

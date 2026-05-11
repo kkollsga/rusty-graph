@@ -15,11 +15,13 @@
 use std::pin::Pin;
 
 use anyhow::Result;
+use std::sync::Arc;
+
 use mcp_methods::server::source::{read_source, ReadOpts, SourceRootsProvider};
-use mcp_methods::server::{build_tool_attr, McpServer};
+use mcp_methods::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, Content, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Map, Value};
 
@@ -87,17 +89,17 @@ pub fn register(
     .cloned()
     .ok_or_else(|| anyhow::anyhow!("schema construction failed"))?;
 
-    let attr = build_tool_attr(
+    let attr = Tool::new_with_raw(
         "read_code_source",
-        Some(
+        Some(std::borrow::Cow::Borrowed(
             "Read source code by fully-qualified entity name. Resolves the \
              name through the active graph's `graph.source()` (which uses \
              the code-tree node attributes), then reads the corresponding \
              file slice from the configured source root(s). Equivalent to \
              cypher → graph.source → read_source in a single MCP call. \
              Same line-range / grep / max_chars filters as `read_source`.",
-        ),
-        schema,
+        )),
+        Arc::new(schema),
     );
 
     let roots_provider = source_roots;

@@ -1,18 +1,24 @@
 //! KGLite-specific MCP tools: `cypher_query`, `graph_overview`, `save_graph`.
 //!
 //! All three close over a [`GraphState`] holding the active
-//! `KnowledgeGraph` Python object behind an `Arc<RwLock<…>>`. Wired
-//! into the framework's tool router via `ToolRoute::new_dyn` so they
-//! sit alongside the built-in source / GitHub / python tools.
+//! [`kglite::api::KnowledgeGraph`] behind an `Arc<RwLock<…>>`. Wired
+//! into the framework's tool router via `register_typed_tool` so they
+//! sit alongside the built-in source / GitHub tools.
+//!
+//! 0.9.18: rewritten against the pure-Rust `kglite::api` surface.
+//! There is no `Python::attach` anywhere in this module — the binary
+//! has no libpython link at all.
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result};
-use mcp_methods::server::python::json_to_py;
+use anyhow::Result;
+use kglite::api::cypher;
+use kglite::api::{
+    compute_description, compute_schema, load_file, ConnectionDetail, CypherDetail, Embedder,
+    FluentDetail, KnowledgeGraph, Value,
+};
 use mcp_methods::server::McpServer;
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
 use serde::{Deserialize, Serialize};
 
 const NO_GRAPH: &str =
@@ -24,9 +30,8 @@ pub struct GraphState {
     inner: Arc<RwLock<Option<ActiveGraph>>>,
 }
 
-#[derive(Debug)]
 struct ActiveGraph {
-    py_obj: Py<PyAny>,
+    kg: KnowledgeGraph,
     source_path: Option<std::path::PathBuf>,
 }
 
@@ -36,65 +41,42 @@ impl GraphState {
     }
 
     pub fn load_kgl(&self, path: &Path) -> Result<()> {
-        let py_obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
-            let kglite = py.import("kglite")?;
-            let g = kglite.call_method1("load", (path.to_string_lossy().as_ref(),))?;
-            Ok(g.unbind())
-        })?;
+        let kg = load_file(&path.to_string_lossy())
+            .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))?;
         *self.inner.write().unwrap() = Some(ActiveGraph {
-            py_obj,
+            kg,
             source_path: Some(path.to_path_buf()),
         });
         Ok(())
     }
 
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
-        let py_obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
-            let ct = py.import("kglite.code_tree")?;
-            let g = ct.call_method1("build", (dir.to_string_lossy().as_ref(),))?;
-            Ok(g.unbind())
-        })?;
+        let kg = kglite::api::build_code_tree(dir, false, true, None, None)
+            .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
         *self.inner.write().unwrap() = Some(ActiveGraph {
-            py_obj,
+            kg,
             source_path: None,
         });
         Ok(())
     }
 
-    pub fn bind_embedder(&self, embedder: Py<PyAny>) -> Result<()> {
-        let guard = self.inner.read().unwrap();
-        let Some(active) = guard.as_ref() else {
+    pub fn bind_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
+        let mut guard = self.inner.write().unwrap();
+        let Some(active) = guard.as_mut() else {
             tracing::warn!("embedder loaded before any graph is active; binding deferred");
             return Ok(());
         };
-        Python::attach(|py| -> PyResult<()> {
-            active
-                .py_obj
-                .call_method1(py, "set_embedder", (embedder,))?;
-            Ok(())
-        })
-        .context("graph.set_embedder failed")?;
+        active.kg.set_embedder_native(embedder);
         Ok(())
     }
 
     pub fn schema(&self) -> Option<(u64, u64)> {
         let guard = self.inner.read().unwrap();
         let active = guard.as_ref()?;
-        Python::attach(|py| -> PyResult<(u64, u64)> {
-            let s = active.py_obj.call_method0(py, "schema")?;
-            let s = s.bind(py);
-            Ok((
-                s.get_item("node_count")?.extract()?,
-                s.get_item("edge_count")?.extract()?,
-            ))
-        })
-        .ok()
+        let overview = compute_schema(active.kg.dir());
+        Some((overview.node_count as u64, overview.edge_count as u64))
     }
 
-    /// Run a closure against the active graph if one is loaded, or
-    /// return the standard "no graph" message otherwise. This is the
-    /// state-injection contract used by every kglite tool registered
-    /// via `McpServer::register_typed_tool`.
     fn with_active<F>(&self, f: F) -> String
     where
         F: FnOnce(&ActiveGraph) -> String,
@@ -107,12 +89,8 @@ impl GraphState {
     }
 
     /// Resolve a code-entity qualified name to its source location via
-    /// `graph.source(qualified_name, node_type)`. Used by the
-    /// `read_code_source` tool to bridge the qualified-name → file path
-    /// lookup that the framework's `read_source` can't do on its own.
-    /// Returns the resolved `(file_path, line_number, end_line)` or an
-    /// error message describing what went wrong (no graph, name not
-    /// found, ambiguous match, missing line metadata).
+    /// `KnowledgeGraph::source_location`. Used by the `read_code_source`
+    /// tool to bridge the qualified-name → file path lookup.
     pub fn source_lookup(
         &self,
         qualified_name: &str,
@@ -122,81 +100,33 @@ impl GraphState {
         let Some(active) = guard.as_ref() else {
             return Err(NO_GRAPH.to_string());
         };
-        Python::attach(|py| -> Result<crate::code_source::SourceLookup, String> {
-            let args =
-                pyo3::types::PyTuple::new(py, [qualified_name]).map_err(|e| e.to_string())?;
-            let kwargs = PyDict::new(py);
-            if let Some(nt) = node_type {
-                kwargs
-                    .set_item("node_type", nt)
-                    .map_err(|e| e.to_string())?;
+        match active.kg.source_location(qualified_name, node_type) {
+            kglite::api::SourceLookup::Found(loc) => {
+                let file_path = loc.file_path.ok_or_else(|| {
+                    format!("graph.source({qualified_name:?}) returned no file_path")
+                })?;
+                let line_number = loc.line_number.unwrap_or(1).max(1) as usize;
+                let end_line = loc.end_line.unwrap_or(loc.line_number.unwrap_or(1)).max(1) as usize;
+                Ok(crate::code_source::SourceLookup {
+                    file_path,
+                    line_number,
+                    end_line,
+                })
             }
-            let result = active
-                .py_obj
-                .call_method(py, "source", args, Some(&kwargs))
-                .map_err(|e| format!("graph.source({qualified_name:?}) failed: {e}"))?;
-            let dict = result
-                .bind(py)
-                .cast::<PyDict>()
-                .map_err(|_| format!("graph.source({qualified_name:?}) did not return a dict"))?
-                .clone();
-            // `{"error": "..."}` or `{"ambiguous": true, "matches": [...]}` —
-            // surface either with the body shape so the agent gets the
-            // actual graph message rather than a generic error.
-            if let Ok(Some(err)) = dict.get_item("error") {
-                return Err(err.extract::<String>().unwrap_or_else(|_| {
-                    format!("graph.source({qualified_name:?}) returned an error")
-                }));
-            }
-            if let Ok(Some(amb)) = dict.get_item("ambiguous") {
-                if amb.extract::<bool>().unwrap_or(false) {
-                    let matches: String = dict
-                        .get_item("matches")
-                        .ok()
-                        .flatten()
-                        .and_then(|m| m.repr().ok().map(|r| r.to_string()))
-                        .unwrap_or_default();
-                    return Err(format!(
-                        "ambiguous qualified_name {qualified_name:?}; matches: {matches}. \
-                         Pass `node_type` to narrow."
-                    ));
-                }
-            }
-            let file_path: String = dict
-                .get_item("file_path")
-                .ok()
-                .flatten()
-                .ok_or_else(|| format!("graph.source({qualified_name:?}) returned no file_path"))?
-                .extract()
-                .map_err(|e| format!("file_path extraction failed: {e}"))?;
-            let line_number: usize = dict
-                .get_item("line_number")
-                .ok()
-                .flatten()
-                .and_then(|v| v.extract::<usize>().ok())
-                .unwrap_or(1);
-            let end_line: usize = dict
-                .get_item("end_line")
-                .ok()
-                .flatten()
-                .and_then(|v| v.extract::<usize>().ok())
-                .unwrap_or(line_number);
-            Ok(crate::code_source::SourceLookup {
-                file_path,
-                line_number,
-                end_line,
-            })
-        })
+            kglite::api::SourceLookup::Ambiguous(matches) => Err(format!(
+                "ambiguous qualified_name {qualified_name:?}; matches: {matches:?}. \
+                 Pass `node_type` to narrow."
+            )),
+            kglite::api::SourceLookup::NotFound => Err(format!(
+                "graph.source({qualified_name:?}) returned no match. \
+                 Try passing `node_type` or using a different qualified name."
+            )),
+        }
     }
 
     /// Run a parameterised Cypher template against the active graph.
     /// Used by the YAML-declared `tools[].cypher` registration path
-    /// (see `crate::cypher_tools::register_cypher_tools`). The agent's
-    /// argument map is forwarded as `params=...` to `graph.cypher`,
-    /// which substitutes `$name` placeholders in the template.
-    ///
-    /// Returns the rendered tool body (or the standard "no graph"
-    /// message / a Cypher error string).
+    /// (see [`crate::cypher_tools::register_cypher_tools`]).
     pub fn run_cypher_template(
         &self,
         template: &str,
@@ -206,37 +136,138 @@ impl GraphState {
         let Some(active) = guard.as_ref() else {
             return NO_GRAPH.to_string();
         };
-        Python::attach(|py| -> PyResult<String> {
-            let kwargs = PyDict::new(py);
-            let params = PyDict::new(py);
-            for (k, v) in args {
-                params.set_item(k, json_to_py(py, v)?)?;
-            }
-            kwargs.set_item("params", params)?;
-            let result = active
-                .py_obj
-                .call_method(py, "cypher", (template,), Some(&kwargs))?;
-            format_cypher_result(py, &result)
-        })
-        .unwrap_or_else(|e| format!("Cypher error: {e}"))
+        let mut params = std::collections::HashMap::new();
+        for (k, v) in args {
+            params.insert(k.clone(), json_to_value(v));
+        }
+        match run_cypher_inner(&active.kg, template, params) {
+            Ok(body) => body,
+            Err(e) => format!("Cypher error: {e}"),
+        }
     }
 }
 
-/// Format a `g.cypher(...)` Python return value into a tool body string.
-/// String returns (CSV / EXPLAIN) pass through; iterable returns are
-/// repr'd row-by-row with a 15-row inline cap, matching `cypher_query`.
-fn format_cypher_result(py: Python<'_>, result: &Py<PyAny>) -> PyResult<String> {
-    let bound = result.bind(py);
-    if let Ok(s) = bound.extract::<String>() {
-        return Ok(s);
+/// Convert a `serde_json::Value` into a Cypher param `Value`. Mirrors
+/// the Python boundary's `py_value_to_value` for the JSON subset.
+fn json_to_value(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int64(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float64(f)
+            } else {
+                Value::Null
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        // Arrays and objects flow through as JSON-serialised strings; the
+        // Cypher engine doesn't have a first-class list/map Value variant
+        // at the param boundary, so this matches the existing behaviour
+        // for non-scalar JSON inputs from MCP tool calls.
+        other => Value::String(other.to_string()),
     }
-    let len: usize = bound
-        .call_method0("__len__")
-        .ok()
-        .and_then(|v| v.extract().ok())
-        .unwrap_or(0);
+}
+
+/// Run a Cypher query against the given KnowledgeGraph snapshot. Picks
+/// between read and write paths based on `is_mutation_query`; on success
+/// returns the rendered tool body (CSV when `FORMAT CSV` is in the
+/// query, inline 15-row preview otherwise).
+fn run_cypher_inner(
+    kg: &KnowledgeGraph,
+    query: &str,
+    params: std::collections::HashMap<String, Value>,
+) -> Result<String, String> {
+    let mut parsed =
+        cypher::parse_cypher(query).map_err(|e| format!("Cypher syntax error: {e}"))?;
+    let mut params = params;
+
+    let rewrite = cypher::rewrite_text_score(&mut parsed, &params)?;
+    if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
+        let model = kg
+            .embedder()
+            .ok_or_else(|| {
+                "text_score() requires a registered embedding model. \
+                 Configure `extensions.embedder:` in the manifest."
+                    .to_string()
+            })?
+            .clone();
+        model.load()?;
+        let texts: Vec<String> = rewrite
+            .texts_to_embed
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect();
+        let embeddings = model.embed(&texts);
+        model.unload();
+        let embeddings = embeddings?;
+        if embeddings.len() != texts.len() {
+            return Err(format!(
+                "text_score: model.embed() returned {} vectors for {} texts",
+                embeddings.len(),
+                texts.len()
+            ));
+        }
+        for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
+            let json = format!(
+                "[{}]",
+                embeddings[i]
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            params.insert(param_name.clone(), Value::String(json));
+        }
+    }
+
+    cypher::planner::optimize_with_disabled(
+        &mut parsed,
+        kg.dir(),
+        &params,
+        cypher::planner::empty_disabled_set(),
+    );
+    cypher::mark_lazy_eligibility(&mut parsed);
+
+    let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+
+    let result = if cypher::is_mutation_query(&parsed) {
+        // Mutation requires &mut DirGraph; the shim holds an
+        // Arc<DirGraph> snapshot via the KnowledgeGraph, so we cannot
+        // mutate it here without a write lock. The shim today only
+        // exposes mutating queries when explicitly invoked through
+        // `cypher_query`, and the surrounding RwLock<Option<ActiveGraph>>
+        // is held read-only across the call. For 0.9.18 we forbid
+        // mutations through the MCP tool surface — agents that need to
+        // edit the graph use a CLI shell instead.
+        return Err(
+            "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE) is not allowed through \
+             the MCP cypher_query tool. Use the kglite CLI for graph edits."
+                .to_string(),
+        );
+    } else {
+        let executor = cypher::CypherExecutor::with_params(kg.dir(), &params, None);
+        executor
+            .execute(&parsed)
+            .map_err(|e| format!("Cypher execution error: {e}"))?
+    };
+
+    if output_csv {
+        Ok(result.to_csv())
+    } else {
+        Ok(format_cypher_inline(&result))
+    }
+}
+
+/// Render a CypherResult as an inline 15-row preview (header + repr per
+/// row). Matches the format the pre-0.9.18 Python shim produced via
+/// `format_cypher_result`.
+fn format_cypher_inline(result: &cypher::CypherResult) -> String {
+    let len = result.rows.len();
     if len == 0 {
-        return Ok("No results.".to_string());
+        return "No results.".to_string();
     }
     let header = if len > 15 {
         format!("{len} row(s) (showing first 15):\n")
@@ -244,14 +275,52 @@ fn format_cypher_result(py: Python<'_>, result: &Py<PyAny>) -> PyResult<String> 
         format!("{len} row(s):\n")
     };
     let mut out = header;
-    for (i, row) in bound.try_iter()?.enumerate() {
-        if i >= 15 {
-            break;
+    out.push_str(&result.columns.join("\t"));
+    out.push('\n');
+    for row in result.rows.iter().take(15) {
+        for (i, val) in row.iter().enumerate() {
+            if i > 0 {
+                out.push('\t');
+            }
+            push_value_repr(&mut out, val);
         }
-        out.push_str(&row?.repr()?.to_string());
         out.push('\n');
     }
-    Ok(out)
+    out
+}
+
+fn push_value_repr(out: &mut String, val: &Value) {
+    use std::fmt::Write;
+    match val {
+        Value::Null => out.push_str("null"),
+        Value::String(s) => {
+            let _ = write!(out, "{s:?}");
+        }
+        Value::Int64(n) => {
+            let _ = write!(out, "{n}");
+        }
+        Value::Float64(f) => {
+            let _ = write!(out, "{f}");
+        }
+        Value::Boolean(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::UniqueId(u) => {
+            let _ = write!(out, "{u}");
+        }
+        Value::DateTime(d) => out.push_str(&d.format("%Y-%m-%d").to_string()),
+        Value::Point { lat, lon } => {
+            let _ = write!(out, "POINT({lon} {lat})");
+        }
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => {
+            let _ = write!(out, "duration(M={months}, D={days}, S={seconds})");
+        }
+        Value::NodeRef(idx) => {
+            let _ = write!(out, "node[{idx}]");
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -276,58 +345,139 @@ struct OverviewArgs {
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 struct SaveGraphArgs {}
 
-/// Register cypher_query / graph_overview / save_graph on the supplied
-/// server. State is shared by Arc, so a graph swap on `state` lands
-/// instantly on the next tool call.
-pub fn register(server: &mut McpServer, state: GraphState) {
+/// Builtins toggled by the manifest's `builtins:` block.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Builtins {
+    pub save_graph: bool,
+    pub temp_cleanup_on_overview: bool,
+}
+
+pub fn register(server: &mut McpServer, state: GraphState, builtins: Builtins) {
     let s = state.clone();
     server.register_typed_tool::<CypherArgs, _>(
         "cypher_query",
         "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
          inline; append FORMAT CSV to export full results to a CSV string.",
-        move |args| s.with_active(|g| run_cypher(g, &args.query)),
+        move |args| s.with_active(|g| run_cypher_tool(g, &args.query)),
     );
     let s = state.clone();
+    let cleanup_temp = builtins.temp_cleanup_on_overview;
     server.register_typed_tool::<OverviewArgs, _>(
         "graph_overview",
         "Inspect the active graph's schema. With no args returns the inventory; pass \
          types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
-        move |args| s.with_active(|g| run_overview(g, &args)),
+        move |args| {
+            if cleanup_temp
+                && args.types.is_none()
+                && args.connections.is_none()
+                && args.cypher.is_none()
+            {
+                wipe_temp_dir();
+            }
+            s.with_active(|g| run_overview(g, &args))
+        },
     );
-    let s = state;
-    server.register_typed_tool::<SaveGraphArgs, _>(
-        "save_graph",
-        "Persist the active graph to its source .kgl file (single-graph mode only).",
-        move |_| s.with_active(run_save),
-    );
+    if builtins.save_graph {
+        let s = state;
+        server.register_typed_tool::<SaveGraphArgs, _>(
+            "save_graph",
+            "Persist the active graph to its source .kgl file (single-graph mode only).",
+            move |_| s.with_active(run_save),
+        );
+    }
 }
 
-fn run_cypher(graph: &ActiveGraph, query: &str) -> String {
-    Python::attach(|py| -> PyResult<String> {
-        let result = graph.py_obj.call_method1(py, "cypher", (query,))?;
-        format_cypher_result(py, &result)
-    })
-    .unwrap_or_else(|e| format!("Cypher error: {e}"))
+fn wipe_temp_dir() {
+    let dir = std::path::Path::new("temp");
+    if !dir.is_dir() {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(error = %e, "temp_cleanup: read_dir failed");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let res = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = res {
+            tracing::debug!(path = %path.display(), error = %e, "temp_cleanup: remove failed");
+        }
+    }
+}
+
+fn run_cypher_tool(graph: &ActiveGraph, query: &str) -> String {
+    match run_cypher_inner(&graph.kg, query, std::collections::HashMap::new()) {
+        Ok(s) => s,
+        Err(e) => format!("Cypher error: {e}"),
+    }
 }
 
 fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
-    Python::attach(|py| -> PyResult<String> {
-        let kwargs = PyDict::new(py);
-        if let Some(types) = &args.types {
-            kwargs.set_item("types", types)?;
+    let conn = parse_connection_detail(args.connections.as_ref());
+    let cy = parse_cypher_detail(args.cypher.as_ref());
+    let fluent = FluentDetail::Off;
+    match compute_description(
+        graph.kg.dir(),
+        args.types.as_deref(),
+        &conn,
+        &cy,
+        &fluent,
+        None,
+        None,
+        None,
+    ) {
+        Ok(s) => s,
+        Err(e) => format!("graph_overview error: {e}"),
+    }
+}
+
+fn parse_connection_detail(v: Option<&serde_json::Value>) -> ConnectionDetail {
+    use serde_json::Value;
+    match v {
+        None | Some(Value::Null) => ConnectionDetail::Off,
+        Some(Value::Bool(false)) => ConnectionDetail::Off,
+        Some(Value::Bool(true)) => ConnectionDetail::Overview,
+        Some(Value::Array(items)) => {
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|i| i.as_str().map(String::from))
+                .collect();
+            if names.is_empty() {
+                ConnectionDetail::Overview
+            } else {
+                ConnectionDetail::Topics(names)
+            }
         }
-        if let Some(c) = &args.connections {
-            kwargs.set_item("connections", json_to_py(py, c)?)?;
+        Some(_) => ConnectionDetail::Overview,
+    }
+}
+
+fn parse_cypher_detail(v: Option<&serde_json::Value>) -> CypherDetail {
+    use serde_json::Value;
+    match v {
+        None | Some(Value::Null) => CypherDetail::Off,
+        Some(Value::Bool(false)) => CypherDetail::Off,
+        Some(Value::Bool(true)) => CypherDetail::Overview,
+        Some(Value::Array(items)) => {
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|i| i.as_str().map(String::from))
+                .collect();
+            if names.is_empty() {
+                CypherDetail::Overview
+            } else {
+                CypherDetail::Topics(names)
+            }
         }
-        if let Some(c) = &args.cypher {
-            kwargs.set_item("cypher", json_to_py(py, c)?)?;
-        }
-        let result = graph
-            .py_obj
-            .call_method(py, "describe", PyTuple::empty(py), Some(&kwargs))?;
-        result.extract::<String>(py)
-    })
-    .unwrap_or_else(|e| format!("graph_overview error: {e}"))
+        Some(_) => CypherDetail::Overview,
+    }
 }
 
 fn run_save(graph: &ActiveGraph) -> String {
@@ -335,15 +485,20 @@ fn run_save(graph: &ActiveGraph) -> String {
         return "save_graph requires --graph mode (no source path bound).".to_string();
     };
     let path_str = path.to_string_lossy().into_owned();
-    Python::attach(|py| -> PyResult<String> {
-        graph
-            .py_obj
-            .call_method1(py, "save", (path_str.as_str(),))?;
-        let s = graph.py_obj.call_method0(py, "schema")?;
-        let s = s.bind(py);
-        let nodes: u64 = s.get_item("node_count")?.extract()?;
-        let edges: u64 = s.get_item("edge_count")?.extract()?;
-        Ok(format!("Saved {path_str} ({nodes} nodes, {edges} edges)."))
-    })
-    .unwrap_or_else(|e| format!("save_graph error: {e}"))
+    // save_disk needs &mut DirGraph; we hold an Arc<DirGraph>. Clone the
+    // Arc and unwrap to get exclusive access (cheap when the Arc is
+    // already unique, otherwise we do a deep clone of the storage —
+    // acceptable for save since it's an explicit operator action).
+    let mut dir_arc = graph.kg.dir().clone();
+    let dir = std::sync::Arc::make_mut(&mut dir_arc);
+    match dir.save_disk(&path_str) {
+        Ok(()) => {
+            let overview = compute_schema(dir);
+            format!(
+                "Saved {path_str} ({} nodes, {} edges).",
+                overview.node_count, overview.edge_count
+            )
+        }
+        Err(e) => format!("save_graph error: {e}"),
+    }
 }
