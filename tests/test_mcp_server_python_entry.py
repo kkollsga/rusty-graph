@@ -11,11 +11,16 @@ Categories:
 - B: Per-mode tool registration (5 tests)
 - C: Tool output content (8 tests)
 - D: Embedder & semantic search (3 tests)
-- E: Manifest & .env handling (4 tests)
-- F: Workspace state propagation (3 tests)
+- E: Manifest & .env handling (5 tests)
+- F: Workspace state propagation (5 tests)
+- W: File watcher boundary (1 test)
 
 Forward-looking Cat G-N (22 more) need spatial/timeseries/orphan
 fixtures — tracked as a separate piece of work.
+
+0.9.24: E5, F4, F5, and W1 added to anchor the new pyo3-wrapper
+boundaries (Manifest extensions passthrough, set_root_dir lateral
+swap, Workspace post_activate hook, watch callback).
 """
 
 from __future__ import annotations
@@ -283,6 +288,25 @@ def local_workspace_yaml(tmp_path: Path, tiny_source_dir: Path) -> Path:
     yaml = tmp_path / "local_mcp.yaml"
     yaml.write_text(f"name: local\nworkspace:\n  kind: local\n  root: {tiny_source_dir}\n")
     return yaml
+
+
+@pytest.fixture
+def local_workspace_with_two_children(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """workspace.kind: local with two sibling subdirectories under the
+    configured root, each carrying a unique marker file. Returns
+    (manifest_yaml, child_a_path, child_b_path) so F4 can verify both
+    siblings are reachable via set_root_dir."""
+    root = tmp_path / "workspace_root"
+    root.mkdir()
+    child_a = root / "child_a"
+    child_a.mkdir()
+    (child_a / "marker_a.py").write_text("# child_a marker\n")
+    child_b = root / "child_b"
+    child_b.mkdir()
+    (child_b / "marker_b.py").write_text("# child_b marker\n")
+    yaml = tmp_path / "two_children_mcp.yaml"
+    yaml.write_text(f"name: two_children\nworkspace:\n  kind: local\n  root: {root}\n")
+    return yaml, child_a, child_b
 
 
 @pytest.fixture
@@ -881,6 +905,36 @@ def test_f3_repo_management_force_rebuild_triggers_post_activate_hook(
     assert "ERROR" not in body and "invalid" not in body.lower(), f"force_rebuild rejected: {body!r}"
 
 
+def test_f4_set_root_dir_can_swap_laterally_within_workspace_root(
+    local_workspace_with_two_children: tuple[Path, Path, Path],
+) -> None:
+    """After set_root_dir(child_a), agents can still set_root_dir(child_b)
+    where both are siblings under the manifest's workspace.root.
+    Catches: 0.9.23 sandbox-narrows-each-swap regression (the
+    pre-0.9.24 Python wrapper mutated `self.root` after each swap,
+    so the next sandbox check compared against the narrower active
+    root; mcp-methods 0.3.28's atomic-swap RwLock + immutable
+    configured root makes lateral swaps work by construction)."""
+    yaml, child_a, child_b = local_workspace_with_two_children
+    client = _client(["--mcp-config", str(yaml)])
+    try:
+        body_a = client.call_tool("set_root_dir", {"path": str(child_a)})
+        assert "Active root set to" in body_a, f"first swap failed: {body_a!r}"
+
+        body_b = client.call_tool("set_root_dir", {"path": str(child_b)})
+        assert "escapes" not in body_b.lower(), (
+            f"sandbox narrowed: cannot swap to sibling under workspace.root: {body_b!r}"
+        )
+        assert "Active root set to" in body_b, f"second swap failed: {body_b!r}"
+
+        # The listing should now reflect child_b's contents — proves the
+        # source-root rebind actually fired through to the source tools.
+        listing = client.call_tool("list_source", {})
+    finally:
+        client.close()
+    assert "marker_b.py" in listing, f"new sibling root not reflected in list_source: {listing!r}"
+
+
 # ---------------------------------------------------------------------------
 # Direct API tests (not in operator spec but kept from previous suite)
 # ---------------------------------------------------------------------------
@@ -977,3 +1031,115 @@ def test_embedder_manifest_parses_cooldown() -> None:
     )
     assert isinstance(adapter, BgeM3Embedder)
     assert adapter._cooldown_seconds == 60
+
+
+# ---------------------------------------------------------------------------
+# 0.9.24 pyo3-wrapper boundary tests (E5 / F5 / W1)
+# ---------------------------------------------------------------------------
+
+
+def test_e5_manifest_extensions_passthrough_preserves_all_keys(tmp_path: Path) -> None:
+    """The Rust → Python conversion of `extensions: serde_json::Map`
+    must recursively preserve every key including deeply nested
+    mappings, ints, bools, and strings. Catches: drift in
+    `json_value_to_py` when the recursive walker changes shape.
+
+    The wire contract is "round-trip every JSON scalar / array /
+    object" — exercise each branch."""
+    yaml_path = tmp_path / "ext_passthrough_mcp.yaml"
+    yaml_path.write_text(
+        "name: ext_test\n"
+        "extensions:\n"
+        "  csv_http_server: true\n"
+        "  csv_http_server_dir: temp/\n"
+        "  embedder:\n"
+        "    backend: fastembed\n"
+        "    model: BAAI/bge-m3\n"
+        "    cooldown: 1200\n"
+        "  deeply:\n"
+        "    nested:\n"
+        "      list_value: [1, 2, 3]\n"
+        "      bool_value: false\n"
+        "      string_value: hello\n"
+    )
+    from kglite.mcp_server.manifest import load_manifest
+
+    manifest = load_manifest(yaml_path)
+    ext = manifest.extensions
+    assert ext["csv_http_server"] is True
+    assert ext["csv_http_server_dir"] == "temp/"
+    assert ext["embedder"]["backend"] == "fastembed"
+    assert ext["embedder"]["model"] == "BAAI/bge-m3"
+    assert ext["embedder"]["cooldown"] == 1200
+    assert ext["deeply"]["nested"]["list_value"] == [1, 2, 3]
+    assert ext["deeply"]["nested"]["bool_value"] is False
+    assert ext["deeply"]["nested"]["string_value"] == "hello"
+
+
+def test_f5_workspace_post_activate_hook_fires_on_activate(tmp_path: Path) -> None:
+    """A Python callable registered via Workspace.set_post_activate
+    must be invoked when activate / set_root_dir succeeds. Catches:
+    Arc-wrap bugs or GIL-acquisition failures in the DeferredPyHook
+    dispatch path."""
+    import kglite._mcp_internal as m
+
+    target = tmp_path / "ws_root"
+    target.mkdir()
+    (target / "marker.txt").write_text("hi\n")
+
+    captured: list[tuple[str, str]] = []
+
+    def hook(path: str, name: str) -> None:
+        captured.append((path, name))
+
+    ws = m.Workspace.open_local(str(target))
+    ws.set_post_activate(hook)
+
+    # repo_management(update=True) in local mode re-runs activate,
+    # which fires the post-activate hook.
+    out = ws.repo_management(update=True)
+    assert "failed" not in out.lower()
+
+    assert len(captured) >= 1, f"post_activate hook didn't fire: out={out!r}"
+    fired_path, fired_name = captured[-1]
+    assert Path(fired_path).resolve() == target.resolve(), (
+        f"hook received wrong path: {fired_path!r} (expected {target!r})"
+    )
+    assert fired_name.startswith("local/"), f"hook received unexpected name: {fired_name!r}"
+
+
+def test_w1_watch_callback_receives_changed_paths(tmp_path: Path) -> None:
+    """`start_watch` invokes the Python callable with a list of
+    changed path strings within `debounce_ms + grace`. Catches:
+    GIL or type-conversion issues at the watcher / Python boundary
+    (callback runs on a background thread, must reacquire the GIL
+    automatically)."""
+    import kglite._mcp_internal as m
+
+    received: list[list[str]] = []
+    lock = threading.Lock()
+
+    def on_change(paths: list[str]) -> None:
+        with lock:
+            received.append(list(paths))
+
+    handle = m.start_watch(str(tmp_path), on_change, debounce_ms=100)
+    try:
+        # Give the watcher a moment to settle, then write a file.
+        time.sleep(0.05)
+        (tmp_path / "new_file.txt").write_text("change me\n")
+        # Wait for the debounce window + grace.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with lock:
+                if received:
+                    break
+            time.sleep(0.05)
+    finally:
+        handle.stop()
+
+    assert received, "watch callback never fired after file write"
+    flat = [p for batch in received for p in batch]
+    assert any("new_file.txt" in p for p in flat), (
+        f"callback fired but path list did not include the changed file: {received!r}"
+    )
