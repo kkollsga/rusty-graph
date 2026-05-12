@@ -6,11 +6,14 @@
 > the agent gets Cypher access to your data through ordinary tool
 > calls — no API to learn, no infrastructure to manage.
 
-KGLite ships `kglite-mcp-server` as a single Rust binary built on the
-[mcp-methods] framework (rmcp + manifest-driven tool registration).
-For most graphs the out-of-the-box server is everything you need.
-For project-specific tools — semantic search, source-file access,
-parameterised Cypher lookups, custom Python hooks — drop a YAML
+KGLite ships `kglite-mcp-server` as a Python entry point on top of
+the pure-Rust [mcp-methods] framework (rmcp + manifest-driven tool
+registration in Rust; Python orchestration thin enough that hot-path
+dispatch is sub-microsecond per call). Install with
+`pip install 'kglite[mcp]'`; the server lands on PATH and the agent
+gets `graph_overview` + `cypher_query` over MCP stdio. For
+project-specific tools — semantic search, source-file access,
+parameterised Cypher lookups, query preprocessing — drop a YAML
 manifest next to your graph and the bundled server picks it up
 automatically. **No fork required for most customisation.**
 
@@ -25,21 +28,12 @@ pip install 'kglite[mcp]'
 ```
 
 `kglite-mcp-server` ships with the wheel as a Python console-script
-entry point. No `cargo install`, no `PYO3_PYTHON=` dance, no
-`install_name_tool` patching, no per-Python-version wheel matrix.
-Run `kglite-mcp-server --help` to confirm.
+entry point. Run `kglite-mcp-server --help` to confirm.
 
-Under the hood the entry point is `kglite.mcp_server.server:main` —
-a Python implementation that calls the existing kglite Python API
-(`graph.cypher` / `graph.describe` / `graph.source`). Cypher
-execution still happens in pure Rust under the GIL release inside
-`cypher()`, so hot-path performance is identical to the
-pre-0.9.20 bundled-binary release.
-
-The `[mcp]` extras pull `mcp` (the official Python SDK),
-`fastembed`, `aiohttp`, `pyyaml`, and `watchdog` — only installed
-when you actually want to run the server. Plain `pip install kglite`
-gives you the graph engine without the server deps.
+The `[mcp]` extras pull `mcp` (the official Python SDK), `fastembed`,
+`aiohttp`, `pyyaml`, and `watchdog` — only installed when you
+actually want to run the server. Plain `pip install kglite` gives
+you the graph engine without the server deps.
 
 ### 2. Point it at a graph file
 
@@ -112,13 +106,17 @@ Or point at any path with `--mcp-config`:
 kglite-mcp-server --graph demo.kgl --mcp-config /path/to/manifest.yaml
 ```
 
-A manifest can declare three kinds of additions, all optional:
+A manifest can declare several kinds of additions, all optional:
 
 | Section | What it does | Trust |
 |---|---|---|
-| `source_root:` | Auto-registers `read_source` / `grep` / `list_source` over a directory | None — read-only |
-| `tools: cypher: \|` | Parameterised Cypher templates as named MCP tools | None — read-only |
-| `tools: python: ...` | Load custom Python functions as MCP tools | Two-signal opt-in |
+| `source_root:` / `source_roots:` | Auto-registers `read_source` / `grep` / `list_source` over the directory tree | None — read-only |
+| `tools[].cypher` | Parameterised Cypher templates as named MCP tools | None — read-only |
+| `extensions.embedder` | Registers an embedder so `text_score()` works inside Cypher | `trust.allow_embedder: true` |
+| `extensions.csv_http_server` | Localhost listener that serves `FORMAT CSV` exports as URLs | None |
+| `extensions.cypher_preprocessor` | Manifest-declared Python hook that rewrites queries before execution | `trust.allow_query_preprocessor: true` |
+| `workspace:` | Bind a local directory (or clone-and-track GitHub repos) as the active source root | None |
+| `builtins.save_graph: true` | Registers `save_graph` so the agent can persist mutations | None |
 
 ### `source_root:` — first-class source-file access
 
@@ -198,22 +196,20 @@ Manifest Cypher tools cap output at 15 rows / 2k chars. For full
 result exports, agents use the bundled `cypher_query` with
 `FORMAT CSV`.
 
-### `python:` — custom hook tools (removed in 0.9.18)
+### `extensions.embedder` — semantic search inside Cypher
 
-Earlier releases let manifests load Python tool functions
-(`tools[].python: ./tools.py`) and Python embedder factories
-(`embedder: { module, class }`) through an in-process CPython runtime.
-0.9.18 dropped both: the binary no longer embeds Python, and the
-mcp-methods Python interface isn't on its dep graph. If you need
-custom tool logic, write the tool against `kglite::api` in a
-downstream Rust binary (see **Building a downstream binary** below)
-or fold the logic into a parameterised Cypher template.
+Wire bge-m3 (or any fastembed-catalog model) so `text_score()` works
+inside `cypher_query`. Worked example at
+{doc}`../examples/manifest_with_embedder`. Reference under
+[`extensions:` schema reference](#extensions-schema-reference) below.
 
-For embedders, see `extensions.embedder:` in the next section — the
-operator-facing shape is the same single-block declaration, but the
-runtime uses [fastembed-rs](https://github.com/Anush008/fastembed-rs)
-to run BAAI/bge-m3 (or any of fastembed's catalog) natively without
-Python.
+### `extensions.cypher_preprocessor` — rewrite agent input
+
+Manifest-declared Python hook that fires before every `cypher_query`
+and `tools[].cypher` invocation. Useful for domain-specific
+identifier coercion (Wikidata Q-numbers → integers), date format
+normalisation, multi-tenant scoping, etc. Worked example at
+{doc}`../examples/manifest_cypher_preprocessor`. Reference below.
 
 ### Top-level fields
 
@@ -251,10 +247,9 @@ startup with a non-zero exit code. The recurring ones:
 | `ERROR: <path>: source root './data' resolves to '/abs/.../data' which is not an existing directory` | The path is relative-to-yaml; it didn't land on a real directory. | Check the path; create the directory; or use `source_roots:` if you have multiple. |
 | `ERROR: <path>: cypher tool 'foo': cypher references $params ['bar'] not declared in parameters.properties` | A `$param` in the Cypher template isn't in the JSON Schema. | Add it under `parameters.properties` (and to `required:` if it's mandatory). |
 | `ERROR: <path>: cypher tool 'foo': invalid parameters schema: ...` | The `parameters:` block isn't valid JSON Schema (Draft 2020-12). | Check `type`, nested types in `properties`, and `required:` list. |
-| `ERROR: <path>: manifest declares N python tool(s) but '--trust-tools' was not passed on the CLI` | Python hooks declared, but the operator hasn't authorised them. | Add `--trust-tools` to the CLI invocation after auditing the manifest's `python:` entries. |
-| `ERROR: <path>: manifest declares N python tool(s) but trust.allow_python_tools is not set in the manifest` | The reverse: CLI passed `--trust-tools` but yaml doesn't opt in. | Add `trust:\n  allow_python_tools: true` to the yaml. |
 | `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
-| `ERROR: python tool 'foo': function 'bar' not found in <path>` | The yaml `function:` name doesn't match anything in the .py file. | Check the function name. Class methods aren't supported — use module-level functions. |
+| `ERROR: extensions.cypher_preprocessor requires trust.allow_query_preprocessor: true` | Preprocessor declared without the trust gate. | Add `trust:\n  allow_query_preprocessor: true` to the manifest. |
+| `ERROR: extensions.cypher_preprocessor.module file does not exist: <path>` | Preprocessor module path is wrong (paths are manifest-relative). | Check that the `.py` file exists at the configured path. |
 
 Exit code 3 is reserved for manifest / validation errors; exit 1 for
 graph-file-not-found; exit 2 for missing `[mcp]` extras. Wrapping
@@ -270,7 +265,6 @@ co-locates with the graph file and the source data:
 conference/
 ├── conference.kgl
 ├── conference_mcp.yaml          ← auto-detected
-├── tools.py                     ← custom python hook
 └── data/
     ├── sessions/
     │   └── classified.json
@@ -285,12 +279,9 @@ instructions: |
   similarity edges between sessions. Use cypher_query for
   structured questions, read_source/grep for raw JSON in ./data,
   similar_sessions for embedding-based recommendations,
-  session_detail for fields not lifted to the graph.
+  session_detail for the full session record by id.
 
 source_root: ./data
-
-trust:
-  allow_python_tools: true
 
 tools:
   - name: similar_sessions
@@ -307,59 +298,85 @@ tools:
       ORDER BY score DESC LIMIT $top_k
 
   - name: session_detail
-    description: Raw source JSON for a session by id.
-    python: ./tools.py
-    function: session_detail
+    description: Full record for a session by id.
+    parameters:
+      type: object
+      properties:
+        session_id: {type: string}
+      required: [session_id]
+    cypher: |
+      MATCH (s:Session {id: $session_id})
+      OPTIONAL MATCH (s)-[:PRESENTED_BY]->(speaker:Speaker)
+      OPTIONAL MATCH (speaker)-[:WORKS_AT]->(company:Company)
+      RETURN s, collect(DISTINCT speaker) AS speakers,
+             collect(DISTINCT company) AS companies
 ```
 
 Run with:
 
 ```bash
-kglite-mcp-server --graph conference.kgl --trust-tools
+kglite-mcp-server --graph conference.kgl
 ```
 
 Tools registered (visible in any MCP-aware agent):
 
-- `graph_overview`, `cypher_query` — bundled
+- `graph_overview`, `cypher_query`, `ping` — bundled
 - `read_source`, `grep`, `list_source` — from `source_root`
 - `similar_sessions` — inline Cypher
-- `session_detail` — Python hook
+- `session_detail` — inline Cypher
 
-That's six tools from ~30 lines of YAML and ~10 lines of Python.
+That's seven tools from ~35 lines of YAML, zero Python. For shapes
+that need real Python logic (HTTP fetch, file parse, custom
+identifier rewriting), see {doc}`../examples/manifest_cypher_preprocessor`
+for the query-preprocessor hook, or **Building a downstream binary**
+below for full Rust integration.
 
 ## Building a downstream binary
 
 When the manifest tiers aren't enough — you need conditional tool
 registration based on graph schema, custom transports, or tools that
 need to share state with the kglite-specific dispatch — build a
-*downstream binary* on top of the [`mcp-server`][mcp-server-crate]
-framework. `kglite-mcp-server` itself is exactly that: a 514-LoC Rust
-crate that registers `cypher_query` / `graph_overview` / `save_graph`
-on top of the framework's source / GitHub / python-tool surface.
+*downstream binary* on top of the pure-Rust [`mcp-methods`](https://crates.io/crates/mcp-methods)
+crate. `kglite-mcp-server` itself is exactly that: a small Rust
+crate (see [`crates/kglite-mcp-server`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-mcp-server))
+that registers `cypher_query` / `graph_overview` / `save_graph` on
+top of the framework's source / GitHub / workspace surface.
 
-[mcp-server-crate]: https://github.com/kkollsga/mcp-methods/tree/main/crates/mcp-server
-
-The shape:
+The shape (using mcp-methods 0.3.30+ from crates.io):
 
 ```rust
-use mcp_server::{McpServer, ServerOptions, apply_python_extensions};
-use rmcp::handler::server::router::tool::ToolRoute;
+use mcp_methods::server::{McpServer, ServerOptions, load_manifest};
 
-let options = ServerOptions::from_manifest(manifest.as_ref(), "My Server")
-    .with_static_source_roots(vec!["/path/to/data".into()]);
-let mut server = McpServer::new(options);
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let manifest = load_manifest(std::path::Path::new("manifest.yaml"))?;
+    let options = ServerOptions::from_manifest(&manifest, "My Server")
+        .with_static_source_roots(vec!["/path/to/data".into()]);
+    let mut server = McpServer::new(options);
 
-// Register your domain tools dynamically:
-server.tool_router_mut().add_route(ToolRoute::new_dyn(
-    Tool::new("my_tool", "Description", schema),
-    move |ctx| Box::pin(async move { /* … */ }),
-));
+    // Register your domain tools (typed args via #[derive(Deserialize)]):
+    server.register_typed_tool::<MyArgs, _>(
+        "my_tool",
+        "What the tool does.",
+        |args: MyArgs| async move {
+            // ... your logic ...
+            Ok(format!("response body"))
+        },
+    );
 
-server.serve(rmcp::transport::stdio()).await?;
+    server.serve(rmcp::transport::stdio()).await?;
+    Ok(())
+}
 ```
 
+For the canonical worked example with full setup, see the
+[mcp-methods downstream-binary guide](https://mcp-methods.readthedocs.io/en/latest/guides/downstream-binary.html)
+or the runnable
+[`examples/downstream_binary/`](https://github.com/kkollsga/mcp-methods/tree/main/examples/downstream_binary)
+in the mcp-methods repo.
+
 Adding a new tool to `kglite-mcp-server` itself is a single
-`make_route()` call in `crates/kglite-mcp-server/src/tools.rs` (~5
+registration call in `crates/kglite-mcp-server/src/tools.rs` (~5
 lines). When deciding between manifest vs downstream binary:
 
 | Need | Manifest | Downstream binary |
