@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.24] — 2026-05-12
+
+Architectural cleanup: kglite's MCP server framework is now a thin
+shim over `mcp-methods` Rust rather than a parallel Python
+re-implementation. ~600 LOC of Python deleted; the validated Rust
+behaviour replaces it. As a side effect, the 0.9.23 set_root_dir
+sandbox-narrowing regression the operator flagged is fixed by
+construction.
+
+### Fixed
+- **`set_root_dir` no longer narrows the sandbox with each swap.**
+  The pre-0.9.24 Python `Workspace.set_root_dir_tool` mutated
+  `self.root` after each successful swap, so the next sandbox check
+  compared against the narrower active root rather than the
+  manifest's declared `workspace.root`. After one swap, lateral
+  swaps to sibling projects under the configured root failed with
+  "escapes the workspace root." Fix: the new wrapper inherits
+  `mcp_methods::server::Workspace`'s atomic-swap RwLock + immutable
+  configured `workspace_dir`, so the sandbox check always validates
+  against the manifest's declared root. Workspaces remain swappable
+  to any sibling under the configured root for the lifetime of the
+  server — no restart required.
+
+### Changed
+- **`kglite/mcp_server/{manifest,workspace,watch}.py` are now thin
+  pyo3 wrappers** around `mcp_methods::server::{Manifest,Workspace,
+  watch_dir}`. The Python surface stays the same (`Manifest`
+  dataclass, `Workspace.root` / `.kind` / `.repo_management_tool` /
+  `.set_root_dir_tool`, `watch.start`), but the implementation is
+  ~600 LOC of Rust behind a single passthrough each. The Python
+  manifest dataclass is populated from `Manifest::to_json()` (new
+  in mcp-methods 0.3.27) so field drift between the framework and
+  downstream consumers is a non-issue.
+- **`.env` walk-up delegated to mcp-methods Rust**
+  (`load_env_walk`). Same parse rules (skip blanks / `#` comments,
+  strip outer quotes, no-overwrite-existing-env), same result —
+  one fewer parallel implementation to keep in sync. Explicit
+  `env_file:` paths still loaded inline.
+- **File watcher uses `notify-debouncer-mini` via Rust** instead of
+  the pure-Python `watchdog` + threading debounce. The
+  `watchdog` extra remains in `[mcp]` optional-deps for now —
+  downstream tooling may depend on it — but kglite's own watch path
+  no longer uses it.
+- **Pin: `mcp-methods` rev `1ba9469` (0.3.28).** Three same-day
+  releases against this cleanup: 0.3.26 (three-crate split), 0.3.27
+  (`Manifest::to_json`), 0.3.28 (local-mode `set_root_dir` no longer
+  clobbers `active_repo_path`). Two of those bumped specifically to
+  unblock the 0.9.24 pyo3 wrapper; the third was a bug found during
+  the wrap pass.
+
+### Added
+- **`kglite._mcp_internal.{Manifest, Workspace, WatchHandle,
+  start_watch, load_env_walk}`** — pyo3 wrappers around
+  `mcp_methods::server::*`. Internal surface (the public Python
+  entry point is still `kglite.mcp_server.server:main`), but
+  importable for tests and for downstream tools that want the
+  validated mcp-methods behaviour without a Python re-implementation.
+- **4 new regression tests** anchoring the pyo3-wrapper boundary:
+  F4 (sandbox lateral swap — operator's bug repro), E5 (manifest
+  extensions passthrough — recursive `serde_json::Value` → dict),
+  F5 (workspace post-activate hook GIL dispatch), W1 (watch
+  callback receives changed paths). 34/34 mcp_server tests green
+  (was 30/30).
+
+### Internal
+- `anyhow` added as a direct dep — required by
+  `mcp_methods::server::PostActivateHook`'s `Result<(), anyhow::Error>`
+  signature.
+- `MEMORY.md` of "thin Python shim" intent updated for future
+  sessions (see `CLAUDE.md`'s new "Standard plan procedure" section
+  for the per-phase commit rhythm we followed for 0.9.24).
+
 ## [0.9.23] — 2026-05-12
 
 ### Fixed
