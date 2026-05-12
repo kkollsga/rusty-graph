@@ -1675,6 +1675,7 @@ name = "kglite"
 version = "0.9.23"
 dependencies = [
  "aho-corasick",
+ "anyhow",
  "bincode",
  "bzip2",
  "bzip2-rs",
@@ -1881,8 +1882,8 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.26"
-source = "git+https://github.com/kkollsga/mcp-methods.git?rev=2fb539eb7a9b11f42b2f00fcfd713e54ed8eb60d#2fb539eb7a9b11f42b2f00fcfd713e54ed8eb60d"
+version = "0.3.27"
+source = "git+https://github.com/kkollsga/mcp-methods.git?rev=c01ec2df9f0599ada651455ccb0e0c17e95cc957#c01ec2df9f0599ada651455ccb0e0c17e95cc957"
 dependencies = [
  "anyhow",
  "clap",

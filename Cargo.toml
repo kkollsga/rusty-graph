@@ -70,7 +70,9 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # `src/mcp_tools.rs`. The `server` feature pulls the framework half
 # (manifest parser + tool implementations) without any pyo3 dep —
 # matches what we already do in `crates/kglite-mcp-server`.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "2fb539eb7a9b11f42b2f00fcfd713e54ed8eb60d", default-features = false, features = ["server"] }
+# 0.3.27 added `Manifest::to_json()` — wrapper collapses to one
+# `as_dict` method on the pyo3 side. Pinned here for 0.9.24.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "c01ec2df9f0599ada651455ccb0e0c17e95cc957", default-features = false, features = ["server"] }
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies on
@@ -89,6 +91,11 @@ mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "2fb5
 fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# Required by the `PostActivateHook` signature in mcp-methods'
+# Workspace API (`Arc<dyn Fn(...) -> anyhow::Result<()>>`). Used only
+# by the pyo3 wrappers in `src/mcp_tools.rs`; the rest of kglite is
+# anyhow-free.
+anyhow = "1"
 bincode = "1.3"
 chrono = { version = "0.4.43", features = ["serde"] }
 geo = "0.33"
