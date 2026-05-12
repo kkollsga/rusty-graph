@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "kglite"
-version = "0.9.20"
+version = "0.9.21"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -63,6 +63,14 @@ required-features = []
 #   Python versions.
 pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
+# Generic MCP framework tools (ping, read_source, grep, list_source,
+# github_issues, github_api, workspace). 0.9.21+: depend on the
+# pure-Rust mcp-methods crate (split into a three-crate workspace in
+# 0.3.26) and expose its functions to Python via pyo3 wrappers in
+# `src/mcp_tools.rs`. The `server` feature pulls the framework half
+# (manifest parser + tool implementations) without any pyo3 dep —
+# matches what we already do in `crates/kglite-mcp-server`.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "2fb539eb7a9b11f42b2f00fcfd713e54ed8eb60d", default-features = false, features = ["server"] }
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies on

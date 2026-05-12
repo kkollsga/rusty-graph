@@ -67,9 +67,11 @@ class FastEmbedAdapter:
         return [vec.tolist() for vec in self._inner.embed(texts)]
 
 
-def from_manifest_value(value: Any) -> FastEmbedAdapter | None:
+def from_manifest_value(value: Any) -> Any:
     """Parse `extensions.embedder` from the manifest. Returns None if
-    the block is absent."""
+    the block is absent. bge-m3 routes through BgeM3Embedder (direct
+    onnxruntime + hf-hub) because fastembed-python's catalog doesn't
+    carry it. Other supported models route through fastembed-python."""
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -80,6 +82,12 @@ def from_manifest_value(value: Any) -> FastEmbedAdapter | None:
     model = value.get("model")
     if not model:
         raise ValueError("extensions.embedder.model is required for the fastembed backend")
+    if model == "BAAI/bge-m3":
+        from kglite.mcp_server.bge_m3 import BgeM3Embedder
+
+        adapter: Any = BgeM3Embedder()
+        log.info("registered bge-m3 embedder via direct ONNX (model=%s, dim=1024)", model)
+        return adapter
     adapter = FastEmbedAdapter(model)
     log.info("registered fastembed embedder (model=%s)", model)
     return adapter

@@ -12,11 +12,12 @@ path = "src/main.rs"
 
 [dependencies]
 # Generic MCP server framework (rmcp + manifest + source/github tools).
-# `default-features = false, features = ["server"]` — no `python` feature,
-# so the framework half has no PyO3 surface. Pinned to mcp-methods 0.3.25
-# (rev dbc5db1) which moved the framework into the root crate under the
-# `server` feature gate.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "dbc5db16e9e71d90d87570623baf09ee33b2931b", default-features = false, features = ["server"] }
+# Pinned to mcp-methods 0.3.26 (rev 2fb539e) which split the crate into
+# three: pure-Rust `mcp-methods`, pyo3 bindings in `mcp-methods-py`,
+# standalone binary in `mcp-server`. We depend on the pure-Rust crate
+# only — zero pyo3 in mcp-methods' tree, zero libpython link in our
+# binary.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "2fb539eb7a9b11f42b2f00fcfd713e54ed8eb60d", default-features = false, features = ["server"] }
 
 # kglite as a pure-Rust crate dep (no PyO3 extension features). The
 # `fastembed` feature pulls in the FastEmbedAdapter so the binary can

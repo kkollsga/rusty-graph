@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.21] — 2026-05-12
+
+Fixes the two 0.9.20 regressions the operator caught on redeploy:
+8 of 11 tools were silently missing, and bge-m3 embedder was broken
+because fastembed-python doesn't carry that model in its catalog.
+
+### Added
+- **All 8 framework tools restored**: `ping`, `read_source`, `grep`,
+  `list_source`, `repo_management`, `set_root_dir`, `github_issues`,
+  `github_api`. Same output format as the 0.9.18 binary. Implementation
+  comes from the pure-Rust `mcp-methods` crate (0.3.26+, three-crate
+  split with zero pyo3 in the library half) wrapped via pyo3 in
+  `src/mcp_tools.rs` and exposed as `kglite._mcp_internal`. The
+  Python `kglite.mcp_server.server` entry point dispatches each
+  tool to the wrapped Rust function — `cypher()`-style GIL release
+  preserves the original Rust performance.
+- **`BgeM3Embedder`** (`kglite/mcp_server/bge_m3.py`): direct
+  onnxruntime + huggingface_hub implementation for `BAAI/bge-m3`
+  because fastembed-python's catalog doesn't include it. Same ONNX
+  weights as fastembed-rs, same CLS pooling, same
+  `~/.cache/fastembed/` cache directory — operator's existing
+  downloaded weights reused without re-download. Other models
+  (bge-small/base/large, all-MiniLM-L6-v2, multilingual-e5) continue
+  through fastembed-python.
+- **CI gate against tool-surface regression**:
+  `tests/test_mcp_server_python_entry.py` boots the server in every
+  supported mode and asserts `tools/list` matches
+  `tests/fixtures/tool_baseline.json` exactly. Any added or removed
+  tool fails the build. Adopted in response to the 0.9.20 failure mode
+  where the regression was caught after release.
+
+### Changed
+- `kglite::api` Rust facade adds `mcp-methods 0.3.26` as a curated
+  dep (`default-features = false, features = ["server"]`, no pyo3 in
+  its tree). Downstream Rust consumers can use `mcp_methods::*`
+  directly without going through us.
+- `extensions.embedder` dispatcher routes `BAAI/bge-m3` to the new
+  `BgeM3Embedder`; all other models continue to fastembed-python.
+- Auto-bind manifest's directory as fallback source root when no
+  `source_root:` is declared. Matches the 0.9.18 binary's behaviour
+  — without this fallback, sodir-style manifests (no source_root)
+  silently lost `read_source`/`grep`/`list_source`.
+
+### Fixed
+- 0.9.20's tool-surface regression (8 missing tools per manifest).
+- 0.9.20's bge-m3 catalog regression (`text_score()` broken on every
+  embedder-enabled deployment).
+
 ## [0.9.20] — 2026-05-11
 
 ### Changed

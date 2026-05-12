@@ -349,6 +349,7 @@ def _build_server(
     from mcp import types
     from mcp.server.lowlevel import Server
 
+    import kglite._mcp_internal as mcp_internal
     from kglite.mcp_server.code_source import DESCRIPTION as CODE_SOURCE_DESC
     from kglite.mcp_server.code_source import SCHEMA as CODE_SOURCE_SCHEMA
     from kglite.mcp_server.code_source import read as read_code_source
@@ -376,12 +377,38 @@ def _build_server(
         source_roots = [mode["path"].resolve().parent]
     elif mode["kind"] == "source_root" and mode["path"]:
         source_roots = [mode["path"].resolve()]
+    elif manifest is not None and not source_roots:
+        # Fallback: any manifest-driven boot without an explicit
+        # source_root binds the manifest's directory. Matches the
+        # 0.9.18 Rust binary's behaviour — operator's sodir-style
+        # YAMLs (no source_root: declared) registered read_source /
+        # grep / list_source under that parent. Without this fallback
+        # we'd silently lose three tools per such manifest, which is
+        # exactly the 0.9.20 regression class.
+        source_roots = [manifest.base_dir]
 
     manifest_cypher_tools = manifest.tools if manifest else []
     cypher_tool_lookup = {t.name: t for t in manifest_cypher_tools}
 
+    # source roots as strings — what mcp-methods expects.
+    source_roots_str = [str(p) for p in source_roots]
+
+    # GithubIssues holds an ElementCache for drill-down across calls.
+    # Constructed once per process; lives for the server's lifetime.
+    github_token_present = mcp_internal.has_github_token()
+    github_issues = mcp_internal.GithubIssues() if github_token_present else None
+
+    # Workspace-mode tools. `repo_management` registers in remote
+    # workspace mode; `set_root_dir` in local workspace mode. Matches
+    # the 0.9.18 binary's per-mode tool surface.
+    is_workspace = mode["kind"] == "workspace"
+    is_local_workspace = mode["kind"] == "local_workspace"
+
     @server.list_tools()
     async def _list() -> list[types.Tool]:
+        # ───────────────────────────────────────────────────────────
+        # kglite-specific tools
+        # ───────────────────────────────────────────────────────────
         tools: list[types.Tool] = [
             types.Tool(
                 name="cypher_query",
@@ -436,6 +463,36 @@ def _build_server(
                     inputSchema={"type": "object", "properties": {}},
                 )
             )
+
+        # ───────────────────────────────────────────────────────────
+        # Framework tools — wrapped from mcp-methods Rust crate via
+        # kglite._mcp_internal. Same output format as the 0.9.18 binary.
+        # ───────────────────────────────────────────────────────────
+        tools.append(
+            types.Tool(
+                name="ping",
+                description="Liveness probe. Returns the supplied message (default 'pong').",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Optional message to echo back.",
+                        }
+                    },
+                },
+            )
+        )
+        if source_roots_str:
+            tools.extend(_framework_source_tools())
+        if github_issues is not None:
+            tools.extend(_framework_github_tools())
+        if is_workspace:
+            tools.append(_framework_repo_management_tool())
+        if is_local_workspace:
+            tools.append(_framework_set_root_dir_tool())
+
+        # YAML-declared cypher tools.
         tools.extend(cypher_tool_attrs(manifest_cypher_tools))
         return tools
 
@@ -455,6 +512,59 @@ def _build_server(
             body = run_save(graph_state)
         elif name == "read_code_source":
             body = read_code_source(graph_state, args, source_roots)
+        # ── framework tools, forward to Rust wrappers ────────────────
+        elif name == "ping":
+            body = mcp_internal.ping(args.get("message"))
+        elif name == "read_source":
+            body = mcp_internal.read_source(
+                args["file_path"],
+                source_roots_str,
+                start_line=args.get("start_line"),
+                end_line=args.get("end_line"),
+                grep=args.get("grep"),
+                grep_context=args.get("grep_context"),
+                max_matches=args.get("max_matches"),
+                max_chars=args.get("max_chars"),
+            )
+        elif name == "grep":
+            body = mcp_internal.grep(
+                args["pattern"],
+                source_roots_str,
+                glob=args.get("glob"),
+                context=args.get("context", 0),
+                max_results=args.get("max_results"),
+                case_insensitive=args.get("case_insensitive", False),
+            )
+        elif name == "list_source":
+            body = mcp_internal.list_source(
+                source_roots_str,
+                path=args.get("path", "."),
+                depth=args.get("depth", 1),
+                glob=args.get("glob"),
+                dirs_only=args.get("dirs_only", False),
+            )
+        elif name == "github_issues":
+            if github_issues is None:
+                body = "Error: github_issues requires GITHUB_TOKEN / GH_TOKEN to be set."
+            else:
+                body = _call_github_issues(github_issues, args)
+        elif name == "github_api":
+            body = mcp_internal.git_api(
+                args.get("repo_name") or _active_repo_for_github(workspace),
+                args["path"],
+                truncate_at=args.get("truncate_at", 80_000),
+            )
+        elif name == "repo_management":
+            if workspace is None:
+                body = "Error: repo_management requires workspace mode."
+            else:
+                body = workspace.repo_management_tool(args)
+        elif name == "set_root_dir":
+            if workspace is None:
+                body = "Error: set_root_dir requires local-workspace mode."
+            else:
+                body = workspace.set_root_dir_tool(args.get("path", ""))
+        # ── manifest-declared cypher tools ───────────────────────────
         elif name in cypher_tool_lookup:
             body = await call_cypher_tool(
                 cypher_tool_lookup[name],
@@ -467,6 +577,197 @@ def _build_server(
         return [types.TextContent(type="text", text=body)]
 
     return server
+
+
+def _framework_source_tools() -> list:
+    """JSON-Schema definitions for the file-system tools. Source roots
+    must be configured for these to be useful — caller gates by
+    checking source_roots is non-empty."""
+    from mcp import types
+
+    return [
+        types.Tool(
+            name="read_source",
+            description=(
+                "Read a file slice from one of the configured source roots. "
+                "Line range / regex filter / truncation; path traversal rejected."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "grep": {"type": "string"},
+                    "grep_context": {"type": "integer"},
+                    "max_matches": {"type": "integer"},
+                    "max_chars": {"type": "integer"},
+                },
+                "required": ["file_path"],
+            },
+        ),
+        types.Tool(
+            name="grep",
+            description=(
+                "Recursive regex search across source roots. .gitignore-aware. "
+                "Output: `path:lineno:content` for matches, `path-lineno-content` "
+                "for context lines."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "context": {"type": "integer"},
+                    "max_results": {"type": "integer"},
+                    "case_insensitive": {"type": "boolean"},
+                },
+                "required": ["pattern"],
+            },
+        ),
+        types.Tool(
+            name="list_source",
+            description="Tree-style directory listing relative to the primary source root.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "depth": {"type": "integer"},
+                    "glob": {"type": "string"},
+                    "dirs_only": {"type": "boolean"},
+                },
+            },
+        ),
+    ]
+
+
+def _framework_github_tools() -> list:
+    from mcp import types
+
+    return [
+        types.Tool(
+            name="github_issues",
+            description=(
+                "Fetch / search / list GitHub issues, PRs, and discussions. "
+                "Drill-down with `element_id` after a fetch (cb_N for code blocks, "
+                "comment_N for review comments, patch_N for diffs)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "number": {"type": "integer"},
+                    "repo_name": {"type": "string"},
+                    "query": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["issue", "pr", "discussion", "all"]},
+                    "state": {"type": "string", "enum": ["open", "closed", "all"]},
+                    "sort": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "labels": {"type": "string"},
+                    "element_id": {"type": "string"},
+                    "lines": {"type": "string"},
+                    "grep": {"type": "string"},
+                    "context": {"type": "integer"},
+                    "refresh": {"type": "boolean"},
+                },
+            },
+        ),
+        types.Tool(
+            name="github_api",
+            description=(
+                "Generic GitHub REST GET. Relative paths auto-prefix with "
+                "`/repos/<repo>/`; absolute paths pass through. Returns pretty-"
+                "printed JSON, truncated at `truncate_at` chars (default 80k)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "repo_name": {"type": "string"},
+                    "truncate_at": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+        ),
+    ]
+
+
+def _call_github_issues(github_issues: Any, args: dict[str, Any]) -> str:
+    """Route a github_issues call between FETCH (number given) and
+    SEARCH/LIST (no number) via the wrapped Rust ElementCache."""
+    number = args.get("number")
+    if number is not None:
+        return github_issues.fetch(
+            args.get("repo_name") or "",
+            int(number),
+            element_id=args.get("element_id"),
+            lines=args.get("lines"),
+            grep=args.get("grep"),
+            context=args.get("context", 3),
+            refresh=args.get("refresh", False),
+        )
+    return github_issues.search_or_list(
+        repo=args.get("repo_name"),
+        query=args.get("query"),
+        kind=args.get("kind", "all"),
+        state=args.get("state", "open"),
+        sort=args.get("sort"),
+        limit=args.get("limit", 20),
+        labels=args.get("labels"),
+    )
+
+
+def _framework_repo_management_tool() -> Any:
+    from mcp import types
+
+    return types.Tool(
+        name="repo_management",
+        description=(
+            "Activate (or update / delete) a cloned GitHub repo in the "
+            "workspace. With `name='org/repo'`: clone if missing, build "
+            "code-tree, set as active. With `update=true`: refresh active "
+            "clone. With `delete=true`: remove clone + inventory entry. "
+            "With no args: list known repos."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "delete": {"type": "boolean"},
+                "update": {"type": "boolean"},
+                "force_rebuild": {"type": "boolean"},
+            },
+        },
+    )
+
+
+def _framework_set_root_dir_tool() -> Any:
+    from mcp import types
+
+    return types.Tool(
+        name="set_root_dir",
+        description=(
+            "Swap the active source root (local-workspace mode only). "
+            "Canonicalises the path, rebinds the source tools, and "
+            "triggers a code-tree rebuild for the new root."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+    )
+
+
+def _active_repo_for_github(workspace: Any) -> str:
+    """Return the active repo (`org/repo`) for github_api when not
+    explicitly passed. Falls back to empty string — the Rust function
+    handles the empty case with a clear error."""
+    if workspace is None:
+        return ""
+    name = getattr(workspace, "active_repo_name", lambda: None)()
+    return name or ""
 
 
 if __name__ == "__main__":

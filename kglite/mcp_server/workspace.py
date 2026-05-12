@@ -98,6 +98,68 @@ class Workspace:
         if result.returncode != 0:
             raise RuntimeError(f"command {cmd[:2]!r} failed: {result.stderr.strip()}")
 
+    def repo_management_tool(self, args: dict[str, Any]) -> str:
+        """Dispatch `repo_management` MCP tool args to clone/list/update/delete.
+        Returns the user-facing string body."""
+        delete = bool(args.get("delete"))
+        update = bool(args.get("update"))
+        name = args.get("name")
+
+        if not name and not update and not delete:
+            # List mode
+            repos = self.list_repos()
+            if not repos:
+                return f"Workspace at {self.root} has no repos cloned yet."
+            lines = [f"Workspace: {self.root}"]
+            for r in repos:
+                rel = r.relative_to(self.root)
+                lines.append(f"  - {rel}")
+            return "\n".join(lines)
+
+        if delete and name:
+            try:
+                self.delete(name)
+                return f"Deleted {name}."
+            except Exception as e:
+                return f"Error deleting {name!r}: {e}"
+
+        if update:
+            # Refresh active or named repo
+            target = name or "current active repo"
+            try:
+                if name:
+                    self.activate(name)
+                return f"Updated {target}."
+            except Exception as e:
+                return f"Error updating {target!r}: {e}"
+
+        if name:
+            try:
+                path = self.activate(name)
+                return f"Activated {name} at {path}."
+            except Exception as e:
+                return f"Error activating {name!r}: {e}"
+
+        return "Error: invalid repo_management arguments."
+
+    def set_root_dir_tool(self, path: str) -> str:
+        """Dispatch `set_root_dir` MCP tool. Local-workspace only."""
+        if self.kind != "local":
+            return "Error: set_root_dir requires local-workspace mode."
+        if not path:
+            return "Error: set_root_dir requires a `path` argument."
+        try:
+            resolved = (self.root / path).resolve()
+            resolved.relative_to(self.root.resolve())
+            if not resolved.is_dir():
+                return f"Error: {resolved} is not a directory."
+            self.root = resolved  # mutate in place — the MCP server holds the same instance
+            return f"Active root set to {resolved}."
+        except ValueError:
+            return f"Error: path {path!r} escapes the workspace root."
+        except Exception as e:
+            return f"Error: {e}"
+
 
 def repo_management_tool_schema() -> dict[str, Any]:
     """JSON-Schema for the workspace `repo_management` tool."""
