@@ -95,8 +95,16 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest pytest-cov pandas hypothesis
 
-      - name: Build and install extension
-        run: pip install -e .
+      - name: Build and install extension (with [mcp] extras)
+        # 0.9.21+: install the [mcp] extras so the Python MCP server
+        # integration tests in tests/test_mcp_server_python_entry.py
+        # can run. Without these (mcp, pyyaml, aiohttp, fastembed,
+        # watchdog), the server's _check_extras gate fires at boot
+        # and the test suite times out trying to talk to a server
+        # that exited immediately. The tests do also importorskip
+        # gracefully, but installing the extras lets CI exercise the
+        # real tool-surface baseline gate.
+        run: pip install -e .[mcp]
 
       - name: Run Python tests
         run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml

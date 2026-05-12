@@ -33,6 +33,17 @@ from typing import Any
 
 import pytest
 
+# The MCP server entry point depends on the `[mcp]` extras (mcp,
+# pyyaml, aiohttp, fastembed, watchdog, huggingface_hub via fastembed).
+# Skip cleanly when any of them is missing — CI installs `pip install
+# -e .[mcp]` so they should be present there; local dev may not have
+# them.
+pytest.importorskip("mcp")
+pytest.importorskip("yaml")
+pytest.importorskip("aiohttp")
+pytest.importorskip("fastembed")
+pytest.importorskip("watchdog")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 BASELINE = json.loads((FIXTURES / "tool_baseline.json").read_text())
@@ -261,8 +272,11 @@ def test_list_source(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
+@pytest.mark.model_download
 def test_bge_m3_embedder_loads() -> None:
+    pytest.importorskip("huggingface_hub")
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("tokenizers")
     """The 0.9.20 regression: fastembed-python doesn't have bge-m3.
     Asserting that our 0.9.21 BgeM3Embedder DOES load BAAI/bge-m3 and
     returns 1024-dim vectors. This is the parity check that was 'pending
@@ -281,8 +295,11 @@ def test_bge_m3_embedder_loads() -> None:
     assert vecs[0] != vecs[1]
 
 
-@pytest.mark.slow
+@pytest.mark.model_download
 def test_bge_m3_cosine_sanity() -> None:
+    pytest.importorskip("huggingface_hub")
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("tokenizers")
     """Semantically related strings should score higher than unrelated
     ones. Loose threshold — just a sanity check that the model is
     producing meaningful embeddings (not zeros or random)."""

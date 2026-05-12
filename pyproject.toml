@@ -102,8 +102,9 @@ markers = [
     "parity: cross-storage-mode oracle tests (memory vs mapped vs disk)",
     "stress: opt-in stress tests (30GB mapped, 10k-hop) — select with '-m stress'",
     "differential: cypher optimizer differential tests (optimized vs. naive)",
+    "model_download: tests that fetch multi-GB ML model weights (bge-m3 etc.). Opt-in via '-m model_download'.",
 ]
-addopts = "-m 'not benchmark and not parity and not stress'"
+addopts = "-m 'not benchmark and not parity and not stress and not model_download'"
 
 [tool.mypy]
 ignore_missing_imports = true
