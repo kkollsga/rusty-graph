@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kglite.readthedocs.io/schemas/extensions/csv_http_server.json",
+  "title": "extensions.csv_http_server",
+  "description": "Configuration for the localhost HTTP listener that serves FORMAT CSV exports. Accepts boolean shorthand or an explicit mapping. Loopback-only (127.0.0.1).",
+  "oneOf": [
+    {
+      "type": "boolean",
+      "description": "Shorthand. true = enable with defaults (port 8765, dir temp/). false = disabled (same as absent)."
+    },
+    {
+      "type": "object",
+      "description": "Explicit configuration mapping.",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 8765,
+          "description": "TCP port for the loopback listener. 0 lets the OS choose."
+        },
+        "dir": {
+          "type": "string",
+          "default": "temp",
+          "description": "Directory CSV files are written to. Relative paths resolve against the manifest's parent directory."
+        },
+        "cors_origin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": "*",
+          "description": "Sent in the Access-Control-Allow-Origin response header."
+        }
+      }
+    },
+    {
+      "type": "null"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kglite.readthedocs.io/schemas/extensions/embedder.json",
+  "title": "extensions.embedder",
+  "description": "Embedder configuration. Registers an embedder against the active graph so text_score() works inside Cypher. The model string routes internally to either the fastembed-python catalog or the direct-ONNX bge-m3 backend.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "backend",
+    "model"
+  ],
+  "properties": {
+    "backend": {
+      "type": "string",
+      "enum": [
+        "fastembed"
+      ],
+      "description": "Embedder backend. Currently only 'fastembed' is supported."
+    },
+    "model": {
+      "type": "string",
+      "enum": [
+        "BAAI/bge-m3",
+        "BAAI/bge-small-en-v1.5",
+        "bge-small-en-v1.5",
+        "BAAI/bge-base-en-v1.5",
+        "bge-base-en-v1.5",
+        "BAAI/bge-large-en-v1.5",
+        "bge-large-en-v1.5",
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "all-MiniLM-L6-v2",
+        "intfloat/multilingual-e5-large",
+        "multilingual-e5-large",
+        "intfloat/multilingual-e5-base",
+        "multilingual-e5-base"
+      ],
+      "description": "Model identifier. 'BAAI/bge-m3' routes through a direct-ONNX backend; the rest route through fastembed-python's catalog."
+    },
+    "cooldown": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 900,
+      "description": "Seconds of inactivity after which the embedder releases its ONNX session. 0 disables the release (model stays resident forever). bge-m3 only: other models ignore this field."
+    }
+  }
+}

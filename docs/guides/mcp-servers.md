@@ -518,6 +518,24 @@ keys validated below are first-class — they have parser-level
 validation, default values, and contracts. Anything else under
 `extensions.*` is opaque passthrough.
 
+Machine-readable JSON Schema (Draft 2020-12) for each first-class
+block lives under [`docs/schemas/extensions/`][schemas-dir] in the
+repo:
+
+- [`csv_http_server.json`][schema-csv]
+- [`embedder.json`][schema-embedder]
+- [`cypher_preprocessor.json`][schema-preprocessor]
+
+The schemas are anchored to the Python parsers by the regression
+test `tests/test_extensions_schemas.py` — any drift between
+"what the parser accepts" and "what the schema accepts" surfaces
+as a test failure on the next CI run.
+
+[schemas-dir]: https://github.com/kkollsga/kglite/tree/main/docs/schemas/extensions
+[schema-csv]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/csv_http_server.json
+[schema-embedder]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/embedder.json
+[schema-preprocessor]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/cypher_preprocessor.json
+
 #### `extensions.embedder`
 
 Registers an embedder so `text_score()` works inside Cypher.
