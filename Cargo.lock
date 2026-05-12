@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.9.24"
+version = "0.9.25"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1882,8 +1882,8 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.28"
-source = "git+https://github.com/kkollsga/mcp-methods.git?rev=1ba9469adbfcacece11bcd5353c642b94088eb04#1ba9469adbfcacece11bcd5353c642b94088eb04"
+version = "0.3.29"
+source = "git+https://github.com/kkollsga/mcp-methods.git?rev=71f7ba66de39f54b5efe7813611bc9d33f1d37d2#71f7ba66de39f54b5efe7813611bc9d33f1d37d2"
 dependencies = [
  "anyhow",
  "clap",

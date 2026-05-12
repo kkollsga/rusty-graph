@@ -1330,3 +1330,79 @@ def test_o7_cypher_preprocessor_loads_free_function(tmp_path: Path) -> None:
     assert pre is not None
     new_q, _ = pre.rewrite("MATCH (N) RETURN N", None)
     assert new_q == "match (n) return n"
+
+
+def test_o8_cypher_preprocessor_full_yaml_roundtrip_via_mcp_stdio(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Full boot path: YAML manifest with `trust.allow_query_preprocessor:
+    true` + `extensions.cypher_preprocessor:` + a real preprocessor
+    module → mcp-methods parser → kglite Manifest → server boot →
+    cypher_query reaches graph.cypher with the rewritten string.
+
+    Requires mcp-methods 0.3.29+ (the trust key has to parse cleanly).
+    Catches end-to-end wiring regressions across the YAML → Rust →
+    Python → tool-dispatch boundary."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+
+    # Rewriter substitutes 'Person' → 'Item' so the query targets
+    # nothing — we use the no-results signal to confirm the rewrite
+    # actually reached the engine.
+    (tmp_path / "rewrites.py").write_text(
+        "def rewrite(query, params):\n    return query.replace('Person', 'NONEXISTENT_TYPE'), params\n"
+    )
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text(
+        "name: preprocessed\n"
+        "trust:\n"
+        "  allow_query_preprocessor: true\n"
+        "extensions:\n"
+        "  cypher_preprocessor:\n"
+        "    module: ./rewrites.py\n"
+        "    function: rewrite\n"
+    )
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        # The tiny graph has Person nodes. Without the preprocessor
+        # this query would return rows; with the rewrite it sees
+        # NONEXISTENT_TYPE and returns "No results."
+        body = client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.name LIMIT 3"})
+    finally:
+        client.close()
+    assert "No results" in body, f"preprocessor rewrite didn't reach engine — got: {body!r}"
+
+
+def test_o9_trust_gate_blocks_boot_when_yaml_missing_allow_query_preprocessor(
+    tmp_path: Path, tiny_graph_path: Path
+) -> None:
+    """If extensions.cypher_preprocessor is declared without the trust
+    flag, the server exits 3 at boot with the operator-facing
+    message. Mirrors the existing trust.allow_embedder gate.
+
+    Requires mcp-methods 0.3.29+ (the trust key has to parse cleanly
+    when present; this test omits it, so the framework's strict-key
+    check would fire on a stale pin and shadow our gate. Pinning
+    0.3.29+ keeps the assertion targeting the right code path)."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    (tmp_path / "rewrites.py").write_text("def rewrite(q, p):\n    return q, p\n")
+    # Omits `trust.allow_query_preprocessor: true` deliberately.
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text(
+        "name: ungated\nextensions:\n  cypher_preprocessor:\n    module: ./rewrites.py\n    function: rewrite\n"
+    )
+
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run(
+        [server, "--graph", str(target), "--mcp-config", str(manifest)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0, (
+        f"server should have exited non-zero without trust gate; stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    combined = (result.stdout + result.stderr).lower()
+    assert "trust.allow_query_preprocessor" in combined, f"missing gate-message in stderr: {result.stderr!r}"

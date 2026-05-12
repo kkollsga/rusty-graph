@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.25] — 2026-05-12
+
+Doc + feature release driven entirely by the mcp-servers operator's
+end-of-arc audit (`inbox/read/2026-05-12-from-mcp-servers-end-of-arc-audit.md`).
+The operator flagged that 0.9.24 was "genuinely solid" but they'd
+hesitate to recommend `kglite-mcp-server` to a third party because
+the docs left them inbox-thread-dependent for edge cases. 0.9.25
+addresses every gap in the audit (eight reference doc sections + four
+worked examples + machine-readable JSON schemas) and ships the one
+feature that retires their last custom Python MCP server
+(`extensions.cypher_preprocessor`).
+
+### Added
+
+- **`extensions.cypher_preprocessor`** — manifest-declarable Python
+  hook that fires before every `cypher_query` and `tools[].cypher`
+  invocation. The hook can rewrite the query string and/or params
+  before they reach `graph.cypher(...)`. Gated by
+  `trust.allow_query_preprocessor: true`. The motivating use case
+  is Wikidata Q-number rewriting (`{nid: 'Q42'}` →
+  `{id: 42}` against the integer-id graph), but the hook generalises
+  to date normalisation, multi-tenant scoping, parameter validation,
+  and any "rewrite agent input before query execution" shape that
+  pure-declarative regex can't express. Class-based loaders thread
+  `kwargs:` through to `__init__`; free-function loaders work for
+  state-free rewriters. Boot-time errors (trust gate, missing module,
+  missing class/function) exit 3 with the operator-facing message;
+  runtime exceptions surface as `preprocessor: <message>` in the
+  tool body without leaking a traceback. ~50 LOC implementation in
+  `kglite/mcp_server/preprocessor.py`; 9 regression tests
+  (`test_o1`-`test_o9` in `tests/test_mcp_server_python_entry.py`)
+  cover the full contract from in-process unit dispatch to
+  end-to-end YAML round-trip through MCP stdio.
+- **Eight reference doc sections in `docs/guides/mcp-servers.md`** —
+  fills every gap the operator's end-of-arc audit called out:
+  mode × YAML-field acceptance matrix; tool gating rules; tool
+  response formats (with stability tags so the 0.9.21 row-formatter
+  regression class can't recur silently); `extensions:` schema
+  reference; `tools[].cypher` template reference ($param semantics,
+  JSON Schema flavour, error envelope, FORMAT CSV inheritance);
+  embedder backend × model catalog; path resolution + manifest
+  discovery rules; operator notes (pip-index lag workaround,
+  conda guidance, watch-mode rebuild costs).
+- **Four worked manifest examples under `docs/examples/`** —
+  `manifest_cypher_tool.md`, `manifest_with_embedder.md`,
+  `manifest_workspace.md`, `manifest_cypher_preprocessor.md`. Wired
+  into the docs guide via a toctree.
+- **Machine-readable JSON Schema (Draft 2020-12)** for each
+  first-class `extensions.*` block under `docs/schemas/extensions/`.
+  Linked from the reference docs. Anchored to the Python parsers
+  by `tests/test_extensions_schemas.py` (44 tests) — schema/parser
+  drift fails loudly in CI.
+- **`Manifest.trust` dataclass field** — `allow_python_tools`,
+  `allow_embedder`, `allow_query_preprocessor` populated from
+  `mcp_methods::server::Manifest::to_json()` output. Available to
+  the rest of `kglite/mcp_server/` (and to tests).
+
+### Changed
+
+- **mcp-methods pin: 0.3.28 → 0.3.29** (rev `1ba9469` → `71f7ba6`).
+  Adds `allow_query_preprocessor` to `ALLOWED_TRUST_KEYS` and
+  `TrustConfig`, plus emits it under the `trust` object in
+  `Manifest::to_json()`. Non-breaking JSON shape addition.
+- **`kglite.mcp_server.tools.run_cypher` signature** — adds an
+  optional `preprocessor: Preprocessor | None = None` parameter.
+  Existing callers (every prior release plus all current internal
+  call sites) work unchanged via the default. Same for
+  `kglite.mcp_server.cypher_tools.call_cypher_tool`.
+
+### Internal
+
+- Pre-release suite expanded to 39 default-mode tests (was 34):
+  added the 9 new cypher_preprocessor tests (O1-O9) plus 44 schema
+  drift tests in `tests/test_extensions_schemas.py`.
+- W1 watch-callback assertion loosened to accept either the changed
+  file path or the parent directory — macOS FSEvents coalesces
+  depending on rate, and the contract we care about is "the
+  callback receives a `list[str]` within the debounce window," not
+  the path-granularity decision the OS makes.
+
 ## [0.9.24] — 2026-05-12
 
 Architectural cleanup: kglite's MCP server framework is now a thin

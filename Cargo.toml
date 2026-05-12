@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "kglite"
-version = "0.9.24"
+version = "0.9.25"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -75,8 +75,11 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # `Workspace::set_root_dir` clobbering `active_repo_path` (Option A
 # from the kglite bug report: `clone_or_update`'s local branch reads
 # the current state's `active_repo_path` rather than the immutable
-# `workspace_dir`). Pinned here for 0.9.24.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "1ba9469adbfcacece11bcd5353c642b94088eb04", default-features = false, features = ["server"] }
+# `workspace_dir`). 0.3.29 added `trust.allow_query_preprocessor` to
+# ALLOWED_TRUST_KEYS + TrustConfig so the kglite 0.9.25
+# `extensions.cypher_preprocessor` hook can gate on the operator's
+# spec'd YAML shape. Pinned here for 0.9.25.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "71f7ba66de39f54b5efe7813611bc9d33f1d37d2", default-features = false, features = ["server"] }
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies on
