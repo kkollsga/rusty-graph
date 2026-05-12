@@ -71,8 +71,12 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # (manifest parser + tool implementations) without any pyo3 dep —
 # matches what we already do in `crates/kglite-mcp-server`.
 # 0.3.27 added `Manifest::to_json()` — wrapper collapses to one
-# `as_dict` method on the pyo3 side. Pinned here for 0.9.24.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "c01ec2df9f0599ada651455ccb0e0c17e95cc957", default-features = false, features = ["server"] }
+# `as_dict` method on the pyo3 side. 0.3.28 fixed
+# `Workspace::set_root_dir` clobbering `active_repo_path` (Option A
+# from the kglite bug report: `clone_or_update`'s local branch reads
+# the current state's `active_repo_path` rather than the immutable
+# `workspace_dir`). Pinned here for 0.9.24.
+mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "1ba9469adbfcacece11bcd5353c642b94088eb04", default-features = false, features = ["server"] }
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies on

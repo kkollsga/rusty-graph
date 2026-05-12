@@ -277,41 +277,40 @@ def _load_manifest(args: argparse.Namespace, mode: dict[str, Any]) -> Any:
 
 def _load_env(manifest: Any, mode: dict[str, Any]) -> None:
     """Load `.env` from the manifest's `env_file:` or a walk-up
-    discovery rooted at the mode's directory. Mirrors the Rust
-    framework's `load_env_for_mode` semantics."""
-    env_path: Path | None = None
+    discovery rooted at the mode's directory.
+
+    0.9.24: the walk-up case delegates to mcp-methods Rust
+    (`kglite._mcp_internal.load_env_walk`) which mirrors the
+    framework's `load_env_for_mode` semantics — same quoting rules,
+    same no-overwrite-existing-env behaviour, same comment/blank-line
+    handling. Explicit `env_file:` paths are still loaded inline
+    (small enough that we don't need to round-trip through Rust)."""
+    from kglite import _mcp_internal
+
     if manifest and manifest.env_file:
         env_path = manifest.env_file
-    else:
-        start = mode["path"] if mode["path"] else Path.cwd()
-        if start.is_file():
-            start = start.parent
-        # Walk up looking for .env, but not above $HOME.
-        current = start.resolve()
-        home = Path.home().resolve()
-        while True:
-            candidate = current / ".env"
-            if candidate.is_file():
-                env_path = candidate
-                break
-            if current == home or current.parent == current:
-                break
-            current = current.parent
+        if not env_path.is_file():
+            return
+        # Minimal .env loader (don't pull python-dotenv as a hard dep).
+        import os
 
-    if env_path is None or not env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            os.environ.setdefault(k, v)
+        log.info("loaded env file: %s", env_path)
         return
-    # Minimal .env loader (don't pull python-dotenv as a hard dep).
-    import os
 
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k = k.strip()
-        v = v.strip().strip('"').strip("'")
-        os.environ.setdefault(k, v)
-    log.info("loaded env file: %s", env_path)
+    start = mode["path"] if mode["path"] else Path.cwd()
+    if start.is_file():
+        start = start.parent
+    loaded = _mcp_internal.load_env_walk(str(start.resolve()))
+    if loaded:
+        log.info("loaded env file: %s", loaded)
 
 
 def _fallback_name(kind: str) -> str:

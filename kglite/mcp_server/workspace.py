@@ -1,181 +1,141 @@
-"""Workspace mode: clone GitHub repos and build their code-tree graphs.
+"""Workspace mode — thin wrapper around mcp-methods Rust.
 
-Mirrors `crates/kglite-mcp-server/src/main.rs`'s workspace path which
-in turn called into the mcp-methods Rust crate's `workspace` module.
-The framework's surface there exposed `Workspace::open(canon, stale_after_days, hook)`
-plus a `set_root_dir` tool that swaps the active repo at runtime.
+0.9.24: replaced the pure-Python git-subprocess + path-validation
+implementation with `kglite._mcp_internal.Workspace` (mcp-methods
+0.3.28). Rust handles:
+- Repo cloning + stale sweeping + inventory persistence.
+- Atomic active-root swaps via RwLock (no sandbox-narrowing bug —
+  the configured root is immutable for the lifetime of the Workspace,
+  and `clone_or_update`'s local branch reads the current bound root
+  rather than the immutable configured root, so post-activate hooks
+  fire against the target of the most recent `set_root_dir`).
+- `last_built_sha` gating for post-activate hook reruns.
 
-This Python implementation keeps the same operator surface:
-- `--workspace DIR` clones `org/repo` into `DIR/org/repo/` via shallow
-  `git clone --depth 1`.
-- A `set_root_dir` MCP tool re-points the active graph to a different
-  clone in the workspace, building the code-tree on activate.
-- `manifest.workspace.kind: local` + `root: ./repos` skips the clone
-  and uses a fixed local directory.
+Sandbox check: the Python wrapper still enforces "target must be under
+the configured workspace root" on `set_root_dir_tool`, but uses
+`workspace_dir()` (set at construction, never narrowed) as the
+boundary — the pre-0.9.24 bug came from using the mutable active
+root as the boundary.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 from pathlib import Path
-import subprocess
-import time
-from typing import Any
+from typing import Any, Callable
+
+from kglite import _mcp_internal
 
 log = logging.getLogger("kglite.mcp_server.workspace")
 
 
-@dataclass
 class Workspace:
-    root: Path
-    stale_after_days: int = 7
-    kind: str = "remote"  # "remote" or "local"
-    # 0.9.23: track the active repo so `github_issues` (and any other
-    # tool that wants to default to the current workspace target)
-    # can resolve `repo_name` without the agent having to repeat it
-    # on every call. Set by `activate()`; cleared by `delete()` of the
-    # active repo.
-    active_repo: str | None = None
+    """Workspace handle — github clone-tracker OR local-directory bind.
+
+    Preserves the pre-0.9.24 surface: `root` property, `kind`
+    attribute, `active_repo_name()`, `repo_management_tool(args)`,
+    `set_root_dir_tool(path)`. server.py and the test suite see the
+    same shape; the implementation is now ~150 LOC of Python deleted
+    in favour of the validated Rust path.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        kind: str = "remote",
+        stale_after_days: int = 7,
+    ) -> None:
+        # Preserve the original label vocabulary ("remote" / "local")
+        # for the rest of the Python codebase even though mcp-methods
+        # spells github mode as "github".
+        self._kind_label = "local" if kind == "local" else "remote"
+        if kind == "local":
+            self._inner = _mcp_internal.Workspace.open_local(str(root))
+        else:
+            self._inner = _mcp_internal.Workspace.open(str(root), stale_after_days)
+        # Cache the configured workspace dir at construction so the
+        # sandbox check on `set_root_dir_tool` always validates against
+        # the immutable boundary, not the (mutable) active root.
+        self._configured_root = Path(self._inner.workspace_dir()).resolve()
+
+    def set_post_activate(self, callback: Callable[[str, str], None]) -> None:
+        """Register a `(repo_path, repo_name) -> None` callback fired
+        after each successful activate / set_root_dir. One-shot per
+        Workspace instance — calling twice raises."""
+        self._inner.set_post_activate(callback)
+
+    @property
+    def kind(self) -> str:
+        """'local' or 'remote'. Matches the pre-0.9.24 label set."""
+        return self._kind_label
+
+    @property
+    def root(self) -> Path:
+        """Active source root. Reflects the most recent successful
+        `set_root_dir` / `activate` via mcp-methods' atomic RwLock —
+        reads through to `active_repo_path()` directly."""
+        active = self._inner.active_repo_path()
+        if active:
+            return Path(active)
+        return self._configured_root
 
     def active_repo_name(self) -> str | None:
-        """Return the active repo as 'org/repo' (remote mode) or the
-        active subpath (local mode), or None when nothing is active.
-        Used by the MCP server's github_issues/github_api default-repo
-        resolution."""
-        return self.active_repo
-
-    def list_repos(self) -> list[Path]:
-        """Return paths to all cloned repos under `root`."""
-        if not self.root.is_dir():
-            return []
-        out: list[Path] = []
-        for org in self.root.iterdir():
-            if not org.is_dir():
-                continue
-            for repo in org.iterdir():
-                if repo.is_dir() and (repo / ".git").exists():
-                    out.append(repo)
-        return out
-
-    def activate(self, repo: str) -> Path:
-        """Clone `org/repo` if not present (or stale), then return the
-        local path. Updates `self.active_repo` so subsequent tool
-        calls (github_issues, github_api) can default to it."""
-        if self.kind == "local":
-            # Local workspace: repo is a relative path under root.
-            target = (self.root / repo).resolve()
-            try:
-                target.relative_to(self.root.resolve())
-            except ValueError:
-                raise ValueError(f"local workspace: {repo!r} escapes the root")
-            if not target.is_dir():
-                raise FileNotFoundError(f"local workspace: {target} not found")
-            self.active_repo = repo
-            return target
-
-        # Remote workspace: clone via git.
-        if "/" not in repo or repo.count("/") != 1:
-            raise ValueError(f"repo must be in 'org/repo' format, got: {repo!r}")
-        org, name = repo.split("/", 1)
-        target = self.root / org / name
-
-        if target.is_dir() and (target / ".git").is_dir():
-            # Stale check: if older than threshold, do `git fetch`.
-            mtime = max((target / ".git").stat().st_mtime, target.stat().st_mtime)
-            if time.time() - mtime > self.stale_after_days * 86400:
-                log.info("refreshing stale clone: %s", target)
-                self._run(["git", "fetch", "--depth", "1"], cwd=target)
-            self.active_repo = repo
-            return target
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-        url = f"https://github.com/{repo}.git"
-        log.info("cloning %s ...", url)
-        self._run(["git", "clone", "--depth", "1", url, str(target)])
-        self.active_repo = repo
-        return target
-
-    def delete(self, repo: str) -> None:
-        if self.kind == "local":
-            raise ValueError("delete not supported in local workspace mode")
-        if "/" not in repo:
-            raise ValueError(f"repo must be in 'org/repo' format, got: {repo!r}")
-        org, name = repo.split("/", 1)
-        target = self.root / org / name
-        if target.is_dir():
-            import shutil
-
-            shutil.rmtree(target)
-            log.info("deleted clone %s", target)
-
-    @staticmethod
-    def _run(cmd: list[str], cwd: Path | None = None) -> None:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"command {cmd[:2]!r} failed: {result.stderr.strip()}")
+        """Active repo as 'org/repo' (remote mode) or
+        'local/<basename>' (local mode), or None when nothing is
+        active. Consumed by github_issues / github_api for default-
+        repo resolution."""
+        return self._inner.active_repo_name()
 
     def repo_management_tool(self, args: dict[str, Any]) -> str:
-        """Dispatch `repo_management` MCP tool args to clone/list/update/delete.
-        Returns the user-facing string body."""
-        delete = bool(args.get("delete"))
-        update = bool(args.get("update"))
-        name = args.get("name")
-
-        if not name and not update and not delete:
-            # List mode
-            repos = self.list_repos()
-            if not repos:
-                return f"Workspace at {self.root} has no repos cloned yet."
-            lines = [f"Workspace: {self.root}"]
-            for r in repos:
-                rel = r.relative_to(self.root)
-                lines.append(f"  - {rel}")
-            return "\n".join(lines)
-
-        if delete and name:
-            try:
-                self.delete(name)
-                return f"Deleted {name}."
-            except Exception as e:
-                return f"Error deleting {name!r}: {e}"
-
-        if update:
-            # Refresh active or named repo
-            target = name or "current active repo"
-            try:
-                if name:
-                    self.activate(name)
-                return f"Updated {target}."
-            except Exception as e:
-                return f"Error updating {target!r}: {e}"
-
-        if name:
-            try:
-                path = self.activate(name)
-                return f"Activated {name} at {path}."
-            except Exception as e:
-                return f"Error activating {name!r}: {e}"
-
-        return "Error: invalid repo_management arguments."
+        """Dispatch the `repo_management` MCP tool. The Rust side
+        formats the user-facing body string."""
+        return self._inner.repo_management(
+            name=args.get("name"),
+            delete=bool(args.get("delete")),
+            update=bool(args.get("update")),
+            force_rebuild=bool(args.get("force_rebuild")),
+        )
 
     def set_root_dir_tool(self, path: str) -> str:
-        """Dispatch `set_root_dir` MCP tool. Local-workspace only."""
+        """Dispatch the `set_root_dir` MCP tool (local-workspace only).
+
+        Sandbox check: the resolved target must be a descendant of
+        the configured workspace dir (set at __init__, immovable).
+        Without this check mcp-methods would accept any absolute path
+        on the filesystem — convenient but a privilege boundary the
+        operator's manifest declares.
+        """
         if self.kind != "local":
             return "Error: set_root_dir requires local-workspace mode."
         if not path:
             return "Error: set_root_dir requires a `path` argument."
+
+        target = Path(path)
+        if not target.is_absolute():
+            # Resolve relative paths against the CURRENT active root —
+            # matches the pre-0.9.24 path-join semantics so agents can
+            # say `set_root_dir({"path": "subdir"})` after activating
+            # the parent.
+            target = (self.root / target).resolve()
+        else:
+            target = target.resolve()
+
         try:
-            resolved = (self.root / path).resolve()
-            resolved.relative_to(self.root.resolve())
-            if not resolved.is_dir():
-                return f"Error: {resolved} is not a directory."
-            self.root = resolved  # mutate in place — the MCP server holds the same instance
-            return f"Active root set to {resolved}."
+            target.relative_to(self._configured_root)
         except ValueError:
             return f"Error: path {path!r} escapes the workspace root."
-        except Exception as e:
-            return f"Error: {e}"
+
+        result = self._inner.set_root_dir(str(target))
+
+        # mcp-methods returns "Cloned/Updated/Activated 'name' at PATH."
+        # on success. Normalise to the kglite operator-facing wording
+        # ("Active root set to PATH.") so server.py's rebind logic and
+        # the F2 / F4 regression tests stay shape-stable across the
+        # 0.9.24 refactor.
+        body_lower = result.lower()
+        if "failed" in body_lower or body_lower.startswith("error"):
+            return result
+        return f"Active root set to {target}."
 
 
 def repo_management_tool_schema() -> dict[str, Any]:
