@@ -82,11 +82,24 @@ def from_manifest_value(value: Any) -> Any:
     model = value.get("model")
     if not model:
         raise ValueError("extensions.embedder.model is required for the fastembed backend")
+    # `cooldown`: seconds to keep the model resident after the last
+    # embed() call before releasing the session. Default 15 min (the
+    # bge-m3 default). 0 disables cool-down (model stays resident).
+    cooldown_raw = value.get("cooldown")
+    cooldown: int | None = None
+    if cooldown_raw is not None:
+        if not isinstance(cooldown_raw, int) or cooldown_raw < 0:
+            raise ValueError(f"extensions.embedder.cooldown must be a non-negative integer (got {cooldown_raw!r})")
+        cooldown = cooldown_raw
     if model == "BAAI/bge-m3":
         from kglite.mcp_server.bge_m3 import BgeM3Embedder
 
-        adapter: Any = BgeM3Embedder()
-        log.info("registered bge-m3 embedder via direct ONNX (model=%s, dim=1024)", model)
+        adapter: Any = BgeM3Embedder(cooldown_seconds=cooldown)
+        log.info(
+            "registered bge-m3 embedder via direct ONNX (model=%s, dim=1024, cooldown=%ss)",
+            model,
+            cooldown if cooldown is not None else "default-900",
+        )
         return adapter
     adapter = FastEmbedAdapter(model)
     log.info("registered fastembed embedder (model=%s)", model)

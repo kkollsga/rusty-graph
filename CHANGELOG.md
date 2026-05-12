@@ -11,30 +11,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **`extensions.csv_http_server` returned HTTP 500 on every GET.**
-  aiohttp's `web.Response` rejects `content_type` strings that contain
-  a charset directive — we were passing `"text/csv; charset=utf-8"`.
-  Fix: pass `content_type="text/csv"` and `charset="utf-8"` as
-  separate kwargs. Operator workaround was to disable the
-  csv_http_server block; 0.9.23 makes it usable again.
+  aiohttp's `web.Response` rejects `content_type` strings that
+  contain a charset directive — we were passing
+  `"text/csv; charset=utf-8"`. Fix: pass `content_type="text/csv"` and
+  `charset="utf-8"` as separate kwargs. Operator workaround was to
+  disable the csv_http_server block; 0.9.23 makes it usable again.
 - **`github_issues` now auto-defaults to the workspace's active repo
   when `repo_name` isn't supplied.** Previously `repo_management(name)`
   activated the repo correctly but `github_issues` without
   `repo_name` hit the "could not auto-detect from git remote" error
-  path. Workspaces now track `active_repo` and `_call_github_issues`
-  uses it as the fallback. Agents no longer need to repeat
-  `repo_name='org/repo'` on every call.
+  path. Workspaces now track `active_repo` and the github_issues
+  dispatcher uses it as the fallback. Agents no longer need to
+  repeat `repo_name='org/repo'` on every call.
+- **`set_root_dir` now actually rebinds the source tools.** Previously
+  the tool registered, the workspace's `root` field updated, but the
+  `source_roots` list captured at server build time wasn't refreshed
+  — so `list_source` / `grep` / `read_source` kept hitting the old
+  root. Tests/test_f2 was designed to catch exactly this and did.
+- **`BgeM3Embedder.unload()` is now a no-op** (formerly dropped the
+  ONNX session). kglite's `kg_core.rs::cypher` does
+  `load → embed → unload` around every text_score call, so dropping
+  the session meant every cypher paid the full ~1s ORT session init.
+  Warm-call latency drops from ~1.1s to ~50ms; ~2 GB RAM stays
+  resident while the embedder is in use.
 
 ### Added
-- `test_csv_http_response_content_type` — real HTTP round-trip
-  against the csv_http_server, asserts status 200 + correct
-  Content-Type. Would have caught the aiohttp API misuse before
-  release.
-- `test_github_issues_uses_workspace_active_repo` — asserts the
-  Python entry-point's github_issues dispatch propagates the active
-  workspace repo when `repo_name` is empty.
+- **27-test pre-release suite per the operator's spec.** Every test
+  maps to a specific bug from the 0.9.16 → 0.9.22 release arc.
+  Categories: A (install/boot), B (per-mode tool registration),
+  C (tool output content), D (embedder + semantic search), E
+  (manifest/.env), F (workspace state propagation). The
+  tool-output content assertions (Cat C) are the gate that would
+  have caught 0.9.21's row formatter and 0.9.22's csv_http 500
+  before release.
+- **bge-m3 cool-down timer**: configurable via
+  `extensions.embedder.cooldown` (default 900s = 15 min;
+  `0` = never release). Active sessions hold the ONNX session
+  resident for fast queries; long-idle servers release ~2 GB of
+  RAM. Cool-down check fires on each `embed()` call — no background
+  threads.
+- `BgeM3Embedder.release()` — explicit counterpart to the no-op
+  `unload()`. Drops the ORT session + tokenizer when the caller
+  really wants the memory back.
+- `tests/fixtures/build_tiny_graph.py` — programmatic 50-node-per-
+  type fixture (Person + Company + Article) with semantically
+  clustered article bodies (quantum / baking / programming) for
+  embedder relevance tests.
 
-Both tests follow the principle established in 0.9.22: every
-tool/handler gets a content assertion, not just a registration check.
+### Changed
+- **`extensions.embedder` YAML now accepts `cooldown:`** (seconds).
+  Falls through to the BgeM3Embedder for `BAAI/bge-m3`; FastEmbed
+  adapter ignores the field for other models (their lifecycle
+  follows fastembed-python's defaults).
 
 ## [0.9.22] — 2026-05-12
 

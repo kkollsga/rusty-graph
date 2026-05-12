@@ -28,6 +28,7 @@ if str(_TESTS_DIR) not in sys.path:
 
 from golden.build_golden_graph import build_golden_graph  # noqa: E402
 from golden.queries import CYPHER_QUERIES, FIND_QUERIES  # noqa: E402
+
 from kglite import KnowledgeGraph  # noqa: E402
 
 SNAPSHOTS_DIR = pathlib.Path(__file__).resolve().parent / "snapshots"

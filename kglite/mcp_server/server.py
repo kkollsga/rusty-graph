@@ -377,6 +377,12 @@ def _build_server(
         source_roots = [mode["path"].resolve().parent]
     elif mode["kind"] == "source_root" and mode["path"]:
         source_roots = [mode["path"].resolve()]
+    elif mode["kind"] == "local_workspace" and mode["path"] and not source_roots:
+        # 0.9.23: local-workspace mode binds the workspace root as the
+        # source root by default (set_root_dir rebinds it at runtime).
+        # Without this the fallback below picked manifest.base_dir which
+        # is the YAML's parent — usually NOT what the operator wanted.
+        source_roots = [mode["path"].resolve()]
     elif manifest is not None and not source_roots:
         # Fallback: any manifest-driven boot without an explicit
         # source_root binds the manifest's directory. Matches the
@@ -390,8 +396,14 @@ def _build_server(
     manifest_cypher_tools = manifest.tools if manifest else []
     cypher_tool_lookup = {t.name: t for t in manifest_cypher_tools}
 
-    # source roots as strings — what mcp-methods expects.
-    source_roots_str = [str(p) for p in source_roots]
+    # 0.9.23: source roots must be re-read on each tool call so
+    # `set_root_dir` can rebind them at runtime. Mutate `source_roots`
+    # in place from the handler; expose a lambda for the source tools
+    # to fetch the live list. Previously this was captured once at
+    # build time and set_root_dir didn't actually change anything the
+    # source tools could see (the regression Cat F2 catches).
+    def _live_source_roots() -> list[str]:
+        return [str(p) for p in source_roots]
 
     # GithubIssues holds an ElementCache for drill-down across calls.
     # Constructed once per process; lives for the server's lifetime.
@@ -483,7 +495,7 @@ def _build_server(
                 },
             )
         )
-        if source_roots_str:
+        if _live_source_roots():
             tools.extend(_framework_source_tools())
         if github_issues is not None:
             tools.extend(_framework_github_tools())
@@ -518,7 +530,7 @@ def _build_server(
         elif name == "read_source":
             body = mcp_internal.read_source(
                 args["file_path"],
-                source_roots_str,
+                _live_source_roots(),
                 start_line=args.get("start_line"),
                 end_line=args.get("end_line"),
                 grep=args.get("grep"),
@@ -529,7 +541,7 @@ def _build_server(
         elif name == "grep":
             body = mcp_internal.grep(
                 args["pattern"],
-                source_roots_str,
+                _live_source_roots(),
                 glob=args.get("glob"),
                 context=args.get("context", 0),
                 max_results=args.get("max_results"),
@@ -537,7 +549,7 @@ def _build_server(
             )
         elif name == "list_source":
             body = mcp_internal.list_source(
-                source_roots_str,
+                _live_source_roots(),
                 path=args.get("path", "."),
                 depth=args.get("depth", 1),
                 glob=args.get("glob"),
@@ -564,6 +576,13 @@ def _build_server(
                 body = "Error: set_root_dir requires local-workspace mode."
             else:
                 body = workspace.set_root_dir_tool(args.get("path", ""))
+                # 0.9.23: rebind source_roots so subsequent source-tool
+                # calls operate on the new root. Without this, the
+                # workspace's `root` field updated but the captured
+                # source_roots list didn't — set_root_dir registered
+                # but didn't actually change anything.
+                if "Active root" in body and workspace.root not in source_roots:
+                    source_roots[:] = [workspace.root]
         # ── manifest-declared cypher tools ───────────────────────────
         elif name in cypher_tool_lookup:
             body = await call_cypher_tool(

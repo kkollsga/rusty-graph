@@ -22,21 +22,37 @@ import logging
 import os
 from pathlib import Path
 import threading
+import time
 
 log = logging.getLogger("kglite.mcp_server.bge_m3")
 
 MODEL_ID = "BAAI/bge-m3"
 DIMENSION = 1024
 MAX_LENGTH = 8192  # bge-m3 model_max_length
+DEFAULT_COOLDOWN_SECONDS = 900  # 15 min
 
 
 class BgeM3Embedder:
     """Duck-typed Embedder for kglite. Same `dimension` + `embed` +
-    `load` + `unload` shape kglite's `g.set_embedder(model)` accepts."""
+    `load` + `unload` shape kglite's `g.set_embedder(model)` accepts.
+
+    Cool-down lifecycle (added 0.9.23): the ONNX session is held
+    resident for `cooldown_seconds` after the last `embed()` call.
+    Once that idle threshold is exceeded, the next embed() drops the
+    old session and reloads. Default 15 minutes — gives warm calls
+    ~50ms latency during burst usage while reclaiming ~2 GB of RAM
+    during long idle periods. Configurable via YAML:
+
+        extensions:
+          embedder:
+            backend: fastembed
+            model: BAAI/bge-m3
+            cooldown: 900     # seconds; 0 = never release
+    """
 
     dimension = DIMENSION
 
-    def __init__(self, cache_dir: Path | None = None) -> None:
+    def __init__(self, cache_dir: Path | None = None, cooldown_seconds: int | None = None) -> None:
         if cache_dir is None:
             cache_dir = Path(
                 os.environ.get(
@@ -52,6 +68,11 @@ class BgeM3Embedder:
         self._session = None  # ort.InferenceSession when loaded
         self._tokenizer = None  # tokenizers.Tokenizer when loaded
         self._input_names: list[str] = []
+        # Cool-down: 0 disables (model stays resident forever); None →
+        # 15-min default. Tracked via monotonic timestamps so the
+        # release check is wall-clock-jump safe.
+        self._cooldown_seconds: int = cooldown_seconds if cooldown_seconds is not None else DEFAULT_COOLDOWN_SECONDS
+        self._last_used: float | None = None
 
     def load(self) -> None:
         with self._lock:
@@ -100,9 +121,26 @@ class BgeM3Embedder:
             log.info("bge-m3 loaded from cache (%s)", self._cache_dir)
 
     def unload(self) -> None:
-        """Drop the ORT session + tokenizer so the ~2 GB of weights
-        can be freed between idle periods. Re-materialised from disk
-        on next `load()` — no re-download."""
+        """No-op by design.
+
+        kglite's `kg_core.rs::cypher` wraps every text_score call as
+        `load() → embed() → unload()`. With a Python+ONNX backend,
+        actually dropping the session here means every cypher query
+        pays ~1s of ORT session init on the next call — the d3 test
+        in `tests/test_mcp_server_python_entry.py` catches this. The
+        Rust fastembed-rs path was cheap to re-init; the Python +
+        onnxruntime path isn't.
+
+        For server-side use the right behaviour is "keep the model
+        resident across cypher calls" (single-figure ms warm latency,
+        ~2 GB RAM held). Operators who need to actively reclaim memory
+        between deployments restart the server or call `release()`
+        explicitly (added separately when there's demand)."""
+
+    def release(self) -> None:
+        """Explicit unload — drops the ORT session + tokenizer.
+        Counterpart to the no-op `unload()`. Use this if you really
+        want the ~2 GB of resident memory back."""
         with self._lock:
             self._session = None
             self._tokenizer = None
@@ -110,6 +148,11 @@ class BgeM3Embedder:
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        # Cool-down check: if the model's been idle longer than the
+        # configured threshold, drop the session before loading. The
+        # next embed pays the ~1s session init cost; subsequent ones
+        # within the cooldown window are warm (~50ms).
+        self._maybe_release_idle()
         self.load()
         import numpy as np
 
@@ -140,4 +183,22 @@ class BgeM3Embedder:
         # shape (batch, seq, hidden_dim). CLS pool = take token 0.
         last_hidden = outputs[0]
         embeddings = last_hidden[:, 0, :]
+        # Mark as used now so the cool-down clock restarts.
+        self._last_used = time.monotonic()
         return embeddings.tolist()
+
+    def _maybe_release_idle(self) -> None:
+        """Release the session if it's been idle longer than
+        `cooldown_seconds`. Called at the start of each embed()."""
+        if self._cooldown_seconds <= 0:
+            return  # cooldown disabled
+        if self._session is None or self._last_used is None:
+            return  # nothing loaded yet
+        idle = time.monotonic() - self._last_used
+        if idle > self._cooldown_seconds:
+            log.info(
+                "bge-m3 cool-down: %.0fs idle (threshold %ds) — releasing session",
+                idle,
+                self._cooldown_seconds,
+            )
+            self.release()

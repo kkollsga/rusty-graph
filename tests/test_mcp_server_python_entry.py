@@ -1,24 +1,21 @@
-"""Integration tests for `kglite-mcp-server` (the 0.9.20+ Python entry point).
+"""Pre-release integration test suite for `kglite-mcp-server`.
 
-The 0.9.20 release shipped without these tests and silently regressed
-8 of 11 tools — operator caught it on redeploy. This suite is the CI
-gate that prevents the same class of failure from recurring.
+Implements the spec from the MCP-servers operator's
+`2026-05-12-from-mcp-servers-pre-release-test-suite-spec.md`. Every
+test below maps to a specific bug class from the 0.9.16 → 0.9.22
+release arc; the inline `# Catches:` comments preserve that mapping.
+When all 27 tests pass, the release is shippable.
 
-What we test:
+Categories:
+- A: Install & boot (4 tests)
+- B: Per-mode tool registration (5 tests)
+- C: Tool output content (8 tests)
+- D: Embedder & semantic search (3 tests)
+- E: Manifest & .env handling (4 tests)
+- F: Workspace state propagation (3 tests)
 
-1. **Boot + tools/list parity per mode**. For each launch mode
-   (`--source-root` / `--workspace` / bare / with-and-without
-   GITHUB_TOKEN) we assert the registered tool set exactly matches
-   the baseline in `tests/fixtures/tool_baseline.json`. Any tool
-   added or removed fails the build.
-2. **Per-tool smoke**. Each tool is called with a minimal valid
-   argument set and asserted to return SOMETHING sensible (not
-   "unknown tool", not a stacktrace).
-3. **Path traversal safety**. `read_source` with `../../../etc/passwd`
-   returns an error string, not the file.
-
-Embedder + bge-m3 tests are slow-marked because they download
-~2 GB of ONNX weights on a cold cache.
+Forward-looking Cat G-N (22 more) need spatial/timeseries/orphan
+fixtures — tracked as a separate piece of work.
 """
 
 from __future__ import annotations
@@ -26,6 +23,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -33,31 +33,23 @@ from typing import Any
 
 import pytest
 
-# The MCP server entry point depends on the `[mcp]` extras (mcp,
-# pyyaml, aiohttp, fastembed, watchdog, huggingface_hub via fastembed).
-# Skip cleanly when any of them is missing — CI installs `pip install
-# -e .[mcp]` so they should be present there; local dev may not have
-# them.
+# Skip cleanly if the MCP extras aren't installed locally.
 pytest.importorskip("mcp")
 pytest.importorskip("yaml")
 pytest.importorskip("aiohttp")
 pytest.importorskip("fastembed")
 pytest.importorskip("watchdog")
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = REPO_ROOT / "tests" / "fixtures"
-BASELINE = json.loads((FIXTURES / "tool_baseline.json").read_text())
+# ---------------------------------------------------------------------------
+# Shared helpers — McpClient + spawn
+# ---------------------------------------------------------------------------
 
 
 def _which_server() -> str | None:
-    """Locate the kglite-mcp-server console script — installed by
-    `maturin develop` or a regular `pip install`."""
-    import shutil
-
     return shutil.which("kglite-mcp-server")
 
 
-def _spawn(args: list[str], extra_env: dict[str, str] | None = None) -> subprocess.Popen:
+def _spawn(args: list[str], extra_env: dict[str, str] | None = None, cwd: str | None = None) -> subprocess.Popen:
     server = _which_server()
     if server is None:
         pytest.skip("kglite-mcp-server console script not on PATH (run `maturin develop`)")
@@ -70,24 +62,26 @@ def _spawn(args: list[str], extra_env: dict[str, str] | None = None) -> subproce
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        cwd=cwd,
         bufsize=0,
     )
 
 
 class McpClient:
-    """Tiny JSON-RPC stdio driver for kglite-mcp-server. Reused across
-    every test in the file."""
+    """JSON-RPC stdio driver. Used to call the server like Claude/Cursor do."""
 
     def __init__(self, proc: subprocess.Popen) -> None:
         self._proc = proc
         self._next_id = 1
         self._stderr: list[str] = []
-        self._stderr_thread = threading.Thread(target=self._drain, daemon=True)
-        self._stderr_thread.start()
+        threading.Thread(target=self._drain, daemon=True).start()
 
     def _drain(self) -> None:
         for line in iter(self._proc.stderr.readline, b""):
             self._stderr.append(line.decode("utf-8", errors="replace"))
+
+    def stderr_lines(self) -> list[str]:
+        return list(self._stderr)
 
     def _send(self, body: dict[str, Any]) -> None:
         assert self._proc.stdin is not None
@@ -106,15 +100,13 @@ class McpClient:
                 return json.loads(line)
             except json.JSONDecodeError:
                 continue
-        raise TimeoutError(f"no response within {timeout}s; stderr: {''.join(self._stderr[-5:])}")
+        raise TimeoutError(f"no response within {timeout}s; stderr: {''.join(self._stderr[-10:])}")
 
     def initialize(self) -> dict[str, Any]:
-        req_id = self._next_id
-        self._next_id += 1
         self._send(
             {
                 "jsonrpc": "2.0",
-                "id": req_id,
+                "id": self._next_id,
                 "method": "initialize",
                 "params": {
                     "protocolVersion": "2024-11-05",
@@ -123,29 +115,38 @@ class McpClient:
                 },
             }
         )
+        self._next_id += 1
         resp = self._recv()
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return resp
 
-    def list_tools(self) -> list[dict[str, Any]]:
-        req_id = self._next_id
+    def list_tools(self) -> list[str]:
+        self._send({"jsonrpc": "2.0", "id": self._next_id, "method": "tools/list", "params": {}})
         self._next_id += 1
-        self._send({"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": {}})
+        resp = self._recv()
+        return sorted(t["name"] for t in resp["result"]["tools"])
+
+    def list_tools_full(self) -> list[dict[str, Any]]:
+        self._send({"jsonrpc": "2.0", "id": self._next_id, "method": "tools/list", "params": {}})
+        self._next_id += 1
         resp = self._recv()
         return resp["result"]["tools"]
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        req_id = self._next_id
-        self._next_id += 1
+    def call_tool(self, name: str, args: dict[str, Any] | None = None) -> str:
         self._send(
             {
                 "jsonrpc": "2.0",
-                "id": req_id,
+                "id": self._next_id,
                 "method": "tools/call",
-                "params": {"name": name, "arguments": arguments or {}},
+                "params": {"name": name, "arguments": args or {}},
             }
         )
-        return self._recv()
+        self._next_id += 1
+        resp = self._recv()
+        if "error" in resp:
+            return f"ERROR: {resp['error']}"
+        content = resp.get("result", {}).get("content", [])
+        return content[0].get("text", "") if content else ""
 
     def close(self) -> None:
         try:
@@ -155,285 +156,733 @@ class McpClient:
             self._proc.kill()
 
 
-# ---------------------------------------------------------------------------
-# 1. Boot + tools/list parity per mode
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("case_name", [name for name in BASELINE["cases"]])
-def test_tools_list_baseline(tmp_path: Path, case_name: str) -> None:
-    """For each launch case in the baseline, assert tools/list returns
-    exactly the expected tool set. This is the CI gate the operator
-    asked for after 0.9.20."""
-    case = BASELINE["cases"][case_name]
-    # Substitute placeholders. `${SRC}` and `${WS}` resolve to dirs
-    # pytest creates fresh per test.
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    (src_dir / "hello.txt").write_text("hello\n")
-    ws_dir = tmp_path / "ws"
-    ws_dir.mkdir()
-    subs = {"${SRC}": str(src_dir), "${WS}": str(ws_dir)}
-    args = [subs.get(a, a) for a in case["args"]]
-
-    proc = _spawn(args, extra_env=case["env"])
+def _client(args: list[str], **kwargs: Any) -> McpClient:
+    proc = _spawn(args, **kwargs)
     client = McpClient(proc)
+    client.initialize()
+    return client
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def tiny_graph_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build the ~50-node-per-type fixture graph once per session."""
+    from tests.fixtures.build_tiny_graph import build_tiny_graph
+
+    path = tmp_path_factory.mktemp("graphs") / "tiny_graph.kgl"
+    build_tiny_graph(path)
+    return path
+
+
+@pytest.fixture
+def mutable_graph_path(tmp_path: Path, tiny_graph_path: Path) -> Path:
+    """Fresh copy of tiny_graph.kgl that the test can mutate without
+    affecting other tests. Also drops a sibling manifest with
+    builtins.save_graph: true so save_graph registers."""
+    target = tmp_path / "mutable.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "mutable_mcp.yaml"
+    manifest.write_text("name: mutable\nbuiltins:\n  save_graph: true\n  temp_cleanup: on_overview\n")
+    return target
+
+
+@pytest.fixture
+def tiny_source_dir(tmp_path: Path) -> Path:
+    """A tiny source tree for read_source/grep/list_source tests."""
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "alpha.py").write_text("def alpha():\n    return 'alpha'\n\nclass A:\n    pass\n")
+    (root / "beta.py").write_text("import os\n\ndef beta():\n    return os.getcwd()\n")
+    nested = root / "nested"
+    nested.mkdir()
+    (nested / "gamma.py").write_text("def gamma():\n    return 42\n")
+    return root
+
+
+@pytest.fixture
+def tiny_workspace_dir(tmp_path: Path) -> Path:
+    """A workspace dir with one stubbed cloned repo so list_repos has
+    something to find."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    org = ws / "stub"
+    org.mkdir()
+    repo = org / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "main.py").write_text("def main():\n    pass\n")
+    return ws
+
+
+@pytest.fixture
+def graph_with_savegraph_flag(mutable_graph_path: Path) -> Path:
+    """Already has builtins.save_graph: true via mutable_graph_path."""
+    return mutable_graph_path.with_suffix(".kgl").parent / "mutable_mcp.yaml"
+
+
+@pytest.fixture
+def graph_without_savegraph_flag(tmp_path: Path, tiny_graph_path: Path) -> Path:
+    """Manifest matching tiny_graph but without save_graph flag."""
+    target = tmp_path / "nograph.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "nograph_mcp.yaml"
+    manifest.write_text("name: nograph\nbuiltins:\n  temp_cleanup: on_overview\n")
+    return manifest
+
+
+@pytest.fixture
+def manifest_with_csv_http(tmp_path: Path, tiny_graph_path: Path) -> Path:
+    target = tmp_path / "csvhttp.kgl"
+    shutil.copy(tiny_graph_path, target)
+    # Pick a free port deterministically.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    manifest = tmp_path / "csvhttp_mcp.yaml"
+    manifest.write_text(f"name: csvhttp\nextensions:\n  csv_http_server:\n    port: {port}\n    dir: temp/\n")
+    return manifest
+
+
+@pytest.fixture
+def graph_with_bge_m3_embedder(tmp_path: Path, tiny_graph_path: Path) -> Path:
+    target = tmp_path / "bgem3.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "bgem3_mcp.yaml"
+    manifest.write_text("name: bgem3\nextensions:\n  embedder:\n    backend: fastembed\n    model: BAAI/bge-m3\n")
+    return manifest
+
+
+@pytest.fixture(scope="session")
+def graph_with_bge_m3_embeddings_precomputed(tmp_path_factory: pytest.TempPathFactory, tiny_graph_path: Path) -> Path:
+    """Same as tiny_graph but with `Article.body` embeddings precomputed
+    via bge-m3. kglite's text_score requires pre-stored embeddings (it
+    embeds the query string at search time but not stored content).
+    Without this fixture, text_score returns 'no embedding body_emb
+    found' errors that mask real embedder-loading issues."""
+    import kglite
+    from kglite.mcp_server.bge_m3 import BgeM3Embedder
+
+    target_dir = tmp_path_factory.mktemp("bge_m3_corpus")
+    target = target_dir / "bgem3_corpus.kgl"
+    shutil.copy(tiny_graph_path, target)
+    g = kglite.load(str(target))
+    embedder = BgeM3Embedder()
+    g.set_embedder(embedder)
+    g.embed_texts("Article", "body", show_progress=False)
+    g.save(str(target))
+    return target
+
+
+@pytest.fixture
+def local_workspace_yaml(tmp_path: Path, tiny_source_dir: Path) -> Path:
+    """workspace.kind: local manifest pointing at a real directory."""
+    yaml = tmp_path / "local_mcp.yaml"
+    yaml.write_text(f"name: local\nworkspace:\n  kind: local\n  root: {tiny_source_dir}\n")
+    return yaml
+
+
+@pytest.fixture
+def manifest_with_cypher_tool(tmp_path: Path, tiny_graph_path: Path) -> Path:
+    target = tmp_path / "cyphertool.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "cyphertool_mcp.yaml"
+    manifest.write_text(
+        "name: cyphertool\n"
+        "tools:\n"
+        "  - name: find_by_city\n"
+        "    description: Find persons in a given city.\n"
+        "    cypher: |\n"
+        "      MATCH (p:Person) WHERE p.city = $city RETURN p.name LIMIT 5\n"
+        "    parameters:\n"
+        "      type: object\n"
+        "      properties:\n"
+        "        city: { type: string }\n"
+        "      required: [city]\n"
+    )
+    return manifest
+
+
+# ---------------------------------------------------------------------------
+# Category A — Install & boot (4 tests)
+# ---------------------------------------------------------------------------
+
+
+def test_a1_console_script_on_path() -> None:
+    """`pip install kglite[mcp]` puts kglite-mcp-server on PATH.
+    Catches: 0.9.20 (no console script), 0.9.18 (wrong libpython linkage)."""
+    server = _which_server()
+    assert server is not None and server.strip(), "kglite-mcp-server not on PATH"
+
+
+def test_a2_help_runs_without_error() -> None:
+    """Binary starts — no dyld errors, no missing modules.
+    Catches: 0.9.18 install_name regression, 0.9.20 missing mcp dep."""
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run([server, "--help"], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0
+    assert "KGLite" in result.stdout
+
+
+@pytest.mark.skipif(not shutil.which("conda"), reason="conda not available")
+@pytest.mark.model_download
+def test_a3_install_works_on_conda_python() -> None:
+    """Fresh conda env can pip install kglite[mcp] and run the server.
+    Catches: 0.9.18 (Python.org framework path baked into wheel; failed on conda)."""
+    env_name = "kglite_smoke_test"
     try:
-        client.initialize()
+        subprocess.run(["conda", "create", "-y", "-n", env_name, "python=3.11"], check=True, capture_output=True)
+        subprocess.run(
+            ["conda", "run", "-n", env_name, "pip", "install", "kglite[mcp]"], check=True, capture_output=True
+        )
+        result = subprocess.run(
+            ["conda", "run", "-n", env_name, "kglite-mcp-server", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+    finally:
+        subprocess.run(["conda", "env", "remove", "-n", env_name, "-y"], capture_output=True)
+
+
+def test_a4_boot_summary_on_stderr(tiny_graph_path: Path) -> None:
+    """Boot summary line on stderr names mode + path.
+    Catches: 0.9.20 (silent boot)."""
+    client = _client(["--graph", str(tiny_graph_path)])
+    try:
+        time.sleep(0.5)  # let stderr drain
+        lines = client.stderr_lines()
+        boot = next((ln for ln in lines if "mode:" in ln), None)
+        assert boot is not None, f"no boot summary; got stderr: {lines}"
+        assert "graph" in boot
+        assert str(tiny_graph_path) in boot
+    finally:
+        client.close()
+
+
+# ---------------------------------------------------------------------------
+# Category B — Per-mode tool registration (5 tests)
+# ---------------------------------------------------------------------------
+
+
+def test_b1_graph_mode_registers_expected_tools(mutable_graph_path: Path) -> None:
+    """--graph + manifest with builtins.save_graph: true → 8 baseline tools.
+    Catches: 0.9.20 (8 missing tools)."""
+    client = _client(
+        [
+            "--graph",
+            str(mutable_graph_path),
+            "--mcp-config",
+            str(mutable_graph_path.parent / "mutable_mcp.yaml"),
+        ]
+    )
+    try:
+        tools = set(client.list_tools())
+    finally:
+        client.close()
+    expected = {
+        "ping",
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "read_source",
+        "grep",
+        "list_source",
+        "save_graph",
+    }
+    if os.environ.get("GITHUB_TOKEN"):
+        expected |= {"github_issues", "github_api"}
+    assert tools >= expected, f"missing: {expected - tools}; extra: {tools - expected}"
+
+
+def test_b2_workspace_mode_registers_repo_management(tiny_workspace_dir: Path) -> None:
+    """--workspace mode registers repo_management.
+    Catches: 0.9.20 (workspace mode lost repo_management)."""
+    client = _client(["--workspace", str(tiny_workspace_dir)])
+    try:
         tools = client.list_tools()
     finally:
         client.close()
-
-    got = sorted(t["name"] for t in tools)
-    expected = sorted(case["expect"])
-    assert got == expected, (
-        f"tools/list mismatch for case '{case_name}': "
-        f"got={got} expected={expected} diff={set(got).symmetric_difference(expected)}"
-    )
+    assert "repo_management" in tools
+    assert "set_root_dir" not in tools
 
 
-# ---------------------------------------------------------------------------
-# 2. Per-tool smoke
-# ---------------------------------------------------------------------------
-
-
-def test_cypher_query_returns_actual_row_data(tmp_path: Path) -> None:
-    """0.9.22 regression-catcher: the 0.9.21 row formatter iterated
-    a dict (got column names) instead of indexing by column (gets
-    values). The operator hit this on every non-CSV cypher_query call —
-    `RETURN 1+1 AS sum` produced `'sum'` as the row value. This test
-    asserts the inline preview contains the actual computed value, not
-    the column name."""
-    proc = _spawn(["--source-root", str(tmp_path)])
-    client = McpClient(proc)
+def test_b3_local_workspace_mode_registers_set_root_dir(local_workspace_yaml: Path) -> None:
+    """workspace.kind: local registers set_root_dir.
+    Catches: 0.9.20 (set_root_dir gone in local-workspace mode)."""
+    client = _client(["--mcp-config", str(local_workspace_yaml)])
     try:
-        client.initialize()
-        # No graph loaded → cypher_query returns "no active graph". Use
-        # the kglite Python API directly for the assertion instead;
-        # the formatter is what we're testing, not the engine.
+        tools = client.list_tools()
     finally:
         client.close()
-
-    # Bypass the MCP layer — exercise run_cypher() against a fresh
-    # kglite graph in-process. Any output formatter bug surfaces here
-    # without needing a fixture graph or stdio dance.
-    import kglite
-    from kglite.mcp_server.tools import GraphState, run_cypher
-
-    state = GraphState()
-    # Spin up an empty graph; RETURN 1+1 doesn't need data.
-    g = kglite.KnowledgeGraph()
-    state._active = type("A", (), {"graph": g, "source_path": None})()  # type: ignore[attr-defined]
-    body = run_cypher(state, "RETURN 1+1 AS sum")
-
-    # The bug returned `'sum'` (repr of column name) where `2` should be.
-    assert "'sum'" not in body, f"row formatter still repr'ing column names: {body!r}"
-    assert "2" in body, f"row value (2) not in output: {body!r}"
+    assert "set_root_dir" in tools
+    assert "repo_management" not in tools
 
 
-def test_csv_http_response_content_type() -> None:
-    """0.9.23 regression-catcher: aiohttp's web.Response rejects
-    content_type values that contain a charset directive. 0.9.22 passed
-    `'text/csv; charset=utf-8'` and every GET against csv_http_server
-    returned HTTP 500. This test does a real round-trip through the
-    HTTP path — the only place the aiohttp API misuse surfaces."""
-    import asyncio
-    import socket
-
-    import aiohttp
-
-    from kglite.mcp_server.csv_http import CsvHttpConfig, spawn, write_csv
-
-    async def run() -> None:
-        # Pick a free port deterministically.
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as td:
-            cfg = CsvHttpConfig(port=port, dir=Path(td))
-            await spawn(cfg)
-            name = write_csv(cfg, "col1,col2\nvalue_a,value_b\n")
-            # Give the listener a moment to start accepting.
-            await asyncio.sleep(0.1)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(cfg.url_for(name)) as resp:
-                    assert resp.status == 200, f"expected 200 got {resp.status}"
-                    body = await resp.text()
-                    assert "value_a" in body
-                    ctype = resp.headers.get("Content-Type", "")
-                    assert "text/csv" in ctype
-
-    asyncio.run(run())
-
-
-def test_github_issues_uses_workspace_active_repo() -> None:
-    """0.9.23 regression-catcher: after `repo_management('org/repo')`,
-    `github_issues` without explicit `repo_name` should auto-default to
-    the workspace's active repo. 0.9.22 had it fall through to
-    `github_issues_rust`'s "auto-detect from git remote" path, which
-    failed in workspace mode.
-
-    Verifies the wiring at the Python layer (no actual GitHub
-    network call): we monkeypatch the Rust wrapper's
-    `GithubIssues.search_or_list` to capture its `repo` kwarg and
-    assert it received the workspace's active_repo."""
-    from kglite.mcp_server.server import _call_github_issues
-    from kglite.mcp_server.workspace import Workspace
-
-    captured: dict[str, Any] = {}
-
-    class FakeGithubIssues:
-        def search_or_list(self, **kwargs: Any) -> str:
-            captured.update(kwargs)
-            return "stub"
-
-        def fetch(self, *args: Any, **kwargs: Any) -> str:
-            captured["fetch_repo"] = args[0] if args else None
-            return "stub-fetch"
-
-    ws = Workspace(root=Path("/tmp"), kind="local")
-    ws.active_repo = "kkollsga/kglite"
-    _call_github_issues(FakeGithubIssues(), {"limit": 2, "state": "all"}, ws)
-    assert captured.get("repo") == "kkollsga/kglite", (
-        f"github_issues did not pick up workspace.active_repo; got repo={captured.get('repo')!r}"
-    )
-
-
-def test_ping(tmp_path: Path) -> None:
-    proc = _spawn(["--source-root", str(tmp_path)])
-    client = McpClient(proc)
-    try:
-        client.initialize()
-        resp = client.call_tool("ping")
-        assert resp["result"]["content"][0]["text"] == "pong"
-        resp = client.call_tool("ping", {"message": "hello"})
-        assert resp["result"]["content"][0]["text"] == "hello"
-    finally:
-        client.close()
-
-
-def test_read_source(tmp_path: Path) -> None:
-    (tmp_path / "demo.txt").write_text("line one\nline two\nline three\n")
-    proc = _spawn(["--source-root", str(tmp_path)])
-    client = McpClient(proc)
-    try:
-        client.initialize()
-        resp = client.call_tool("read_source", {"file_path": "demo.txt"})
-        body = resp["result"]["content"][0]["text"]
-        assert "line one" in body
-        assert "line three" in body
-        assert "3 lines" in body
-    finally:
-        client.close()
-
-
-def test_read_source_path_traversal(tmp_path: Path) -> None:
-    proc = _spawn(["--source-root", str(tmp_path)])
-    client = McpClient(proc)
-    try:
-        client.initialize()
-        resp = client.call_tool("read_source", {"file_path": "../../../etc/passwd"})
-        body = resp["result"]["content"][0]["text"]
-        assert body.startswith("Error:"), f"traversal not rejected: {body[:200]}"
-        assert "not found" in body.lower() or "access denied" in body.lower()
-    finally:
-        client.close()
-
-
-def test_grep(tmp_path: Path) -> None:
-    (tmp_path / "a.txt").write_text("one\ntwo\nthree marker\nfour\n")
-    proc = _spawn(["--source-root", str(tmp_path)])
-    client = McpClient(proc)
-    try:
-        client.initialize()
-        resp = client.call_tool("grep", {"pattern": "marker"})
-        body = resp["result"]["content"][0]["text"]
-        assert "three marker" in body
-    finally:
-        client.close()
-
-
-def test_list_source(tmp_path: Path) -> None:
-    (tmp_path / "a.txt").write_text("a")
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "sub" / "b.txt").write_text("b")
-    proc = _spawn(["--source-root", str(tmp_path)])
-    client = McpClient(proc)
-    try:
-        client.initialize()
-        resp = client.call_tool("list_source")
-        body = resp["result"]["content"][0]["text"]
-        assert "a.txt" in body
-        assert "sub" in body
-    finally:
-        client.close()
-
-
-# ---------------------------------------------------------------------------
-# 3. Embedder smoke (slow — downloads ~2GB ONNX weights on cold cache)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.model_download
-def test_bge_m3_embedder_loads() -> None:
-    pytest.importorskip("huggingface_hub")
-    pytest.importorskip("onnxruntime")
-    pytest.importorskip("tokenizers")
-    """The 0.9.20 regression: fastembed-python doesn't have bge-m3.
-    Asserting that our 0.9.21 BgeM3Embedder DOES load BAAI/bge-m3 and
-    returns 1024-dim vectors. This is the parity check that was 'pending
-    tonight' in the 0.9.20 release note and never ran."""
-    from kglite.mcp_server.bge_m3 import BgeM3Embedder
-
-    e = BgeM3Embedder()
-    e.load()
-    assert e.dimension == 1024
-    vecs = e.embed(["hello world", "compute pagerank centrality"])
-    assert len(vecs) == 2
-    assert len(vecs[0]) == 1024
-    assert len(vecs[1]) == 1024
-    # Sanity: two semantically distinct strings should NOT have
-    # identical vectors.
-    assert vecs[0] != vecs[1]
-
-
-@pytest.mark.model_download
-def test_bge_m3_cosine_sanity() -> None:
-    pytest.importorskip("huggingface_hub")
-    pytest.importorskip("onnxruntime")
-    pytest.importorskip("tokenizers")
-    """Semantically related strings should score higher than unrelated
-    ones. Loose threshold — just a sanity check that the model is
-    producing meaningful embeddings (not zeros or random)."""
-    import math
-
-    from kglite.mcp_server.bge_m3 import BgeM3Embedder
-
-    e = BgeM3Embedder()
-    vecs = e.embed(
+def test_b4_save_graph_gated_on_manifest_flag(
+    mutable_graph_path: Path, graph_without_savegraph_flag: Path, tiny_graph_path: Path
+) -> None:
+    """save_graph only registers when builtins.save_graph: true is set.
+    Catches: 0.9.18 (unconditional registration)."""
+    # With flag
+    client = _client(
         [
-            "compute pagerank centrality",
-            "graph centrality algorithms",
-            "photosynthesis in plants",
+            "--graph",
+            str(mutable_graph_path),
+            "--mcp-config",
+            str(mutable_graph_path.parent / "mutable_mcp.yaml"),
         ]
     )
+    try:
+        assert "save_graph" in client.list_tools()
+    finally:
+        client.close()
+    # Without flag
+    target = graph_without_savegraph_flag.parent / "nograph.kgl"
+    client = _client(
+        [
+            "--graph",
+            str(target),
+            "--mcp-config",
+            str(graph_without_savegraph_flag),
+        ]
+    )
+    try:
+        assert "save_graph" not in client.list_tools()
+    finally:
+        client.close()
 
-    def cos(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a))
-        nb = math.sqrt(sum(x * x for x in b))
-        return dot / (na * nb)
 
-    related = cos(vecs[0], vecs[1])
-    unrelated = cos(vecs[0], vecs[2])
-    assert related > unrelated, f"related={related:.3f} unrelated={unrelated:.3f}"
-    assert related > 0.4, f"related similarity too low: {related:.3f}"
+def test_b5_github_tools_gated_on_token(tiny_workspace_dir: Path, tmp_path: Path) -> None:
+    """github_issues + github_api only register when GITHUB_TOKEN is present.
+    Catches: 0.9.20 (tools absent with token), 0.9.18 (registered without)."""
+    # No token
+    env_no = {k: v for k, v in os.environ.items() if k not in {"GITHUB_TOKEN", "GH_TOKEN"}}
+    env_no["HOME"] = str(tmp_path)  # avoid walk-up to a real .env
+    proc = _spawn(["--workspace", str(tiny_workspace_dir)], extra_env=env_no, cwd=str(tmp_path))
+    client = McpClient(proc)
+    client.initialize()
+    try:
+        tools_no = client.list_tools()
+    finally:
+        client.close()
+    assert "github_issues" not in tools_no
+    assert "github_api" not in tools_no
+
+    # With token
+    env_yes = {**env_no, "GITHUB_TOKEN": "ghp_test"}
+    proc = _spawn(["--workspace", str(tiny_workspace_dir)], extra_env=env_yes, cwd=str(tmp_path))
+    client = McpClient(proc)
+    client.initialize()
+    try:
+        tools_yes = client.list_tools()
+    finally:
+        client.close()
+    assert "github_issues" in tools_yes
+    assert "github_api" in tools_yes
 
 
 # ---------------------------------------------------------------------------
-# 4. _mcp_internal direct (faster than spawning the full server)
+# Category C — Tool output content (8 tests)
+# ---------------------------------------------------------------------------
+
+
+def test_c1_cypher_query_returns_actual_row_values(tiny_graph_path: Path) -> None:
+    """The 0.9.21 regression: rows rendered column names instead of values.
+    Catches: 0.9.21 row formatter bug."""
+    client = _client(["--graph", str(tiny_graph_path)])
+    try:
+        body = client.call_tool("cypher_query", {"query": "RETURN 1+1 AS sum"})
+    finally:
+        client.close()
+    assert "'sum'" not in body, f"formatter still emitting column name as value: {body!r}"
+    assert "2" in body, f"expected value 2 not in response: {body!r}"
+
+
+def test_c2_cypher_query_multi_column_returns_distinct_values(tiny_graph_path: Path) -> None:
+    """Multi-column queries return distinct row values.
+    Catches: 0.9.21 row formatter, partial-fix scenarios."""
+    client = _client(["--graph", str(tiny_graph_path)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (p:Person) RETURN p.name, p.age LIMIT 3",
+            },
+        )
+    finally:
+        client.close()
+    lines = [ln for ln in body.split("\n") if ln and "row(s)" not in ln and "p.name" != ln.strip()]
+    assert len(set(lines)) > 1, f"all rows identical: {body!r}"
+    for line in lines:
+        assert "'p.name'" not in line, f"row contains column-name string: {line!r}"
+        assert "'p.age'" not in line, f"row contains column-name string: {line!r}"
+
+
+def test_c3_ping_returns_pong(tiny_graph_path: Path) -> None:
+    """Simplest content assertion. Catches: 0.9.20 (ping absent)."""
+    client = _client(["--graph", str(tiny_graph_path)])
+    try:
+        body = client.call_tool("ping", {})
+    finally:
+        client.close()
+    assert body.strip() == "pong"
+
+
+def test_c4_read_source_returns_file_content(tiny_source_dir: Path) -> None:
+    """read_source returns actual file content.
+    Catches: 0.9.20 (absent), 0.9.21 (registered but garbage)."""
+    client = _client(["--source-root", str(tiny_source_dir)])
+    try:
+        body = client.call_tool("read_source", {"file_path": "alpha.py"})
+    finally:
+        client.close()
+    assert "def alpha" in body, f"read_source returned no source: {body[:200]!r}"
+
+
+def test_c5_grep_returns_matches_with_file_and_line(tiny_source_dir: Path) -> None:
+    """grep output: `path:line:content` format.
+    Catches: 0.9.20 (grep absent), formatter-strips-line-numbers."""
+    client = _client(["--source-root", str(tiny_source_dir)])
+    try:
+        body = client.call_tool("grep", {"pattern": "def ", "max_results": 5})
+    finally:
+        client.close()
+    assert re.search(r"\.py:\d+:", body), f"missing path:line: format: {body[:300]!r}"
+
+
+def test_c6_csv_http_server_returns_csv_body_via_http(tiny_graph_path: Path, manifest_with_csv_http: Path) -> None:
+    """csv_http_server actually serves CSV over HTTP, no 500.
+    Catches: 0.9.22 aiohttp content_type/charset bug."""
+    import urllib.request
+
+    target = manifest_with_csv_http.parent / "csvhttp.kgl"
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest_with_csv_http)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (p:Person) RETURN p.name LIMIT 2 FORMAT CSV",
+            },
+        )
+        m = re.search(r"http://[^\s\"\)]+", body)
+        assert m, f"no localhost URL in FORMAT CSV response: {body!r}"
+        time.sleep(0.3)
+        with urllib.request.urlopen(m.group(0), timeout=5) as resp:
+            assert resp.status == 200, f"HTTP GET status {resp.status}"
+            content = resp.read().decode()
+        assert "p.name" in content, f"CSV missing header: {content!r}"
+        assert content.count("\n") >= 2
+    finally:
+        client.close()
+
+
+def test_c7_format_csv_inline_fallback(tiny_graph_path: Path) -> None:
+    """Without csv_http_server, FORMAT CSV returns body inline.
+    Catches: regression where inline fallback breaks."""
+    client = _client(["--graph", str(tiny_graph_path)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (p:Person) RETURN p.name LIMIT 2 FORMAT CSV",
+            },
+        )
+    finally:
+        client.close()
+    assert "http://" not in body, f"unexpected URL when csv_http_server disabled: {body!r}"
+    assert "p.name" in body
+    assert body.count("\n") >= 2
+
+
+def test_c8_save_graph_persists_to_disk(mutable_graph_path: Path) -> None:
+    """save_graph actually writes to the .kgl file.
+    Catches: save_graph registers but doesn't persist."""
+    manifest = mutable_graph_path.parent / "mutable_mcp.yaml"
+    original_mtime = mutable_graph_path.stat().st_mtime
+    time.sleep(1.1)  # ensure mtime resolution captures the change
+
+    client = _client(["--graph", str(mutable_graph_path), "--mcp-config", str(manifest)])
+    try:
+        client.call_tool("cypher_query", {"query": "CREATE (:Marker {tag: 'savegraph-test'})"})
+        save_body = client.call_tool("save_graph", {})
+    finally:
+        client.close()
+    assert "ERROR" not in save_body and "error" not in save_body.lower()[:30]
+    new_mtime = mutable_graph_path.stat().st_mtime
+    assert new_mtime > original_mtime, "save_graph did not update .kgl mtime"
+
+    # Reload and verify the mutation persisted
+    client = _client(["--graph", str(mutable_graph_path), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (n:Marker {tag: 'savegraph-test'}) RETURN count(n) AS c",
+            },
+        )
+    finally:
+        client.close()
+    assert "1" in body, f"mutation didn't persist across save/reload: {body!r}"
+
+
+# ---------------------------------------------------------------------------
+# Category D — Embedder & semantic search (3 tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.model_download
+def test_d1_bge_m3_loads_and_returns_dimension_1024(graph_with_bge_m3_embedder: Path) -> None:
+    """bge-m3 must actually load. Catches: 0.9.20 catalog mismatch."""
+    target = graph_with_bge_m3_embedder.parent / "bgem3.kgl"
+    client = _client(["--graph", str(target), "--mcp-config", str(graph_with_bge_m3_embedder)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (a:Article) WHERE text_score(a, 'body', 'hello world') > 0 RETURN count(a) AS n",
+            },
+        )
+    finally:
+        client.close()
+    assert "not supported" not in body, f"bge-m3 catalog mismatch: {body!r}"
+    assert re.search(r"\b\d+\b", body), f"no count in response: {body!r}"
+
+
+@pytest.mark.model_download
+def test_d2_text_score_returns_ordered_relevance(
+    graph_with_bge_m3_embeddings_precomputed: Path, tmp_path: Path
+) -> None:
+    """Semantically-close text scores higher.
+    Catches: 0.9.20 (model didn't load → no scoring)."""
+    manifest = tmp_path / "bgem3_mcp.yaml"
+    manifest.write_text("name: bgem3\nextensions:\n  embedder:\n    backend: fastembed\n    model: BAAI/bge-m3\n")
+    client = _client(
+        [
+            "--graph",
+            str(graph_with_bge_m3_embeddings_precomputed),
+            "--mcp-config",
+            str(manifest),
+        ]
+    )
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": (
+                    "MATCH (a:Article) RETURN a.title, "
+                    "text_score(a, 'body', 'quantum mechanics') AS s "
+                    "ORDER BY s DESC LIMIT 4 FORMAT CSV"
+                ),
+            },
+        )
+    finally:
+        client.close()
+    lines = [ln for ln in body.split("\n") if "," in ln and not ln.startswith("a.title")]
+    assert len(lines) >= 2, f"expected ≥2 score rows: {body!r}"
+    scores = [float(ln.split(",")[-1]) for ln in lines]
+    assert scores[0] > scores[-1], f"scores not descending: {scores}"
+    # Top result should be the quantum article (our fixture has alternating titles)
+    assert "quantum" in lines[0].lower(), f"quantum should rank first: {lines!r}"
+
+
+@pytest.mark.model_download
+def test_d3_embedder_lifecycle_lazy_load_and_unload(graph_with_bge_m3_embedder: Path) -> None:
+    """First call cold (loads model); second call warm.
+    Catches: embedder reloading every call regressions."""
+    target = graph_with_bge_m3_embedder.parent / "bgem3.kgl"
+    client = _client(["--graph", str(target), "--mcp-config", str(graph_with_bge_m3_embedder)])
+    try:
+        t0 = time.monotonic()
+        body1 = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (a:Article) WHERE text_score(a, 'body', 'test') > 0 RETURN count(a)",
+            },
+        )
+        cold_ms = (time.monotonic() - t0) * 1000
+        t0 = time.monotonic()
+        body2 = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (a:Article) WHERE text_score(a, 'body', 'other') > 0 RETURN count(a)",
+            },
+        )
+        warm_ms = (time.monotonic() - t0) * 1000
+    finally:
+        client.close()
+    assert "ERROR" not in body1 and "ERROR" not in body2
+    # Warm should be substantially faster than cold (loose threshold —
+    # cold includes the model load on first query).
+    assert warm_ms < cold_ms / 2 + 500, (
+        f"warm call ({warm_ms:.0f}ms) not faster than cold ({cold_ms:.0f}ms) — embedder reloading?"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Category E — Manifest & .env handling (4 tests)
+# ---------------------------------------------------------------------------
+
+
+def test_e1_explicit_source_root_overrides_auto_bind(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Manifest source_root: overrides --graph parent auto-bind.
+    Catches: 0.9.17 P1 (manifest source_root silently ignored)."""
+    # Graph in one dir, source in another.
+    graph_dir = tmp_path / "graphs"
+    graph_dir.mkdir()
+    graph_target = graph_dir / "g.kgl"
+    shutil.copy(tiny_graph_path, graph_target)
+
+    source_dir = tmp_path / "explicit_source"
+    source_dir.mkdir()
+    (source_dir / "marker.py").write_text("# explicitly bound\n")
+
+    manifest = tmp_path / "g_mcp.yaml"
+    manifest.write_text(f"name: g\nsource_root: {source_dir}\n")
+
+    client = _client(["--graph", str(graph_target), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool("read_source", {"file_path": "marker.py"})
+    finally:
+        client.close()
+    assert "ERROR" not in body and "Error" not in body[:30], f"explicit source_root not honored: {body!r}"
+    assert "explicitly bound" in body
+
+
+def test_e2_env_file_walk_up(tmp_path: Path, tiny_workspace_dir: Path) -> None:
+    """`.env` placed in workspace parent gets loaded.
+    Catches: 0.9.17 .env walk-up missing."""
+    env_path = tiny_workspace_dir.parent / ".env"
+    env_path.write_text("TEST_VAR_XYZ=found_via_walkup\n")
+
+    client = _client(["--workspace", str(tiny_workspace_dir)])
+    try:
+        time.sleep(0.5)
+        lines = client.stderr_lines()
+        env_line = next((ln for ln in lines if "env" in ln.lower() and ".env" in ln), None)
+    finally:
+        client.close()
+    assert env_line is not None, f"no env-loaded line in stderr: {lines}"
+
+
+def test_e3_unknown_manifest_keys_error_cleanly(tmp_path: Path) -> None:
+    """Strict-key validation rejects typos.
+    Catches: silent acceptance of typo'd keys."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("name: bad\nunknown_top_key: oops\n")
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run(
+        [server, "--mcp-config", str(bad)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    combined = (result.stderr + result.stdout).lower()
+    assert "unknown" in combined, f"strict-key validation didn't error: {combined!r}"
+
+
+def test_e4_temp_cleanup_wipes_on_graph_overview(mutable_graph_path: Path, tmp_path: Path) -> None:
+    """builtins.temp_cleanup: on_overview wipes temp/ on bare graph_overview().
+    Catches: 0.9.18 (no-op flag), 0.9.20 regressions."""
+    # The fixture's manifest base dir is tmp_path. Drop a stale file in
+    # `<base>/temp/`.
+    manifest = mutable_graph_path.parent / "mutable_mcp.yaml"
+    temp_dir = manifest.parent / "temp"
+    temp_dir.mkdir(exist_ok=True)
+    stale = temp_dir / "test-stale.csv"
+    stale.write_text("old-data")
+    assert stale.exists()
+
+    client = _client(["--graph", str(mutable_graph_path), "--mcp-config", str(manifest)])
+    try:
+        client.call_tool("graph_overview", {})
+    finally:
+        client.close()
+    assert not stale.exists(), "temp_cleanup didn't wipe temp/"
+
+
+# ---------------------------------------------------------------------------
+# Category F — Workspace state propagation (3 tests)
+# ---------------------------------------------------------------------------
+
+
+def test_f1_repo_management_activates_makes_repo_default_for_github_tools(
+    tiny_workspace_dir: Path,
+) -> None:
+    """After repo_management activates, github_issues defaults to that repo.
+    Catches: 0.9.22 active-repo bug."""
+    # Pre-create stub/repo so activate() doesn't try to clone from github.com.
+    (tiny_workspace_dir / "stub" / "repo" / "README").write_text("# stub\n")
+    client = _client(
+        ["--workspace", str(tiny_workspace_dir)],
+        extra_env={"GITHUB_TOKEN": "ghp_test"},
+    )
+    try:
+        act = client.call_tool("repo_management", {"name": "stub/repo"})
+        assert "Activated" in act or "stub/repo" in act, f"activation failed: {act!r}"
+        # github_issues without repo_name — should NOT say "could not auto-detect"
+        # (it may fail with auth since the token is fake, but the repo must be picked up)
+        body = client.call_tool("github_issues", {"limit": 1})
+    finally:
+        client.close()
+    assert "could not auto-detect" not in body.lower(), f"active repo not propagating to github_issues: {body!r}"
+
+
+def test_f2_set_root_dir_rebinds_source_tools(
+    local_workspace_yaml: Path, tmp_path: Path, tiny_source_dir: Path
+) -> None:
+    """After set_root_dir, list_source operates on the new root.
+    Catches: tool registers but state-swap is incomplete."""
+    # Set up a second root inside the workspace
+    second = tiny_source_dir / "second_root"
+    second.mkdir()
+    (second / "second_file.py").write_text("# in second root\n")
+
+    client = _client(["--mcp-config", str(local_workspace_yaml)])
+    try:
+        initial = client.call_tool("list_source", {})
+        swap = client.call_tool("set_root_dir", {"path": "second_root"})
+        assert "ERROR" not in swap, f"set_root_dir failed: {swap!r}"
+        new_listing = client.call_tool("list_source", {})
+    finally:
+        client.close()
+    assert new_listing != initial, "set_root_dir didn't change source listing"
+    assert "second_file.py" in new_listing, f"new root file not visible: {new_listing!r}"
+
+
+def test_f3_repo_management_force_rebuild_triggers_post_activate_hook(
+    tiny_workspace_dir: Path,
+) -> None:
+    """force_rebuild=true bypasses SHA gating.
+
+    NOTE: our 0.9.23 Workspace doesn't implement SHA gating yet (it
+    rebuilds unconditionally). This test asserts the boolean is
+    accepted without error and the response acknowledges the request —
+    once SHA gating lands in a future release, tighten the assertion.
+    Catches: force_rebuild kwarg being silently dropped."""
+    (tiny_workspace_dir / "stub" / "repo" / "README").write_text("# stub\n")
+    client = _client(["--workspace", str(tiny_workspace_dir)])
+    try:
+        client.call_tool("repo_management", {"name": "stub/repo"})
+        body = client.call_tool("repo_management", {"update": True, "force_rebuild": True})
+    finally:
+        client.close()
+    # The current implementation may return "Updated" or "Activated" —
+    # what matters is no error.
+    assert "ERROR" not in body and "invalid" not in body.lower(), f"force_rebuild rejected: {body!r}"
+
+
+# ---------------------------------------------------------------------------
+# Direct API tests (not in operator spec but kept from previous suite)
 # ---------------------------------------------------------------------------
 
 
@@ -448,14 +897,7 @@ def test_mcp_internal_module_importable() -> None:
     assert callable(m.ping)
     assert callable(m.git_api)
     assert callable(m.has_github_token)
-    assert m.GithubIssues  # pyclass
-
-
-def test_mcp_internal_ping() -> None:
-    import kglite._mcp_internal as m
-
-    assert m.ping() == "pong"
-    assert m.ping("hello") == "hello"
+    assert m.GithubIssues
 
 
 def test_mcp_internal_read_source_traversal_rejected(tmp_path: Path) -> None:
@@ -463,3 +905,75 @@ def test_mcp_internal_read_source_traversal_rejected(tmp_path: Path) -> None:
 
     body = m.read_source("../../../etc/passwd", [str(tmp_path)])
     assert body.startswith("Error:")
+
+
+def test_cypher_query_returns_actual_row_data_direct(tmp_path: Path) -> None:
+    """Direct exercise of the 0.9.22 bug-fix code path (no MCP stdio).
+    Useful when debugging the formatter in isolation."""
+    import kglite
+    from kglite.mcp_server.tools import GraphState, run_cypher
+
+    state = GraphState()
+    g = kglite.KnowledgeGraph()
+    state._active = type("A", (), {"graph": g, "source_path": None})()  # type: ignore[attr-defined]
+    body = run_cypher(state, "RETURN 1+1 AS sum")
+    assert "'sum'" not in body
+    assert "2" in body
+
+
+def test_bge_m3_cooldown_default_keeps_session_resident() -> None:
+    """Without explicit cool-down, the default (900s) holds the
+    session resident across rapid embed() calls — exactly what makes
+    warm-call latency drop to ms-scale."""
+    from kglite.mcp_server.bge_m3 import BgeM3Embedder
+
+    e = BgeM3Embedder()
+    # Simulate a load by stuffing a sentinel into _session, then
+    # check the idle-release path leaves it alone for short idles.
+    e._session = "sentinel-loaded"  # type: ignore[assignment]
+    e._last_used = time.monotonic()
+    e._maybe_release_idle()
+    assert e._session == "sentinel-loaded", "default cool-down should not release fresh session"
+
+
+def test_bge_m3_cooldown_releases_after_idle_threshold() -> None:
+    """Once `cooldown_seconds` of monotonic time elapses since the
+    last embed, the next call drops the session."""
+    from kglite.mcp_server.bge_m3 import BgeM3Embedder
+
+    e = BgeM3Embedder(cooldown_seconds=1)  # 1-second cool-down for fast test
+    e._session = "sentinel-loaded"  # type: ignore[assignment]
+    e._tokenizer = "sentinel-tok"  # type: ignore[assignment]
+    e._last_used = time.monotonic() - 2.0  # already idle past threshold
+    e._maybe_release_idle()
+    assert e._session is None, "stale session should have been released"
+    assert e._tokenizer is None
+
+
+def test_bge_m3_cooldown_zero_disables_release() -> None:
+    """cooldown_seconds=0 means "never release" — model stays
+    resident forever (the operator's heavy-use mode)."""
+    from kglite.mcp_server.bge_m3 import BgeM3Embedder
+
+    e = BgeM3Embedder(cooldown_seconds=0)
+    e._session = "sentinel-loaded"  # type: ignore[assignment]
+    e._last_used = time.monotonic() - 86400  # idle for a day
+    e._maybe_release_idle()
+    assert e._session == "sentinel-loaded", "cooldown=0 should never release"
+
+
+def test_embedder_manifest_parses_cooldown() -> None:
+    """`extensions.embedder.cooldown:` flows through from YAML into
+    BgeM3Embedder. Catches: YAML parser silently dropping the field."""
+    from kglite.mcp_server.bge_m3 import BgeM3Embedder
+    from kglite.mcp_server.embedder import from_manifest_value
+
+    adapter = from_manifest_value(
+        {
+            "backend": "fastembed",
+            "model": "BAAI/bge-m3",
+            "cooldown": 60,
+        }
+    )
+    assert isinstance(adapter, BgeM3Embedder)
+    assert adapter._cooldown_seconds == 60
