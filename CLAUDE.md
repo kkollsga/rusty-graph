@@ -124,3 +124,26 @@ Update `CHANGELOG.md` `[Unreleased]` for user-visible changes. Skip for internal
 3. Commit, then let the user push
 
 Version source of truth: `Cargo.toml` line 3.
+
+### Standard plan procedure (multi-phase work)
+
+When a plan has multiple phases (Step 1 / 2 / 3 / …), follow this rhythm:
+
+1. **Commit after each phase.** Each completed phase is its own commit
+   (`feat: ...`, `refactor: ...`, etc.). Don't bundle Phase 1's code with
+   Phase 2's tests — that defeats bisectability when something regresses.
+2. **Version bump and push happen together, at the very end.** Don't bump
+   `Cargo.toml` after each phase. After all phases land as separate
+   commits, the FINAL commit promotes `[Unreleased]` → `[x.y.z]` in the
+   CHANGELOG and bumps `Cargo.toml`. The user pushes once.
+3. **Each phase must compile + lint + test green before its commit.**
+   `cargo build --lib`, `make lint`, and the relevant test suite all pass
+   before phase commit; if a phase is "scaffolding only" (e.g. adding
+   pyo3 classes that aren't called from Python yet), at minimum the
+   build + lint gate still applies.
+
+Rationale: clean per-phase commits make `git bisect` useful when the
+operator (or CI) flags a regression days later. Bundling phases into one
+big commit is the wrong default — the only exception is when phases are
+genuinely indivisible (e.g. a rename that touches both definition and
+all call sites).
