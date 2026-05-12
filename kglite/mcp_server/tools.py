@@ -21,6 +21,8 @@ from typing import Any
 
 import kglite
 from kglite.mcp_server.csv_http import CsvHttpConfig, write_csv
+from kglite.mcp_server.preprocessor import Preprocessor
+from kglite.mcp_server.preprocessor import apply as apply_preprocessor
 
 NO_GRAPH = "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo')."
 
@@ -78,14 +80,28 @@ def run_cypher(
     query: str,
     params: dict[str, Any] | None = None,
     csv_http: CsvHttpConfig | None = None,
+    preprocessor: Preprocessor | None = None,
 ) -> str:
     """Run a Cypher query against the active graph. Returns the
     rendered tool body — inline 15-row preview by default, CSV (or URL
     when csv_http is configured) when `FORMAT CSV` appears in the
-    query."""
+    query.
+
+    0.9.25: when `preprocessor` is set, the query + params are rewritten
+    before execution (see `kglite.mcp_server.preprocessor`). Rewrites
+    that raise ValueError/TypeError surface as
+    `preprocessor: <message>` short-circuit bodies — no traceback
+    reaches the agent."""
     active = state.active()
     if active is None:
         return NO_GRAPH
+
+    rewritten = apply_preprocessor(preprocessor, query, params)
+    if isinstance(rewritten, str):
+        # `apply_preprocessor` returns a str when the preprocessor
+        # raised — forward verbatim as the tool body.
+        return rewritten
+    query, params = rewritten
 
     try:
         result = active.graph.cypher(query, params=params or {})

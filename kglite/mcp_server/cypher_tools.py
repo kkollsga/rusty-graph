@@ -29,6 +29,7 @@ from mcp import types as mcp_types
 
 from kglite.mcp_server.csv_http import CsvHttpConfig
 from kglite.mcp_server.manifest import CypherTool
+from kglite.mcp_server.preprocessor import Preprocessor
 from kglite.mcp_server.tools import GraphState, run_cypher
 
 
@@ -52,7 +53,12 @@ async def call_cypher_tool(
     state: GraphState,
     args: dict[str, Any],
     csv_http: CsvHttpConfig | None,
+    preprocessor: Preprocessor | None = None,
 ) -> str:
     """Execute a manifest cypher template with arg substitution. Errors
-    bubble up as text bodies (consistent with the Rust shim)."""
-    return run_cypher(state, spec.cypher, params=args, csv_http=csv_http)
+    bubble up as text bodies (consistent with the Rust shim).
+
+    0.9.25: the preprocessor fires for tools[].cypher templates too —
+    it sees the manifest template (NOT the post-substitution string).
+    Substitution happens later via kglite's typed parameter binding."""
+    return run_cypher(state, spec.cypher, params=args, csv_http=csv_http, preprocessor=preprocessor)

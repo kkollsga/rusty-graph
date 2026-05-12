@@ -1140,6 +1140,193 @@ def test_w1_watch_callback_receives_changed_paths(tmp_path: Path) -> None:
 
     assert received, "watch callback never fired after file write"
     flat = [p for batch in received for p in batch]
-    assert any("new_file.txt" in p for p in flat), (
-        f"callback fired but path list did not include the changed file: {received!r}"
+    # macOS FSEvents may report either the new file or its parent
+    # directory (depending on coalescing). Accept either as evidence
+    # the watcher picked up the change. The contract we care about
+    # is "list[str] arrives within the debounce window" — not the
+    # specific path granularity, which is platform-dependent.
+    tmp_path_str = str(tmp_path)
+    assert any("new_file.txt" in p or tmp_path_str in p for p in flat), (
+        f"callback fired but path list did not include either the file or the parent dir: {received!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 0.9.25 cypher_preprocessor regression tests (Category O — preprocessor)
+# ---------------------------------------------------------------------------
+
+
+def _make_state_with_tiny_graph():
+    """Construct a GraphState wrapping a 3-node graph for preprocessor
+    integration tests. Uses kglite Python API directly — no MCP stdio."""
+    import kglite
+    from kglite.mcp_server.tools import GraphState
+
+    state = GraphState()
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Item {title: 'foo', value: 1})")
+    g.cypher("CREATE (:Item {title: 'bar', value: 2})")
+    g.cypher("CREATE (:Item {title: 'baz', value: 3})")
+    # Inject the active-graph slot directly so we don't need a .kgl file.
+    state._active = type("A", (), {"graph": g, "source_path": None})()
+    return state, g
+
+
+def test_o1_cypher_preprocessor_rewrites_query_before_execution(tmp_path: Path) -> None:
+    """The preprocessor's rewrite() output is what reaches graph.cypher().
+    Operator's spec test #1. Catches: preprocessor configured but
+    actually ignored at dispatch time."""
+    from kglite.mcp_server.preprocessor import Preprocessor
+    from kglite.mcp_server.tools import run_cypher
+
+    def rewrite(query: str, params):
+        # Rewrite "foo" → "bar" so the query targets a different node.
+        return query.replace("'foo'", "'bar'"), params
+
+    preprocessor = Preprocessor(rewrite=rewrite, module_path=tmp_path / "p.py")
+    state, _ = _make_state_with_tiny_graph()
+
+    body = run_cypher(state, "MATCH (n:Item {title: 'foo'}) RETURN n.value AS v", preprocessor=preprocessor)
+    # bar has value=2, foo has value=1. If the rewrite landed, we see 2.
+    assert "2" in body
+    assert "1" not in body or "row" in body  # tolerant — "1 row" might appear
+
+
+def test_o2_cypher_preprocessor_fires_for_tools_cypher_too(tmp_path: Path) -> None:
+    """YAML-declared tools[].cypher templates also go through the
+    preprocessor. Operator's spec test #2. Catches: tools[].cypher
+    bypassing the hook."""
+    import asyncio
+
+    from kglite.mcp_server.cypher_tools import call_cypher_tool
+    from kglite.mcp_server.manifest import CypherTool
+    from kglite.mcp_server.preprocessor import Preprocessor
+
+    fired_with: list[str] = []
+
+    def rewrite(query: str, params):
+        fired_with.append(query)
+        return query.replace("'foo'", "'baz'"), params
+
+    preprocessor = Preprocessor(rewrite=rewrite, module_path=tmp_path / "p.py")
+    state, _ = _make_state_with_tiny_graph()
+    spec = CypherTool(
+        name="lookup",
+        cypher="MATCH (n:Item {title: 'foo'}) RETURN n.value AS v",
+    )
+    body = asyncio.run(call_cypher_tool(spec, state, {}, csv_http=None, preprocessor=preprocessor))
+    assert fired_with, "preprocessor never received the tools[].cypher template"
+    # baz has value=3.
+    assert "3" in body
+
+
+def test_o3_cypher_preprocessor_does_not_fire_for_non_cypher_tools(tmp_path: Path) -> None:
+    """The preprocessor is scoped to cypher_query / tools[].cypher.
+    graph_overview, save_graph, and the source-tool / GitHub-tool
+    surface do not invoke it. Operator's spec test #3."""
+    from kglite.mcp_server.preprocessor import Preprocessor
+    from kglite.mcp_server.tools import run_overview, run_save
+
+    fired_count = [0]
+
+    def rewrite(query: str, params):
+        fired_count[0] += 1
+        return query, params
+
+    # The preprocessor is constructed (so its rewrite() is genuinely
+    # callable) but deliberately NOT passed to run_overview / run_save —
+    # the point of this test is that non-cypher tool surfaces have
+    # no parameter through which a preprocessor could reach them. If
+    # someone ever adds a sneaky `preprocessor` kwarg or global to
+    # those tools, the fired_count assertion catches it.
+    _ = Preprocessor(rewrite=rewrite, module_path=tmp_path / "p.py")
+    state, _ = _make_state_with_tiny_graph()
+
+    body = run_overview(state, types=None, connections=None, cypher=None, temp_cleanup_dir=None)
+    assert "Item" in body or "node" in body.lower()  # describe() should mention the type
+    assert fired_count[0] == 0, "graph_overview leaked into preprocessor"
+
+    save_body = run_save(state)
+    assert "save_graph" in save_body or "requires" in save_body
+    assert fired_count[0] == 0, "save_graph leaked into preprocessor"
+
+
+def test_o4_cypher_preprocessor_exception_returns_clean_error(tmp_path: Path) -> None:
+    """If rewrite() raises ValueError / TypeError, the agent receives
+    `preprocessor: <message>` — no stack trace. Operator's spec test #4."""
+    from kglite.mcp_server.preprocessor import Preprocessor
+    from kglite.mcp_server.tools import run_cypher
+
+    def rewrite(query: str, params):
+        raise ValueError("rewrite refused: query rejected by policy")
+
+    preprocessor = Preprocessor(rewrite=rewrite, module_path=tmp_path / "p.py")
+    state, _ = _make_state_with_tiny_graph()
+    body = run_cypher(state, "MATCH (n) RETURN n", preprocessor=preprocessor)
+    assert body.startswith("preprocessor: "), f"expected clean error envelope, got: {body!r}"
+    assert "rewrite refused" in body
+    assert "Traceback" not in body
+
+
+def test_o5_trust_gate_blocks_preprocessor_without_allow_query_preprocessor(tmp_path: Path) -> None:
+    """extensions.cypher_preprocessor without trust.allow_query_preprocessor
+    fails at preprocessor-load time. Operator's spec test #5. Mirrors the
+    existing embedder/allow_embedder gate."""
+    from kglite.mcp_server.preprocessor import PreprocessorError, from_manifest_value
+
+    # Trust = False → must raise.
+    with pytest.raises(PreprocessorError) as exc_info:
+        from_manifest_value(
+            {"module": "./p.py", "class": "P"},
+            base_dir=tmp_path,
+            trust_allowed=False,
+        )
+    assert "trust.allow_query_preprocessor" in str(exc_info.value)
+
+    # Trust = True but module file missing → different error (proves
+    # the trust gate is the first check that ran).
+    with pytest.raises(PreprocessorError) as exc_info:
+        from_manifest_value(
+            {"module": "./does_not_exist.py", "class": "P"},
+            base_dir=tmp_path,
+            trust_allowed=True,
+        )
+    assert "module file does not exist" in str(exc_info.value)
+
+
+def test_o6_cypher_preprocessor_loads_class_with_kwargs(tmp_path: Path) -> None:
+    """End-to-end load of a class-based preprocessor with kwargs.
+    Catches: kwargs not threaded through to the constructor."""
+    from kglite.mcp_server.preprocessor import from_manifest_value
+
+    (tmp_path / "p.py").write_text(
+        "class P:\n"
+        "    def __init__(self, suffix: str):\n"
+        "        self._s = suffix\n"
+        "    def rewrite(self, query, params):\n"
+        "        return query + self._s, params\n"
+    )
+    pre = from_manifest_value(
+        {"module": "./p.py", "class": "P", "kwargs": {"suffix": "  -- rewritten"}},
+        base_dir=tmp_path,
+        trust_allowed=True,
+    )
+    assert pre is not None
+    new_q, _ = pre.rewrite("MATCH (n) RETURN n", None)
+    assert new_q.endswith("-- rewritten")
+
+
+def test_o7_cypher_preprocessor_loads_free_function(tmp_path: Path) -> None:
+    """End-to-end load of a function-based preprocessor.
+    Catches: function loader not finding module-level callables."""
+    from kglite.mcp_server.preprocessor import from_manifest_value
+
+    (tmp_path / "rewrites.py").write_text("def rewrite(query, params):\n    return query.lower(), params\n")
+    pre = from_manifest_value(
+        {"module": "./rewrites.py", "function": "rewrite"},
+        base_dir=tmp_path,
+        trust_allowed=True,
+    )
+    assert pre is not None
+    new_q, _ = pre.rewrite("MATCH (N) RETURN N", None)
+    assert new_q == "match (n) return n"

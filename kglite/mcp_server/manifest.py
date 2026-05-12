@@ -27,6 +27,18 @@ class ManifestError(ValueError):
 
 
 @dataclass
+class Trust:
+    """Manifest `trust:` flags. Mirror the keys in
+    `mcp_methods::server::TrustConfig`; the Python wrapper consumes the
+    JSON dict produced by Manifest::to_json(). Defaults are False —
+    forces operators to opt in explicitly per extension."""
+
+    allow_python_tools: bool = False
+    allow_embedder: bool = False
+    allow_query_preprocessor: bool = False
+
+
+@dataclass
 class Builtins:
     save_graph: bool = False
     temp_cleanup_on_overview: bool = False
@@ -60,6 +72,7 @@ class Manifest:
     extensions: dict[str, Any] = field(default_factory=dict)
     workspace: WorkspaceCfg | None = None
     tools: list[CypherTool] = field(default_factory=list)
+    trust: Trust = field(default_factory=Trust)
 
 
 def load_manifest(path: Path) -> Manifest:
@@ -94,6 +107,17 @@ def load_manifest(path: Path) -> Manifest:
     m.builtins = Builtins(
         save_graph=bool(b.get("save_graph", False)),
         temp_cleanup_on_overview=(b.get("temp_cleanup") == "on_overview"),
+    )
+
+    t = data.get("trust") or {}
+    m.trust = Trust(
+        allow_python_tools=bool(t.get("allow_python_tools", False)),
+        allow_embedder=bool(t.get("allow_embedder", False)),
+        # mcp-methods 0.3.29+: emits `allow_query_preprocessor` under
+        # trust. Older versions don't emit the key — bool(None) is
+        # False, preserving the same default semantics across pin
+        # versions.
+        allow_query_preprocessor=bool(t.get("allow_query_preprocessor", False)),
     )
 
     w = data.get("workspace")

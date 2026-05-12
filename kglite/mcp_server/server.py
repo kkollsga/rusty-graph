@@ -132,6 +132,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         spawn as csv_http_spawn,
     )
     from kglite.mcp_server.embedder import from_manifest_value as embedder_from_manifest
+    from kglite.mcp_server.preprocessor import PreprocessorError
+    from kglite.mcp_server.preprocessor import from_manifest_value as preprocessor_from_manifest
     from kglite.mcp_server.tools import GraphState
     from kglite.mcp_server.watch import start as watch_start
     from kglite.mcp_server.workspace import Workspace
@@ -144,10 +146,20 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     csv_http_cfg: CsvHttpConfig | None = None
     embedder_adapter = None
+    preprocessor = None
     if manifest is not None:
         ext = manifest.extensions
         csv_http_cfg = csv_http_from_manifest(ext.get("csv_http_server"), manifest.base_dir)
         embedder_adapter = embedder_from_manifest(ext.get("embedder"))
+        try:
+            preprocessor = preprocessor_from_manifest(
+                ext.get("cypher_preprocessor"),
+                manifest.base_dir,
+                manifest.trust.allow_query_preprocessor,
+            )
+        except PreprocessorError as e:
+            sys.stderr.write(f"ERROR: {e}\n")
+            sys.exit(3)
 
     if csv_http_cfg is not None:
         await csv_http_spawn(csv_http_cfg)
@@ -196,6 +208,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         mode=mode,
         csv_http_cfg=csv_http_cfg,
         workspace=workspace,
+        preprocessor=preprocessor,
     )
 
     # Serve.
@@ -343,6 +356,7 @@ def _build_server(
     mode: dict[str, Any],
     csv_http_cfg: Any,
     workspace: Any,
+    preprocessor: Any = None,
 ) -> Any:
     """Construct the mcp.Server and register all tools."""
     from mcp import types
@@ -510,7 +524,12 @@ def _build_server(
     @server.call_tool()
     async def _call(name: str, args: dict[str, Any]) -> list[types.TextContent]:
         if name == "cypher_query":
-            body = run_cypher(graph_state, args.get("query", ""), csv_http=csv_http_cfg)
+            body = run_cypher(
+                graph_state,
+                args.get("query", ""),
+                csv_http=csv_http_cfg,
+                preprocessor=preprocessor,
+            )
         elif name == "graph_overview":
             body = run_overview(
                 graph_state,
@@ -589,6 +608,7 @@ def _build_server(
                 graph_state,
                 args,
                 csv_http_cfg,
+                preprocessor=preprocessor,
             )
         else:
             body = f"unknown tool: {name!r}"
