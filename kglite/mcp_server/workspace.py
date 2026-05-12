@@ -31,6 +31,19 @@ class Workspace:
     root: Path
     stale_after_days: int = 7
     kind: str = "remote"  # "remote" or "local"
+    # 0.9.23: track the active repo so `github_issues` (and any other
+    # tool that wants to default to the current workspace target)
+    # can resolve `repo_name` without the agent having to repeat it
+    # on every call. Set by `activate()`; cleared by `delete()` of the
+    # active repo.
+    active_repo: str | None = None
+
+    def active_repo_name(self) -> str | None:
+        """Return the active repo as 'org/repo' (remote mode) or the
+        active subpath (local mode), or None when nothing is active.
+        Used by the MCP server's github_issues/github_api default-repo
+        resolution."""
+        return self.active_repo
 
     def list_repos(self) -> list[Path]:
         """Return paths to all cloned repos under `root`."""
@@ -47,7 +60,8 @@ class Workspace:
 
     def activate(self, repo: str) -> Path:
         """Clone `org/repo` if not present (or stale), then return the
-        local path."""
+        local path. Updates `self.active_repo` so subsequent tool
+        calls (github_issues, github_api) can default to it."""
         if self.kind == "local":
             # Local workspace: repo is a relative path under root.
             target = (self.root / repo).resolve()
@@ -57,6 +71,7 @@ class Workspace:
                 raise ValueError(f"local workspace: {repo!r} escapes the root")
             if not target.is_dir():
                 raise FileNotFoundError(f"local workspace: {target} not found")
+            self.active_repo = repo
             return target
 
         # Remote workspace: clone via git.
@@ -71,12 +86,14 @@ class Workspace:
             if time.time() - mtime > self.stale_after_days * 86400:
                 log.info("refreshing stale clone: %s", target)
                 self._run(["git", "fetch", "--depth", "1"], cwd=target)
+            self.active_repo = repo
             return target
 
         target.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://github.com/{repo}.git"
         log.info("cloning %s ...", url)
         self._run(["git", "clone", "--depth", "1", url, str(target)])
+        self.active_repo = repo
         return target
 
     def delete(self, repo: str) -> None:

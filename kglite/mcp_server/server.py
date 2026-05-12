@@ -547,7 +547,7 @@ def _build_server(
             if github_issues is None:
                 body = "Error: github_issues requires GITHUB_TOKEN / GH_TOKEN to be set."
             else:
-                body = _call_github_issues(github_issues, args)
+                body = _call_github_issues(github_issues, args, workspace)
         elif name == "github_api":
             body = mcp_internal.git_api(
                 args.get("repo_name") or _active_repo_for_github(workspace),
@@ -691,13 +691,20 @@ def _framework_github_tools() -> list:
     ]
 
 
-def _call_github_issues(github_issues: Any, args: dict[str, Any]) -> str:
+def _call_github_issues(github_issues: Any, args: dict[str, Any], workspace: Any) -> str:
     """Route a github_issues call between FETCH (number given) and
-    SEARCH/LIST (no number) via the wrapped Rust ElementCache."""
+    SEARCH/LIST (no number) via the wrapped Rust ElementCache.
+
+    0.9.23: when `repo_name` isn't passed and a workspace is active,
+    default to the workspace's active repo. Without this the agent had
+    to repeat `repo_name='org/repo'` on every call even after
+    `repo_management('org/repo')` activated one. Operator caught this
+    on 0.9.22 redeploy."""
+    repo = args.get("repo_name") or _active_repo_for_github(workspace) or None
     number = args.get("number")
     if number is not None:
         return github_issues.fetch(
-            args.get("repo_name") or "",
+            repo or "",
             int(number),
             element_id=args.get("element_id"),
             lines=args.get("lines"),
@@ -706,7 +713,7 @@ def _call_github_issues(github_issues: Any, args: dict[str, Any]) -> str:
             refresh=args.get("refresh", False),
         )
     return github_issues.search_or_list(
-        repo=args.get("repo_name"),
+        repo=repo,
         query=args.get("query"),
         kind=args.get("kind", "all"),
         state=args.get("state", "open"),

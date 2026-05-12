@@ -138,10 +138,26 @@ async def spawn(config: CsvHttpConfig) -> None:
                 headers={"Access-Control-Allow-Origin": cors},
             )
         body = target.read_bytes()
-        content_type = "text/csv; charset=utf-8" if raw.endswith(".csv") else "application/octet-stream"
+        # 0.9.23 fix: aiohttp's web.Response rejects content_type values
+        # that include a charset directive — it wants the bare media
+        # type, with charset as a separate kwarg. Previously we passed
+        # `"text/csv; charset=utf-8"` and every GET against the
+        # csv_http_server returned HTTP 500
+        # (`ValueError: charset must not be in content_type argument`).
+        # Operator workaround was to disable extensions.csv_http_server.
+        if raw.endswith(".csv"):
+            return web.Response(
+                body=body,
+                content_type="text/csv",
+                charset="utf-8",
+                headers={
+                    "Access-Control-Allow-Origin": cors,
+                    "Cache-Control": "no-store",
+                },
+            )
         return web.Response(
             body=body,
-            content_type=content_type,
+            content_type="application/octet-stream",
             headers={
                 "Access-Control-Allow-Origin": cors,
                 "Cache-Control": "no-store",

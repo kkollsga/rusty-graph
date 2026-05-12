@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.23] — 2026-05-12
+
+### Fixed
+- **`extensions.csv_http_server` returned HTTP 500 on every GET.**
+  aiohttp's `web.Response` rejects `content_type` strings that contain
+  a charset directive — we were passing `"text/csv; charset=utf-8"`.
+  Fix: pass `content_type="text/csv"` and `charset="utf-8"` as
+  separate kwargs. Operator workaround was to disable the
+  csv_http_server block; 0.9.23 makes it usable again.
+- **`github_issues` now auto-defaults to the workspace's active repo
+  when `repo_name` isn't supplied.** Previously `repo_management(name)`
+  activated the repo correctly but `github_issues` without
+  `repo_name` hit the "could not auto-detect from git remote" error
+  path. Workspaces now track `active_repo` and `_call_github_issues`
+  uses it as the fallback. Agents no longer need to repeat
+  `repo_name='org/repo'` on every call.
+
+### Added
+- `test_csv_http_response_content_type` — real HTTP round-trip
+  against the csv_http_server, asserts status 200 + correct
+  Content-Type. Would have caught the aiohttp API misuse before
+  release.
+- `test_github_issues_uses_workspace_active_repo` — asserts the
+  Python entry-point's github_issues dispatch propagates the active
+  workspace repo when `repo_name` is empty.
+
+Both tests follow the principle established in 0.9.22: every
+tool/handler gets a content assertion, not just a registration check.
+
 ## [0.9.22] — 2026-05-12
 
 ### Fixed

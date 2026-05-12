@@ -231,6 +231,76 @@ def test_cypher_query_returns_actual_row_data(tmp_path: Path) -> None:
     assert "2" in body, f"row value (2) not in output: {body!r}"
 
 
+def test_csv_http_response_content_type() -> None:
+    """0.9.23 regression-catcher: aiohttp's web.Response rejects
+    content_type values that contain a charset directive. 0.9.22 passed
+    `'text/csv; charset=utf-8'` and every GET against csv_http_server
+    returned HTTP 500. This test does a real round-trip through the
+    HTTP path — the only place the aiohttp API misuse surfaces."""
+    import asyncio
+    import socket
+
+    import aiohttp
+
+    from kglite.mcp_server.csv_http import CsvHttpConfig, spawn, write_csv
+
+    async def run() -> None:
+        # Pick a free port deterministically.
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = CsvHttpConfig(port=port, dir=Path(td))
+            await spawn(cfg)
+            name = write_csv(cfg, "col1,col2\nvalue_a,value_b\n")
+            # Give the listener a moment to start accepting.
+            await asyncio.sleep(0.1)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(cfg.url_for(name)) as resp:
+                    assert resp.status == 200, f"expected 200 got {resp.status}"
+                    body = await resp.text()
+                    assert "value_a" in body
+                    ctype = resp.headers.get("Content-Type", "")
+                    assert "text/csv" in ctype
+
+    asyncio.run(run())
+
+
+def test_github_issues_uses_workspace_active_repo() -> None:
+    """0.9.23 regression-catcher: after `repo_management('org/repo')`,
+    `github_issues` without explicit `repo_name` should auto-default to
+    the workspace's active repo. 0.9.22 had it fall through to
+    `github_issues_rust`'s "auto-detect from git remote" path, which
+    failed in workspace mode.
+
+    Verifies the wiring at the Python layer (no actual GitHub
+    network call): we monkeypatch the Rust wrapper's
+    `GithubIssues.search_or_list` to capture its `repo` kwarg and
+    assert it received the workspace's active_repo."""
+    from kglite.mcp_server.server import _call_github_issues
+    from kglite.mcp_server.workspace import Workspace
+
+    captured: dict[str, Any] = {}
+
+    class FakeGithubIssues:
+        def search_or_list(self, **kwargs: Any) -> str:
+            captured.update(kwargs)
+            return "stub"
+
+        def fetch(self, *args: Any, **kwargs: Any) -> str:
+            captured["fetch_repo"] = args[0] if args else None
+            return "stub-fetch"
+
+    ws = Workspace(root=Path("/tmp"), kind="local")
+    ws.active_repo = "kkollsga/kglite"
+    _call_github_issues(FakeGithubIssues(), {"limit": 2, "state": "all"}, ws)
+    assert captured.get("repo") == "kkollsga/kglite", (
+        f"github_issues did not pick up workspace.active_repo; got repo={captured.get('repo')!r}"
+    )
+
+
 def test_ping(tmp_path: Path) -> None:
     proc = _spawn(["--source-root", str(tmp_path)])
     client = McpClient(proc)
