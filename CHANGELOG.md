@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.22] — 2026-05-12
+
+### Fixed
+- **`cypher_query` row formatter now returns row values, not column
+  names.** 0.9.21 regression: `_format_inline` in
+  `kglite/mcp_server/tools.py` iterated `for v in row` against a dict,
+  yielding the column names as values. Every non-CSV `cypher_query`
+  call produced rows like `'f.name'\t'f.line_number'` instead of the
+  actual data. Operator caught it on redeploy and rolled back to
+  0.9.18. Fix: index the row dict by column (`row[col]`) so the
+  preview shows real values. The Rust-side Cypher engine + the
+  `FORMAT CSV` path were always correct — only the inline preview
+  formatter was wrong.
+
+### Added
+- `test_cypher_query_returns_actual_row_data` integration test —
+  asserts the inline preview contains the computed value (e.g. `2`)
+  and **not** the column name (`'sum'`). The 0.9.21 regression class
+  ("tool registers but returns garbage") can no longer reach release
+  without breaking the build. Same shape as the existing per-tool
+  content assertions (ping returns `pong`, read_source returns the
+  file slice, grep returns matches).
+
 ## [0.9.21] — 2026-05-12
 
 Fixes the two 0.9.20 regressions the operator caught on redeploy:

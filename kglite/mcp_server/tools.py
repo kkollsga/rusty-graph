@@ -127,9 +127,12 @@ def _format_inline(result: Any) -> str:
     header = f"{total} row(s) (showing first 15):\n" if total > 15 else f"{total} row(s):\n"
     out = [header, "\t".join(columns), "\n"]
     for row in rows[:15]:
-        # ResultView rows are tuples of values; render each as repr-ish
-        # text, tab-separated. Matches the Rust shim's push_value_repr.
-        out.append("\t".join(_repr(v) for v in row))
+        # 0.9.22 fix: kglite's ResultView yields rows as DICTS keyed by
+        # column name. Iterating a dict gives KEYS (column names), not
+        # values — the 0.9.21 regression that returned `'f.name'` in
+        # every cell instead of the actual data. Index by column to
+        # pull the value.
+        out.append("\t".join(_repr(row[col]) for col in columns))
         out.append("\n")
     return "".join(out)
 

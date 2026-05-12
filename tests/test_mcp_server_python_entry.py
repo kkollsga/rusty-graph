@@ -197,6 +197,40 @@ def test_tools_list_baseline(tmp_path: Path, case_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_cypher_query_returns_actual_row_data(tmp_path: Path) -> None:
+    """0.9.22 regression-catcher: the 0.9.21 row formatter iterated
+    a dict (got column names) instead of indexing by column (gets
+    values). The operator hit this on every non-CSV cypher_query call —
+    `RETURN 1+1 AS sum` produced `'sum'` as the row value. This test
+    asserts the inline preview contains the actual computed value, not
+    the column name."""
+    proc = _spawn(["--source-root", str(tmp_path)])
+    client = McpClient(proc)
+    try:
+        client.initialize()
+        # No graph loaded → cypher_query returns "no active graph". Use
+        # the kglite Python API directly for the assertion instead;
+        # the formatter is what we're testing, not the engine.
+    finally:
+        client.close()
+
+    # Bypass the MCP layer — exercise run_cypher() against a fresh
+    # kglite graph in-process. Any output formatter bug surfaces here
+    # without needing a fixture graph or stdio dance.
+    import kglite
+    from kglite.mcp_server.tools import GraphState, run_cypher
+
+    state = GraphState()
+    # Spin up an empty graph; RETURN 1+1 doesn't need data.
+    g = kglite.KnowledgeGraph()
+    state._active = type("A", (), {"graph": g, "source_path": None})()  # type: ignore[attr-defined]
+    body = run_cypher(state, "RETURN 1+1 AS sum")
+
+    # The bug returned `'sum'` (repr of column name) where `2` should be.
+    assert "'sum'" not in body, f"row formatter still repr'ing column names: {body!r}"
+    assert "2" in body, f"row value (2) not in output: {body!r}"
+
+
 def test_ping(tmp_path: Path) -> None:
     proc = _spawn(["--source-root", str(tmp_path)])
     client = McpClient(proc)
