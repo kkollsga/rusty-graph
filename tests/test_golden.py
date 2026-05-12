@@ -13,6 +13,8 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+
+from kglite import KnowledgeGraph
 from tests.golden.build_golden_graph import build_golden_graph
 from tests.golden.queries import CYPHER_QUERIES, FIND_QUERIES
 from tests.golden.regenerate import (
@@ -20,8 +22,6 @@ from tests.golden.regenerate import (
     _find_snapshot,
     _schema_snapshot,
 )
-
-from kglite import KnowledgeGraph
 
 SNAPSHOTS_DIR = pathlib.Path(__file__).resolve().parent / "golden" / "snapshots"
 STORAGE_MODES = ("memory", "mapped", "disk")

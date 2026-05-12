@@ -87,7 +87,7 @@ src = ["kglite"]
 select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["kglite"]
+known-first-party = ["kglite", "tests"]
 force-sort-within-sections = true
 
 [tool.ruff.lint.per-file-ignores]
