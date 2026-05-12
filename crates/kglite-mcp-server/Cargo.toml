@@ -12,15 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 # Generic MCP server framework (rmcp + manifest + source/github tools).
-# Pinned to mcp-methods 0.3.29 (rev 71f7ba6): three-crate layout
-# (pure-Rust `mcp-methods`, pyo3 bindings in `mcp-methods-py`,
-# standalone binary in `mcp-server`); plus Manifest::to_json (0.3.27);
-# plus the local-mode set_root_dir fix (0.3.28); plus the
-# `trust.allow_query_preprocessor` key (0.3.29) used by kglite's
-# extensions.cypher_preprocessor hook. We still depend on the
-# pure-Rust crate only — zero pyo3 in mcp-methods' tree, zero
-# libpython link in our binary.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "71f7ba66de39f54b5efe7813611bc9d33f1d37d2", default-features = false, features = ["server"] }
+# Switched from git+rev to crates.io in 0.9.26+ — mcp-methods publishes
+# there as of 0.3.30. Cargo.lock locks the exact version; bumps are
+# explicit via `cargo update -p mcp-methods`. We still depend on the
+# pure-Rust crate only (no pyo3 in tree, no libpython link).
+mcp-methods = { version = "0.3", default-features = false, features = ["server"] }
 
 # kglite as a pure-Rust crate dep (no PyO3 extension features). The
 # `fastembed` feature pulls in the FastEmbedAdapter so the binary can

@@ -70,16 +70,15 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # `src/mcp_tools.rs`. The `server` feature pulls the framework half
 # (manifest parser + tool implementations) without any pyo3 dep —
 # matches what we already do in `crates/kglite-mcp-server`.
-# 0.3.27 added `Manifest::to_json()` — wrapper collapses to one
-# `as_dict` method on the pyo3 side. 0.3.28 fixed
-# `Workspace::set_root_dir` clobbering `active_repo_path` (Option A
-# from the kglite bug report: `clone_or_update`'s local branch reads
-# the current state's `active_repo_path` rather than the immutable
-# `workspace_dir`). 0.3.29 added `trust.allow_query_preprocessor` to
-# ALLOWED_TRUST_KEYS + TrustConfig so the kglite 0.9.25
-# `extensions.cypher_preprocessor` hook can gate on the operator's
-# spec'd YAML shape. Pinned here for 0.9.25.
-mcp-methods = { git = "https://github.com/kkollsga/mcp-methods.git", rev = "71f7ba66de39f54b5efe7813611bc9d33f1d37d2", default-features = false, features = ["server"] }
+#
+# 0.9.26+: switched from git+rev pin to crates.io now that
+# mcp-methods publishes there (first publish at 0.3.30). The library
+# source is functionally unchanged from 0.3.29's `71f7ba6`. Cargo.lock
+# locks the exact version for reproducible builds; `cargo update` is
+# where we choose to consume framework bumps. Plan to swap back to a
+# pinned rev only if a regression surfaces; plan to widen to `>= 0.4`
+# when that major bump lands and the API surface stabilises.
+mcp-methods = { version = "0.3", default-features = false, features = ["server"] }
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies on
