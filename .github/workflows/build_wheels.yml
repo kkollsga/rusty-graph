@@ -69,7 +69,7 @@ jobs:
           wait-interval: 15
 
   build:
-    name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}
+    name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }}
     needs: [ci-gate, version-check]
     runs-on: ${{ matrix.os }}
     permissions:
@@ -108,7 +108,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          shared-key: "wheel-${{ matrix.target }}"
+          # 0.9.22: bump cache key to nuke stale 0.9.18/0.9.19 entries
+          # (those builds had fastembed-rs + ort + tokenizers in the
+          # binary's link graph; the new entries are smaller and
+          # incompatible). The deserialization warning that's appeared
+          # since the architecture shift is harmless but noisy — a
+          # fresh key suppresses it cleanly.
+          shared-key: "wheel-${{ matrix.target }}-0922"
       - name: Install Maturin
         run: pip install maturin
       - name: Build abi3 wheel
