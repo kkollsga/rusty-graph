@@ -420,27 +420,358 @@ See [Semantic Search](semantic-search.md) for the embedder protocol.
 graph.cypher("MATCH (n) WHERE n.name = $name RETURN n", params={"name": user_input})
 ```
 
-## Field-by-mode reference
+## Reference
 
-Quick lookup of which manifest keys take effect in which CLI mode.
-"—" means the key is parsed and validated but has no behavioural
-effect in that mode (it's preserved so the same YAML can be moved
-between modes without edits).
+The full programmable surface of `kglite-mcp-server`, with the
+"what's documented enough that an agent or operator can rely on
+it?" stance: anything in this section is treated as a contract.
 
-| Manifest key | `--graph` | `--workspace` | `--watch` | `--source-root` | bare |
+### Mode × YAML-field acceptance matrix
+
+Which manifest key takes effect in which CLI mode. "—" means the
+key parses cleanly but has no behavioural effect in that mode (the
+same YAML can move between modes without edits). The graph file is
+the discriminator for `--graph` / `--workspace` / `--watch` /
+`--source-root` / bare:
+
+| Manifest key | `--graph` | `--workspace` | `--watch` | `--source-root` | bare (no graph) |
 |---|---|---|---|---|---|
-| `name`, `instructions` | yes | yes | yes | yes | yes |
-| `source_root` / `source_roots` | yes (overrides parent-of-`.kgl`) | — | — | yes (canonical mode) | yes |
-| `workspace.kind: local` | — | — | — | — | promoted into workspace mode |
-| `env_file` | yes | yes | yes | yes | yes |
-| `tools[].cypher` | yes | yes | yes | — (no graph) | — |
-| `tools[].python`, `embedder:` | removed in 0.9.18 — see migration below |
-| `trust.allow_*` | parsed, no-op | parsed, no-op | parsed, no-op | parsed, no-op | parsed, no-op |
-| `builtins.save_graph: true` | yes | — | — | — | — |
-| `builtins.temp_cleanup: on_overview` | yes | yes | yes | yes | yes |
-| `extensions.embedder` (fastembed) | yes | yes | yes | — (no graph) | — |
-| `extensions.csv_http_server` | yes | yes | yes | yes | yes |
-| `extensions.<other>` (passthrough) | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
+| `name`, `instructions`, `overview_prefix` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `source_root` / `source_roots` | ✓ (overrides parent-of-`.kgl`) | — | — | ✓ (canonical) | ✓ |
+| `env_file` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `workspace.kind: local` + `workspace.root: <dir>` | — | — | — | — | promotes into local-workspace mode |
+| `workspace.watch: true` | — | — | ✓ (auto-rebuild) | — | ✓ when `workspace.kind: local` |
+| `tools[].cypher` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
+| `trust.allow_python_tools` / `allow_embedder` / `allow_query_preprocessor` | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension |
+| `builtins.save_graph: true` | ✓ (registers `save_graph`) | — (multiple graphs) | — | — | — |
+| `builtins.temp_cleanup: on_overview` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `extensions.embedder` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
+| `extensions.csv_http_server` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `extensions.cypher_preprocessor` | ✓ | ✓ | ✓ | — (no graph) | — |
+| `extensions.<other>` (passthrough) | parsed, opaque to framework | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
+| legacy top-level `embedder:` (pre-0.9.18) | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored |
+| `tools[].python:` (pre-0.9.18) | not loaded by Python entry point; mcp-methods Rust framework still parses it | (same) | (same) | (same) | (same) |
+
+Unknown keys at the top level (or under `builtins:` / `workspace:` /
+`trust:` / `tools[]` / `embedder:`) fail validation at boot with a
+non-zero exit and an `ERROR: <path>: unknown ... keys: [...]`
+message. Keys under `extensions:` are deliberately unvalidated —
+they're the downstream-binary passthrough zone.
+
+### Tool gating
+
+Which tool registers, under what conditions. `tools/list` only ever
+shows what's registered, so this also answers "what set of tools
+will my agent see?"
+
+| Tool | Registered when | Notes |
+|---|---|---|
+| `cypher_query` | always | Returns inline rows or CSV URL — see "Tool response formats". |
+| `graph_overview` | always | Always available even with no graph: returns the no-graph message. |
+| `ping` | always | Liveness probe. |
+| `read_code_source` | always | Requires an active graph at call time (returns the no-graph message otherwise). |
+| `save_graph` | `--graph` mode AND `builtins.save_graph: true` | Other modes have no single graph to save back to. |
+| `read_source` / `grep` / `list_source` | a source root is configured (`--source-root`, `--graph` parent auto-bind, manifest `source_root:`, or active workspace repo) | All three register together; never registered independently. |
+| `repo_management` | `--workspace` mode OR `workspace.kind: local` in manifest | Local-mode rejects `name=` and `delete=true`; both are github-only. |
+| `set_root_dir` | `workspace.kind: local` only | Sandboxed against the manifest-declared `workspace.root` for the lifetime of the server. |
+| `github_issues` / `github_api` | `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
+| Manifest `tools[].cypher` entries | the manifest declares them AND the mode supports cypher (anything but `--source-root` and bare) | Tool names cannot collide with the built-ins above. |
+
+### Tool response formats
+
+Bundled-tool response shapes are treated as version-stable contracts
+across patch releases — they're tagged below per stability. Manifest
+`tools[].cypher` responses inherit `cypher_query`'s format.
+
+| Tool | Response shape | Stability |
+|---|---|---|
+| `ping` | `<message>` (default `pong`) | Stable. |
+| `cypher_query` (inline) | `<N> row(s)[ (showing first 15)]:\n<TAB-joined column names>\n<TAB-joined repr'd values per row>\n` | Stable post-0.9.22 (the 0.9.21 row-formatter regression is the canonical "this is now a contract" event). |
+| `cypher_query FORMAT CSV` with `csv_http_server` | `FORMAT CSV: <N> row(s) written to <url>\nFetch with: curl <url>` | Stable. |
+| `cypher_query FORMAT CSV` without `csv_http_server` | Inline CSV body. | Stable. |
+| `cypher_query` errors | `Cypher error: <engine message>` | Stable. |
+| `graph_overview` | XML schema (see `describe()` output) — types / connections / cypher panes depending on args. | Stable; the XML shape is the canonical agent-facing format. |
+| `read_source` | First line: `<path>  (lines X-Y of Z)`, body lines: `   <lineno>: <text>`. Truncation footer when `max_chars` trips: `... (truncated)`. | Stable. |
+| `read_source` (path errors) | `Error: path '<path>' does not exist or access denied.` | Stable. |
+| `grep` | `<path>:<line>:<text>` for matches, `<path>-<line>-<text>` for context lines. | Stable. |
+| `list_source` | Tree-formatted directory listing relative to the primary source root. | Stable. |
+| `read_code_source` | First line: `// <qualified_name> (<path>:<start>-<end>)`, body lines: `   <lineno>: <text>`. | Stable. |
+| `save_graph` | `Saved <path> (<N> nodes, <M> edges).` (or `Saved <path>.` when schema unavailable). | Stable. |
+| `save_graph` (no graph) | `save_graph requires --graph mode (no source path bound).` | Stable. |
+| `repo_management` (list) | `<N> live repo(s):\n  <repo>[ [active]]  (<count> access[es], last <when>)` | Stable. |
+| `repo_management` (activate) | `Cloned 'org/repo' at <path>.` / `Updated 'org/repo' at <path>.` / `Activated (already up to date) 'org/repo' at <path>.` | Stable. |
+| `set_root_dir` (success) | `Active root set to <absolute_path>.` | Stable. |
+| `set_root_dir` (escape) | `Error: path '<path>' escapes the workspace root.` | Stable. |
+| `github_issues` (FETCH) | Issue/PR/discussion body with `cb_N` / `patch_N` / `comment_N` / `review_N` placeholders for collapsed elements. Drill down with `element_id=<placeholder>`. | Stable. |
+| `github_issues` (LIST/SEARCH) | `<N> discussions in org/repo (<state>):` then per-line summary. | Stable. |
+| `github_api` | Pretty-printed JSON body, truncated to `truncate_at` chars (default 80 000). | Stable. |
+| (any tool, no active graph) | `No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').` | Stable. |
+
+If a future release needs to change a stable shape, that's a breaking
+change tracked in the `CHANGELOG.md` "Changed" section (not "Fixed")
+and the version bumps minor, not patch.
+
+### `extensions:` schema reference
+
+The `extensions:` block is the kglite-specific addon namespace. The
+keys validated below are first-class — they have parser-level
+validation, default values, and contracts. Anything else under
+`extensions.*` is opaque passthrough.
+
+#### `extensions.embedder`
+
+Registers an embedder so `text_score()` works inside Cypher.
+
+```yaml
+extensions:
+  embedder:
+    backend: fastembed              # required; only "fastembed" is currently supported
+    model: BAAI/bge-m3              # required; see "Embedder backend × model catalog" below
+    cooldown: 900                   # optional; seconds (default 900). 0 = never release.
+```
+
+| Field | Type | Default | Constraint |
+|---|---|---|---|
+| `backend` | string | (required) | Must be `"fastembed"`. |
+| `model` | string | (required) | Must be in the catalog table below. |
+| `cooldown` | int | 900 | seconds; `0` disables auto-release. bge-m3 only — other models ignore this field. |
+
+The legacy `embedder:` block (top-level, 0.9.17 and earlier) is
+parsed by the framework but the kglite Python entry point does not
+load Python embedder factories — use `extensions.embedder:` and an
+in-catalog model.
+
+#### `extensions.csv_http_server`
+
+Spawns a localhost HTTP listener (loopback only) that serves CSV
+exports produced by `cypher_query ... FORMAT CSV`.
+
+```yaml
+extensions:
+  csv_http_server:
+    port: 8765                      # optional; default 8765
+    dir: temp/                      # optional; default temp/ (relative to manifest)
+    cors_origin: "*"                # optional; default "*"
+```
+
+Also accepts shorthand:
+
+```yaml
+extensions:
+  csv_http_server: true             # defaults — port 8765, dir temp/
+  # or
+  csv_http_server: false            # explicitly disabled (same as absent)
+```
+
+| Field | Type | Default | Constraint |
+|---|---|---|---|
+| `port` | int | 8765 | `0 ≤ port ≤ 65535`. |
+| `dir` | string | `temp` | Path; resolved against the manifest's parent directory. |
+| `cors_origin` | string | `"*"` | Sent in `Access-Control-Allow-Origin`. Use a specific origin for tighter security. |
+
+Only GETs of flat filenames inside `dir` are served. No directory
+listings, no write surface from the HTTP layer (writes only come
+from the Cypher executor via `FORMAT CSV`).
+
+#### `extensions.cypher_preprocessor` (0.9.25+)
+
+Manifest-declarable hook fired before every `cypher_query` and
+`tools[].cypher` invocation. Optionally rewrites query + params
+before they reach `graph.cypher(...)`.
+
+```yaml
+trust:
+  allow_query_preprocessor: true    # required gate; mirrors allow_embedder
+
+extensions:
+  cypher_preprocessor:
+    module: ./wikidata_preprocessor.py   # path; relative to manifest, or absolute
+    class: WikidataPreprocessor          # callable class OR
+    # function: rewrite                  # alternative: module-level free function
+    kwargs:                              # optional, passed to constructor
+      log_rewrites: false
+```
+
+Protocol the loaded callable must implement:
+
+```python
+class CypherPreprocessor(Protocol):
+    def rewrite(self, query: str, params: dict | None) -> tuple[str, dict | None]:
+        """Rewrite the query and/or params before execution.
+        Either may be returned unchanged.
+        Raising ValueError / TypeError surfaces to the agent as
+        'preprocessor: <msg>' inside the tool response."""
+```
+
+The hook fires for `cypher_query` and `tools[].cypher` only. It is
+**not** called for `graph_overview`, `read_source`, `grep`,
+`list_source`, `read_code_source`, `repo_management`, `set_root_dir`,
+`github_issues`, `github_api`, `ping`, or `save_graph`.
+
+| Field | Type | Default | Constraint |
+|---|---|---|---|
+| `module` | string | (required) | Path to a `.py` file. Manifest-relative or absolute. |
+| `class` | string | one of `class`/`function` required | Importable class name; instantiated with `kwargs`. |
+| `function` | string | one of `class`/`function` required | Module-level function with signature `(query, params) -> (query, params)`. |
+| `kwargs` | mapping | `{}` | Passed to the class constructor (ignored for `function:`). |
+
+#### `extensions.<other>` (passthrough)
+
+Any other key under `extensions:` parses cleanly and is preserved on
+the loaded `Manifest.extensions` dict. The framework does not
+validate inner shape. Downstream consumers (kglite-mcp-server, your
+own server binaries) read whatever they need from this map.
+
+### `tools[].cypher` template reference
+
+Manifest entries shaped like
+
+```yaml
+tools:
+  - name: <identifier>
+    description: <agent-visible explanation>
+    parameters: <JSON Schema object>
+    cypher: |
+      <Cypher template with $param placeholders>
+```
+
+become first-class MCP tools. Behaviour:
+
+**Name** — must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Cannot collide
+with built-in tool names (`cypher_query` / `graph_overview` etc.).
+
+**`$param` substitution** — Cypher templates pass through to
+`graph.cypher(query, params=args)` unchanged. The kglite Cypher
+engine does typed parameter binding (no string interpolation) — the
+JSON value of `args[$name]` becomes a typed value at the
+`MATCH (n {field: $name})` site, so injection is impossible by
+construction. The agent supplies values per the JSON Schema; kglite
+binds them in-engine.
+
+**JSON Schema flavour** — `parameters:` accepts the subset of
+JSON Schema (draft 2020-12) that the MCP SDK supports for tool
+input. Practically: `type`, `properties`, `required`, `default`,
+`description`, `enum`, `items` (for arrays), `minimum`/`maximum`,
+`minLength`/`maxLength`, `pattern`. Nested objects work; bring the
+schema's complexity in proportion to the tool's parameter
+complexity.
+
+**Parameter validation** — the MCP client enforces schema validation
+before the tool is dispatched. A type mismatch (string supplied for
+an `integer` field) raises an MCP-level error before
+`graph.cypher()` runs; the agent receives a structured tool error
+rather than a Cypher error.
+
+**Tool errors** — if `graph.cypher()` raises, the response body is
+`Cypher error: <engine message>` (the same envelope as
+`cypher_query`). Empty result sets render as `No results.`.
+
+**`FORMAT CSV` inheritance** — manifest cypher tools share the
+formatting path with `cypher_query`. Append `FORMAT CSV` inside the
+template (or `$_csv_format` if you want to gate it on a parameter),
+and the tool's output follows the same inline-vs-URL behaviour
+documented under "Tool response formats."
+
+**Boot-time validation** — every `$param` named in the template
+must appear in `parameters.properties`. Mismatch fails at boot,
+not at agent call time.
+
+Worked examples — see `docs/examples/manifest_cypher_tool.md`
+through `docs/examples/manifest_wikidata.md`.
+
+### Embedder backend × model catalog
+
+`extensions.embedder.backend: fastembed` is currently the only
+supported backend. The `model:` string routes internally to one of
+two implementations depending on what's in fastembed-python's
+catalog:
+
+| Model name | Dimension | Internal backend |
+|---|:---:|---|
+| `BAAI/bge-m3` | 1024 | Direct ONNX wrapper (`kglite.mcp_server.bge_m3.BgeM3Embedder`) — fastembed-python's catalog doesn't carry bge-m3, so we go through a hand-written ONNX inference path with HuggingFace Hub downloads. |
+| `BAAI/bge-small-en-v1.5`, `bge-small-en-v1.5` | 384 | fastembed-python (`fastembed.TextEmbedding`). |
+| `BAAI/bge-base-en-v1.5`, `bge-base-en-v1.5` | 768 | fastembed-python. |
+| `BAAI/bge-large-en-v1.5`, `bge-large-en-v1.5` | 1024 | fastembed-python. |
+| `sentence-transformers/all-MiniLM-L6-v2`, `all-MiniLM-L6-v2` | 384 | fastembed-python. |
+| `intfloat/multilingual-e5-large`, `multilingual-e5-large` | 1024 | fastembed-python. |
+| `intfloat/multilingual-e5-base`, `multilingual-e5-base` | 768 | fastembed-python. |
+
+Both internal backends cache ONNX weights at `~/.cache/fastembed/`
+(or `FASTEMBED_CACHE_PATH` if set). First call downloads; subsequent
+calls re-use the cache.
+
+Adding a new model: open an issue with the HuggingFace identifier
+and target dimension. fastembed-python adds models periodically, in
+which case the kglite-side change is a one-line addition to
+`kglite/mcp_server/embedder.py::KNOWN_MODELS`.
+
+### Path resolution and manifest discovery
+
+**Relative paths in manifests resolve against the manifest's own
+directory.** This applies to `source_root`, `env_file`, every
+entry in `source_roots`, `workspace.root`,
+`extensions.csv_http_server.dir`, and
+`extensions.cypher_preprocessor.module`. The rule is unconditional:
+no path is interpreted relative to `cwd` unless explicitly
+absolute.
+
+Manifest discovery order:
+
+1. `--mcp-config <path>` — explicit path; absolute or
+   resolved against cwd.
+2. `--graph X.kgl` — auto-detects `<dirname>/<basename>_mcp.yaml`
+   next to the graph file (the "sibling" pattern).
+3. `--workspace DIR` / `--watch DIR` — auto-detects
+   `DIR/workspace_mcp.yaml`.
+4. `--source-root` / bare — no auto-detection. Pass `--mcp-config`
+   explicitly if you want a manifest.
+
+`.env` discovery order:
+
+1. Manifest `env_file: <path>` — explicit; absolute or relative to
+   manifest dir.
+2. Otherwise walks upward from the mode path (or cwd in bare mode)
+   looking for a `.env` file. Loads the first one found.
+
+Existing process env vars are never overwritten by `.env` —
+`GITHUB_TOKEN=...` in your shell wins over the file.
+
+### Operator notes
+
+#### PyPI simple-index lag after publish
+
+After a `kglite` release publishes to PyPI, the `simple/` index
+that `pip install` consults can lag the JSON metadata by ~few
+minutes. The first `pip install kglite==X.Y.Z` after publish may
+return `No matching distribution found`. Workaround:
+
+```bash
+pip install --index-url https://pypi.org/simple/ --no-cache-dir 'kglite[mcp]==X.Y.Z'
+```
+
+The `--index-url` forces a direct fetch (some mirrors cache
+longer); `--no-cache-dir` bypasses pip's local cache. Wait a few
+minutes if you'd rather not pass flags — the lag is consistent.
+
+This is a PyPI / mirror-cache behaviour, not a kglite packaging
+problem.
+
+#### Conda + multiple Pythons
+
+`pip install kglite` against a conda env's Python (`conda
+activate myenv && pip install kglite`) Just Works post-0.9.20 —
+no `PYO3_PYTHON=`, no `install_name_tool` patching. If your shell
+PATH lifts an older `kglite-mcp-server` from a different env, run
+`which kglite-mcp-server` to confirm which install the script points
+at.
+
+#### Watch mode rebuild costs
+
+`workspace.watch: true` + `--watch DIR` rebuilds the code-tree graph
+on every debounced file change (500 ms default debounce). For source
+trees over 100k LoC this costs a few seconds per rebuild. The
+rebuild runs on a background thread; queries against the previous
+graph keep working until the new graph atomically swaps in.
 
 ## Migration: 0.9.19 → 0.9.20
 
@@ -531,3 +862,16 @@ With this set, a `cypher_query` that ends in `FORMAT CSV` writes the
 result to `temp/kglite-<hash>.csv` and returns a `http://127.0.0.1:8765/...`
 URL the agent can fetch when ready. Useful for million-row exports
 that would otherwise blow the MCP response budget.
+
+## Worked examples
+
+End-to-end manifest snippets, each focused on one feature:
+
+```{toctree}
+:maxdepth: 1
+
+../examples/manifest_cypher_tool
+../examples/manifest_with_embedder
+../examples/manifest_workspace
+../examples/manifest_cypher_preprocessor
+```
