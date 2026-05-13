@@ -51,16 +51,34 @@ significant docs sweep across `docs/guides/mcp-servers.md`.
   correctly. The proper disk write-path implementation is on
   the roadmap.
 
-### Known limitations (new in 0.9.26)
-
-- **Cypher `REMOVE n.prop` on `storage="disk"` graphs is a silent
-  no-op.** Discovered separately during the disk-CREATE guard
-  work. `REMOVE` completes without error but the property is not
-  actually dropped — a subsequent read returns the old value.
-  Workaround: `SET n.prop = null` instead. Affects only
-  `storage="disk"`; in-memory and `storage="mapped"` `REMOVE`
-  work normally. Documented under "Known limitations" in
-  `docs/guides/mcp-servers.md`. Tracked for a future release.
+- **Cypher `REMOVE n.prop` on `storage="disk"` graphs now works
+  correctly.** Discovered as a silent no-op during the
+  disk-CREATE guard investigation: the disk staged-write flush
+  (`flush_node_mut_cache`) only persisted property keys *present*
+  in the staged Map, so a bare `properties.remove(key)` from
+  `NodeData::remove_property` left the column store untouched
+  and reads returned the original value. Fix: a new
+  `NodeData::clear_property` helper inserts `Value::Null` for
+  the key instead, which the flush writes through to the column
+  store. `execute_remove` now routes to `clear_property` on
+  disk-backed graphs via an `is_disk()` branch; memory and
+  mapped backends keep the prior in-place `remove_property`
+  behaviour (no change). Verified by B9 (regression test) +
+  parity with the documented `SET n.prop = null` path.
+- **`DiskGraph::node_weight` debug-assertion no longer fires on
+  false-positive cases.** The 0.9.0 Cluster 6 hygiene check at
+  `disk/graph.rs::node_weight` previously fired whenever
+  `node_mut_cache` had ANY entry for the index being read. That
+  included `PropertyStorage::Columnar { row_id, .. }` scratch
+  entries left by `batch.rs::flush_chunk` (the `add_nodes`
+  path) — those are "already persisted via full-Arc
+  replacement, safe to discard" and not a missed-flush concern.
+  The check now filters to non-empty `PropertyStorage::Map`
+  entries only (the actual Cypher-style staged writes that
+  WOULD be shadowed by a column-store read). Removes the
+  warning noise that appeared during normal `maturin develop`
+  test runs. Debug-only assertion; never appeared in release
+  builds.
 
 ### Added
 

@@ -916,9 +916,22 @@ fn execute_remove(
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
-                    // Remove property (mutable borrow, returns old value)
+                    // Remove property (mutable borrow, returns old value).
+                    //
+                    // On disk-backed graphs, the staged-write flush only
+                    // persists keys *present* in the staged property Map
+                    // — a bare `remove_property` leaves the column store
+                    // unchanged and the next read returns the old value.
+                    // `clear_property` inserts Null instead so the flush
+                    // writes through, matching SET-to-null semantics
+                    // (verified working on disk).
+                    let is_disk = graph.graph.is_disk();
                     let removed_value = if let Some(node) = graph.get_node_mut(*node_idx) {
-                        node.remove_property(property)
+                        if is_disk {
+                            node.clear_property(property)
+                        } else {
+                            node.remove_property(property)
+                        }
                     } else {
                         None
                     };

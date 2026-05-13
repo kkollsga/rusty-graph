@@ -548,25 +548,6 @@ Workarounds:
 `SET` and `DELETE` on disk-backed graphs work normally. The proper
 disk `CREATE` write path is on the roadmap for a future release.
 
-### Cypher `REMOVE` is a silent no-op on `storage="disk"` graphs
-
-Separate from the CREATE limitation above, `REMOVE n.prop` against a
-disk-backed graph completes without error but the property is not
-actually dropped — a subsequent read returns the old value. SET
-(including `SET n.prop = null`) is unaffected and is the working
-workaround:
-
-```cypher
--- Doesn't drop the property on disk graphs (silent no-op):
-MATCH (n:Item {id: 'x'}) REMOVE n.note
-
--- Works on disk graphs (clears the property):
-MATCH (n:Item {id: 'x'}) SET n.note = null
-```
-
-Tracked for a future release. Affects only `storage="disk"` graphs;
-in-memory and `storage="mapped"` REMOVE work normally.
-
 ## Troubleshooting
 
 Common post-boot pitfalls, grouped by symptom.

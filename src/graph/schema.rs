@@ -1453,6 +1453,30 @@ impl NodeData {
     pub fn remove_property(&mut self, key: &str) -> Option<Value> {
         self.properties.remove(InternedKey::from_str(key))
     }
+
+    /// Mark a property as cleared. Returns the prior value if it existed.
+    ///
+    /// Used by the Cypher `REMOVE` clause when the graph is disk-backed.
+    /// The disk write-path flush (`flush_node_mut_cache`) only writes
+    /// keys *present* in the staged property Map to the column store;
+    /// a bare `remove()` of the key from the staged Map leaves the
+    /// column store's original value untouched. By inserting
+    /// `Value::Null` for the key instead, the flush writes Null to
+    /// the column store, and reads return None — matching the
+    /// user-facing semantics of REMOVE (the property is no longer
+    /// observable on the node).
+    ///
+    /// For memory/mapped backends, `remove_property` works directly
+    /// against the in-place storage and this method isn't needed.
+    /// Disk callers detect via `graph.is_disk()` and choose the right
+    /// helper.
+    #[inline]
+    pub fn clear_property(&mut self, key: &str) -> Option<Value> {
+        let interned = InternedKey::from_str(key);
+        let prior = self.properties.remove(interned);
+        self.properties.insert(interned, Value::Null);
+        prior
+    }
 }
 
 pub struct EdgeData {

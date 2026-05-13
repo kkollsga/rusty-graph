@@ -501,19 +501,17 @@ def test_b6_graph_mode_accepts_disk_backed_graph_directory(tmp_path: Path) -> No
     )
 
 
-def test_b9_disk_graph_still_supports_cypher_set_and_delete(tmp_path: Path) -> None:
-    """0.9.26 guards CREATE / MERGE on disk graphs (B8) but SET and
-    DELETE go through `node_weight_mut` → `node_mut_cache` →
-    `clear_arenas` flush — that path works on disk and must keep
-    working.
+def test_b9_disk_graph_supports_cypher_set_remove_and_delete(tmp_path: Path) -> None:
+    """0.9.26 guards CREATE / MERGE on disk graphs (B8) but SET / REMOVE
+    / DELETE go through `node_weight_mut` → `node_mut_cache` →
+    `clear_arenas` flush. SET and DELETE always worked on disk;
+    REMOVE was a silent no-op pre-fix (the flush only writes keys
+    PRESENT in the staged Map, so a bare remove left the column
+    store untouched). The fix routes REMOVE on disk to
+    `NodeData::clear_property`, which inserts Null instead — the
+    flush writes Null and reads return None.
 
-    Catches: over-eager gating that accidentally blocks the working
-    mutation paths. The disk-graph guard is narrow by design.
-
-    Note on REMOVE: also probed against disk graphs and found
-    silently no-op as of 0.9.26 (separate bug from CREATE, documented
-    under Known Limitations in docs/guides/mcp-servers.md). Not
-    asserted here pending a fix in a future release."""
+    Catches: regressions across the disk mutation surface."""
     import pandas as pd
 
     import kglite
@@ -521,19 +519,34 @@ def test_b9_disk_graph_still_supports_cypher_set_and_delete(tmp_path: Path) -> N
     disk_dir = tmp_path / "disk_set"
     g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
     g.add_nodes(
-        pd.DataFrame([{"id": "m1", "title": "first"}, {"id": "m2", "title": "second"}]),
+        pd.DataFrame(
+            [
+                {"id": "m1", "title": "first", "score": 1.0},
+                {"id": "m2", "title": "second", "score": 2.0},
+            ]
+        ),
         "Marker",
         "id",
         "title",
     )
 
-    # SET a new property — must not be blocked.
+    # SET a new property.
     g.cypher("MATCH (n:Marker {title: 'first'}) SET n.note = 'tagged'")
     rows = list(g.cypher("MATCH (n:Marker) RETURN n.title AS title, n.note AS note ORDER BY title"))
     assert rows[0]["note"] == "tagged", f"SET on disk graph regressed: {rows!r}"
     assert rows[1]["note"] is None, f"SET on disk graph regressed (other rows): {rows!r}"
 
-    # DELETE — also unblocked.
+    # REMOVE the property — must actually take effect (0.9.26 fix).
+    g.cypher("MATCH (n:Marker {title: 'first'}) REMOVE n.note")
+    rows = list(g.cypher("MATCH (n:Marker) RETURN n.title AS title, n.note AS note ORDER BY title"))
+    assert rows[0]["note"] is None, f"REMOVE on disk graph regressed (still 'tagged'): {rows!r}"
+
+    # REMOVE on a property set via add_nodes (not just SET).
+    g.cypher("MATCH (n:Marker {title: 'second'}) REMOVE n.score")
+    rows = list(g.cypher("MATCH (n:Marker) RETURN n.title AS title, n.score AS score ORDER BY title"))
+    assert rows[1]["score"] is None, f"REMOVE of add_nodes-set property regressed: {rows!r}"
+
+    # DELETE — also works.
     g.cypher("MATCH (n:Marker {title: 'second'}) DELETE n")
     count_rows = list(g.cypher("MATCH (n:Marker) RETURN count(n) AS c"))
     assert count_rows[0]["c"] == 1, f"DELETE on disk graph regressed: {count_rows!r}"

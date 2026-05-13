@@ -695,21 +695,36 @@ impl DiskGraph {
         }
 
         // 0.9.0 Cluster 6 — preventative invariant. node_weight_mut
-        // stages writes in node_mut_cache; if an entry exists for
-        // this index here on the read path, the staged write is
-        // about to be silently shadowed by the column_stores read
-        // (i.e. a missed flush_pending_writes call). 0.8.41's
+        // stages writes in node_mut_cache; if a *Map-typed* entry
+        // exists for this index here on the read path, the staged
+        // write is about to be silently shadowed by the column_stores
+        // read (i.e. a missed flush_pending_writes call). 0.8.41's
         // execute_mutable post-write flush should keep this empty
         // outside of mid-mutation evaluation; firing here means a
         // new code path needs an explicit flush.
+        //
+        // 0.9.26: filter the check to `PropertyStorage::Map` entries.
+        // `batch.rs::flush_chunk` (the `add_nodes` path) leaves
+        // `PropertyStorage::Columnar { row_id, .. }` scratch in the
+        // cache as a transient post-write artifact — that's "already
+        // persisted via full-Arc replacement, safe to discard" (see
+        // the reseed-path comment further down in this file). Those
+        // entries are not a missed-flush concern; firing the
+        // assertion on them was a false positive that made the
+        // warning noisy during normal test runs.
         #[cfg(debug_assertions)]
-        if self.node_mut_cache.contains_key(&(i as u32)) {
-            eprintln!(
-                "BUG: DiskGraph::node_weight({}) called while node_mut_cache holds a staged \
-                 write for that index. Missing flush_pending_writes() call. See 0.9.0 \
-                 readiness Cluster 6 / node_weight_mut docs.",
-                i
-            );
+        if let Some(staged) = self.node_mut_cache.get(&(i as u32)) {
+            use crate::graph::schema::PropertyStorage;
+            if matches!(staged.properties, PropertyStorage::Map(_))
+                && !matches!(staged.properties, PropertyStorage::Map(ref m) if m.is_empty())
+            {
+                eprintln!(
+                    "BUG: DiskGraph::node_weight({}) called while node_mut_cache holds a \
+                     staged Map-typed write for that index. Missing flush_pending_writes() \
+                     call. See 0.9.0 readiness Cluster 6 / node_weight_mut docs.",
+                    i
+                );
+            }
         }
 
         let node_type_key = InternedKey::from_u64(slot.node_type);
