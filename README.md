@@ -173,8 +173,9 @@ kglite-mcp-server --graph path/to/graph.kgl
 
 Drop a `<basename>_mcp.yaml` next to the graph to auto-extend the
 tool surface — `source_root:` for read/grep/list over your source
-files, inline Cypher templates as named tools, optional Python hooks
-behind `--trust-tools`. No fork required for most customisation. See
+files, inline Cypher templates as named tools, `extensions.embedder`
+for `text_score()`, `extensions.cypher_preprocessor` for query
+rewriting. No fork required for most customisation. See
 [the MCP guide](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html).
 
 ### Codebase analysis
@@ -264,9 +265,11 @@ use cases above:
 - **[`conference_graph_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/conference_graph_mcp.yaml)**
   — annotated MCP manifest. Drop next to a `.kgl` file and
   `kglite-mcp-server` auto-loads it: `source_root:` registers
-  sandboxed file-access tools, inline Cypher templates become typed
-  MCP tools, and a trust-gated `python:` hook adds custom logic. The
-  zero-Python-fork starting point for any new project.
+  sandboxed file-access tools, inline `tools[].cypher` templates
+  become typed MCP tools, and the commented `extensions.*` blocks
+  show the opt-in shapes for semantic search, CSV export over HTTP,
+  and query preprocessors. The zero-Python-fork starting point for
+  any new project.
 - **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
   — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
   covering laws, regulations, and court decisions with citation
@@ -285,7 +288,7 @@ use cases above:
   [mcp-methods] framework). Reach for it when the manifest doesn't
   express what you need; the binary is the reference for layering
   domain-specific tools on top of the generic source / GitHub /
-  python-tool surface.
+  workspace surface.
 
 [mcp-methods]: https://github.com/kkollsga/mcp-methods
 

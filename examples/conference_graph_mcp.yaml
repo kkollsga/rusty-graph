@@ -5,15 +5,12 @@
 # bundled CLI picks it up automatically:
 #
 #     pip install "kglite[mcp]"
-#     kglite-mcp-server --graph conference_graph.kgl --trust-tools
+#     kglite-mcp-server --graph conference_graph.kgl
 #
 # In workspace (multi-graph) mode, name the file `workspace_mcp.yaml`
 # and place it inside the workspace directory. The same fields apply.
 #
-# Drop --trust-tools when you don't have python: hooks or a custom
-# embedder declared (or remove those sections below). All paths in
-# this file resolve relative to the yaml's directory; ../ traversal
-# is allowed.
+# All paths in this file resolve relative to the yaml's directory.
 
 # ── Server identity (optional) ───────────────────────────────────────
 name: Conference Graph
@@ -22,7 +19,7 @@ instructions: |
   similarity edges between sessions. Use cypher_query for
   structured questions, read_source / grep / list_source for raw
   data in ./data, similar_sessions for embedding-based recs,
-  session_detail for fields not lifted to the graph.
+  session_detail for the full session record by id.
 
 # ── overview_prefix: prepended to bare graph_overview() output ───────
 # Useful for sticky context the agent needs after a few turns —
@@ -40,37 +37,48 @@ overview_prefix: |
 #     source_roots: [./data, ../shared/lookups]
 source_root: ./data
 
-# ── Trust gates (only set when needed) ───────────────────────────────
-# Each gate is HALF the trust signal — the operator must ALSO pass
-# --trust-tools on the CLI. Either signal alone refuses to load.
-#   allow_python_tools — required for `python:` tool entries below
-#   allow_embedder     — required for the `embedder:` factory below
-trust:
-  allow_python_tools: true
-  # allow_embedder: true   # uncomment if using a custom embedder factory
-
 # ── Pre-blessed builtins (no trust gate needed) ──────────────────────
 # These wrap small kglite-internal operations the CLI knows how to
 # perform safely without loading user code.
 #   save_graph     — register save_graph() to persist Cypher mutations
+#                    (single-graph mode only; not registered in
+#                    --workspace mode).
 #   temp_cleanup   — "on_overview" wipes temp/ on bare graph_overview()
-#                    calls so it doesn't grow unbounded; "never" (default)
-#                    keeps existing behaviour
+#                    calls so it doesn't grow unbounded; "never"
+#                    (default) keeps existing behaviour.
 # builtins:
 #   save_graph: true
 #   temp_cleanup: on_overview
 
-# ── Custom embedder factory (optional, trust-gated) ──────────────────
-# Replaces the stock `--embedder MODEL_NAME` shortcut. Use when you need
-# cooldown-based unload, a non-sentence-transformers backend, or other
-# project-specific lifecycle. The class is instantiated as
-# `Class(**kwargs)` and bound via graph.set_embedder().
-# embedder:
-#   module: ./embedder.py            # path relative to this yaml
-#   class: GraphEmbedder
-#   kwargs:
+# ── Extensions: kglite-specific addons ───────────────────────────────
+# extensions.embedder enables text_score() inside Cypher. The model
+# string routes internally — see docs/guides/mcp-servers.md →
+# Embedder backend × model catalog. `cooldown` is the idle-release
+# window in seconds (default 900 = 15 min; 0 = never release).
+#
+# extensions:
+#   embedder:
+#     backend: fastembed
 #     model: BAAI/bge-m3
-#     cooldown: 900                  # seconds idle before unload
+#     cooldown: 900
+#   csv_http_server:
+#     port: 8765
+#     dir: temp/
+#   cypher_preprocessor:
+#     module: ./preprocessor.py
+#     class: ConferencePreprocessor
+
+# ── Trust gates (only set when needed) ───────────────────────────────
+# Each gate controls a specific extension. Operators reviewing a
+# manifest for security audit can scan `trust:` to see every
+# dynamic-code hook the manifest enables in one place.
+#   allow_embedder            — required for extensions.embedder
+#                                (loads ONNX model weights)
+#   allow_query_preprocessor  — required for extensions.cypher_preprocessor
+#                                (loads + executes Python rewriter)
+# trust:
+#   allow_embedder: true
+#   allow_query_preprocessor: true
 
 # ── Custom tools the agent can call by name ──────────────────────────
 tools:
@@ -102,10 +110,27 @@ tools:
       RETURN s.title AS title, s.registrants AS registrants
       ORDER BY registrants DESC LIMIT 10
 
-  # Python hook: arbitrary Python function as an MCP tool. The
-  # function's signature, type hints, and docstring become the input
-  # schema directly — no synthesis layer.
+  # Full session record by id — joins to Speakers + sponsoring
+  # Companies in one cypher call. The pre-0.9.18 manifest format
+  # had a `python: ./tools.py` hook for shapes like this; 0.9.18
+  # removed Python tool factories. The supported replacements:
+  #   1. tools[].cypher (this entry) — works for anything expressible
+  #      in Cypher with $param substitution.
+  #   2. extensions.cypher_preprocessor (see commented block above) —
+  #      Python hook that rewrites the query/params before execution.
+  #      For light input normalisation rather than full custom logic.
   - name: session_detail
-    description: Full source JSON for a session by id (fields not lifted to the graph).
-    python: ./tools.py
-    function: session_detail
+    description: Full record for a session by id (speakers, companies, edges).
+    parameters:
+      type: object
+      properties:
+        session_id:
+          type: string
+      required: [session_id]
+    cypher: |
+      MATCH (s:Session {id: $session_id})
+      OPTIONAL MATCH (s)-[:PRESENTS]->(speaker:Speaker)
+      OPTIONAL MATCH (s)-[:SPONSORED_BY]->(company:Company)
+      RETURN s,
+             collect(DISTINCT speaker) AS speakers,
+             collect(DISTINCT company) AS sponsors
