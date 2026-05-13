@@ -567,20 +567,6 @@ MATCH (n:Item {id: 'x'}) SET n.note = null
 Tracked for a future release. Affects only `storage="disk"` graphs;
 in-memory and `storage="mapped"` REMOVE work normally.
 
-### `repo_management` registers differently in `mcp-server` (bare framework)
-
-If you compare the tool surface between `kglite-mcp-server` and
-the bare `mcp-server` CLI shipped with the
-[mcp-methods](https://mcp-methods.readthedocs.io) crate, you'll
-see `repo_management` registered by `mcp-server` in bare mode
-(no `--workspace` flag) but only in workspace modes by
-`kglite-mcp-server`. kglite's stricter gating matches the
-[tool gating matrix](#tool-gating) below — bare-mode
-`repo_management` has no workspace state to manage, so we hide it.
-Tracked with mcp-methods for alignment in a future release; no
-operator-facing impact in the meantime if you only run
-`kglite-mcp-server`.
-
 ## Troubleshooting
 
 Common post-boot pitfalls, grouped by symptom.
@@ -643,6 +629,14 @@ tool needs to register. Most common cases:
 - `github_issues` / `github_api` missing — no `GITHUB_TOKEN` in env.
 - `save_graph` missing — you're not in `--graph` mode OR the
   manifest doesn't set `builtins.save_graph: true`.
+
+If you're also running the bare `mcp-server` CLI from
+[mcp-methods](https://mcp-methods.readthedocs.io) against the same
+YAML for comparison: expect a slightly different tool list there
+(notably `mcp-server` registers `repo_management` in bare mode
+while `kglite-mcp-server` gates it on `--workspace`). Tracked for
+framework alignment; only relevant if you compare the two binaries
+side-by-side.
 
 ### PyPI says "No matching distribution found" immediately after a release
 
