@@ -8,19 +8,22 @@ When all 27 tests pass, the release is shippable.
 
 Categories:
 - A: Install & boot (4 tests)
-- B: Per-mode tool registration (5 tests)
+- B: Per-mode tool registration (7 tests)
 - C: Tool output content (8 tests)
 - D: Embedder & semantic search (3 tests)
 - E: Manifest & .env handling (5 tests)
 - F: Workspace state propagation (5 tests)
+- J: Spatial Cypher (3 tests)
+- K: Timeseries Cypher (3 tests)
+- L: Procedures — orphans + duplicates (2 tests)
 - W: File watcher boundary (1 test)
 
-Forward-looking Cat G-N (22 more) need spatial/timeseries/orphan
-fixtures — tracked as a separate piece of work.
-
 0.9.24: E5, F4, F5, and W1 added to anchor the new pyo3-wrapper
-boundaries (Manifest extensions passthrough, set_root_dir lateral
-swap, Workspace post_activate hook, watch callback).
+boundaries.
+
+0.9.26: B6/B7 added (disk-graph CLI validator); Cat J/K/L (8 tests)
+wired in against the mcp-servers operator's delivered fixtures
+(tests/fixtures/{spatial,timeseries,graph_with_orphans,graph_with_duplicates}.kgl).
 """
 
 from __future__ import annotations
@@ -1468,3 +1471,179 @@ def test_o9_trust_gate_blocks_boot_when_yaml_missing_allow_query_preprocessor(
     )
     combined = (result.stdout + result.stderr).lower()
     assert "trust.allow_query_preprocessor" in combined, f"missing gate-message in stderr: {result.stderr!r}"
+
+
+# ---------------------------------------------------------------------------
+# 0.9.26 Cat J/K/L — spatial / timeseries / procedure tests against the
+# mcp-servers operator's delivered Cat G-N fixture bundle.
+# See tests/fixtures/CAT_G_N_FIXTURES.md for the fixture catalog.
+# ---------------------------------------------------------------------------
+
+
+_CAT_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def spatial_graph() -> Path:
+    return _CAT_FIXTURES / "spatial_graph.kgl"
+
+
+@pytest.fixture
+def timeseries_graph() -> Path:
+    return _CAT_FIXTURES / "timeseries_graph.kgl"
+
+
+@pytest.fixture
+def graph_with_orphans() -> Path:
+    return _CAT_FIXTURES / "graph_with_orphans.kgl"
+
+
+@pytest.fixture
+def graph_with_duplicates() -> Path:
+    return _CAT_FIXTURES / "graph_with_duplicates.kgl"
+
+
+# --- Cat J — Spatial Cypher --------------------------------------------------
+
+
+def test_j1_contains_finds_wells_inside_areas(spatial_graph: Path) -> None:
+    """contains(area, point(lat, lon)) — three wells are inside one of
+    three areas in the fixture, two are outside all areas. Catches:
+    spatial predicate regressions; point-from-property construction
+    breaking; WKT polygon parsing breaking."""
+    client = _client(["--graph", str(spatial_graph)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (a:Area), (w:Well) "
+                "WHERE contains(a, point(w.latitude, w.longitude)) "
+                "RETURN count(*) AS n"
+            },
+        )
+    finally:
+        client.close()
+    assert "3" in body, f"expected 3 wells inside areas, got: {body!r}"
+
+
+def test_j2_centroid_of_polygon(spatial_graph: Path) -> None:
+    """centroid(area) returns a point with lat/lon matching the
+    polygon's geometric centre. NORTH_BLOCK is a unit square centred
+    at (61.0, 5.0). Catches: centroid math regressions; centroid()
+    not returning a point-shaped value."""
+    client = _client(["--graph", str(spatial_graph)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (a:Area {id: 'north'}) RETURN centroid(a) AS c"},
+        )
+    finally:
+        client.close()
+    # centroid is rendered as a dict — Python repr in the inline format.
+    # Expected: {'latitude': 61.0, 'longitude': 5.0}.
+    assert "61" in body and "5" in body, f"expected NORTH_BLOCK centroid (61, 5), got: {body!r}"
+    assert "latitude" in body or "lat" in body.lower(), f"centroid not point-shaped: {body!r}"
+
+
+def test_j3_contains_query_via_explicit_point(spatial_graph: Path) -> None:
+    """Query-side `point(lat, lon)` literal lookup. The fixture has
+    NORTH_BLOCK covering lat 60-62 / lon 4-6; (61, 5) is inside.
+    Catches: agent-friendly `WHERE contains(area, point(...))` shape
+    breaking; literal point construction breaking."""
+    client = _client(["--graph", str(spatial_graph)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (a:Area) WHERE contains(a, point(61.0, 5.0)) RETURN a.title AS title"},
+        )
+    finally:
+        client.close()
+    assert "NORTH_BLOCK" in body, f"expected NORTH_BLOCK to contain (61, 5), got: {body!r}"
+
+
+# --- Cat K — Timeseries Cypher -----------------------------------------------
+
+
+def test_k1_ts_sum_aggregates_a_year(timeseries_graph: Path) -> None:
+    """ts_sum(channel, 'YYYY') aggregates all timesteps within the year.
+    TROLL's oil_col in 2019 sums to ~1563.55 against the random.seed(42)
+    seed in build_fixtures.py. Catches: ts_sum regressions; year-range
+    parsing breaking."""
+    client = _client(["--graph", str(timeseries_graph)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (f:Field {title:'TROLL'}) RETURN ts_sum(f.oil_col, '2019') AS annual"},
+        )
+    finally:
+        client.close()
+    # 1563.55 with possible float-format variation. Operator confirmed
+    # the value at fixture-build time.
+    assert "1563" in body, f"expected ts_sum ~1563.55, got: {body!r}"
+
+
+def test_k2_ts_at_point_in_time(timeseries_graph: Path) -> None:
+    """ts_at(channel, 'YYYY-M') returns the value at a single timestep.
+    March 2019 for TROLL oil is 177.12 under the seeded random."""
+    client = _client(["--graph", str(timeseries_graph)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (f:Field {title:'TROLL'}) RETURN ts_at(f.oil_col, '2019-3') AS march"},
+        )
+    finally:
+        client.close()
+    assert "177.12" in body, f"expected ts_at March 2019 = 177.12, got: {body!r}"
+
+
+def test_k3_ts_aggregations_handle_all_fields(timeseries_graph: Path) -> None:
+    """ts_sum applied across all three Field nodes in the fixture
+    returns three rows. Catches: ts_* functions not iterating across
+    matches correctly."""
+    client = _client(["--graph", str(timeseries_graph)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (f:Field) RETURN f.title AS title, ts_sum(f.oil_col, '2019') AS annual"},
+        )
+    finally:
+        client.close()
+    assert "3 row" in body, f"expected 3 rows (one per field), got: {body!r}"
+    for field in ("TROLL", "EKOFISK", "SNORRE"):
+        assert field in body, f"missing field {field!r} in result: {body!r}"
+
+
+# --- Cat L — Procedures ------------------------------------------------------
+
+
+def test_l1_orphan_node_procedure_counts_isolates(graph_with_orphans: Path) -> None:
+    """CALL orphan_node({type:'Wellbore'}) YIELD node — fixture has
+    6 Wellbore nodes, 3 connected to a Field via IN_FIELD, 3 isolated.
+    Procedure must return the 3 isolated ones. Catches: orphan_node
+    regressions; CALL/YIELD wiring breaking."""
+    client = _client(["--graph", str(graph_with_orphans)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "CALL orphan_node({type: 'Wellbore'}) YIELD node RETURN count(node) AS n"},
+        )
+    finally:
+        client.close()
+    assert "3" in body, f"expected 3 orphan Wellbores, got: {body!r}"
+
+
+def test_l2_duplicate_title_procedure_counts_dupes(graph_with_duplicates: Path) -> None:
+    """CALL duplicate_title({type:'Prospect'}) YIELD node — fixture has
+    6 Prospects, 4 of which share titles in two pairs (ALPHA x2, BETA x2).
+    Procedure must yield all 4 members of the duplicate pairs. Catches:
+    duplicate_title regressions; "members of duplicate sets" vs "one
+    representative per set" off-by-N errors."""
+    client = _client(["--graph", str(graph_with_duplicates)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "CALL duplicate_title({type: 'Prospect'}) YIELD node RETURN count(node) AS n"},
+        )
+    finally:
+        client.close()
+    assert "4" in body, f"expected 4 duplicate-title Prospects, got: {body!r}"

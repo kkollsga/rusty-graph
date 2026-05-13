@@ -1,0 +1,8 @@
+name: Cat L — Duplicate-title fixture
+instructions: |
+  Minimal fixture for the CALL duplicate_title procedure.
+  6 Prospect nodes: 2 share title "ALPHA", 2 share title "BETA",
+  2 have unique titles.
+overview_prefix: |
+  Cat L targets: CALL duplicate_title({type:'Prospect'}) YIELD node.
+  Expected: returns 4 nodes (all members of duplicate pairs).

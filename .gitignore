@@ -39,6 +39,11 @@ coverage.xml
 
 # Generated graph files
 *.kgl
+# …except the small Cat G-N regression fixtures (5.9 KB total, byte-deterministic
+# from tests/fixtures/build_fixtures.py with a seeded RNG). These are tracked
+# in-repo so CI sees them; reproducible via the script in the inbox cover
+# message (inbox/read/2026-05-13-from-mcp-servers-cat-G-N-fixtures.md).
+!tests/fixtures/*.kgl
 
 # Sphinx docs build output
 docs/_build/

@@ -43,6 +43,25 @@ yesterday that was sitting on `main`.
   - B7 — `--graph <arbitrary-directory-without-meta>` is still
     rejected with the new error message, so the validator
     isn't too permissive.
+- **Cat J / K / L test fixtures and 8 forward-looking tests** —
+  the mcp-servers operator delivered the fixture bundle that was
+  the last open thread from the 0.9.16 → 0.9.25 arc. Four tiny
+  `.kgl` files (5.9 KB total) + paired manifests under
+  `tests/fixtures/{spatial_graph,timeseries_graph,graph_with_orphans,graph_with_duplicates}.kgl`,
+  with the fixture catalog at `tests/fixtures/CAT_G_N_FIXTURES.md`
+  documenting what each one anchors. The wired tests:
+  - **J1-J3** (spatial Cypher) — `contains(area, point(lat, lon))`,
+    `centroid(polygon)`, query-side `point(...)` literal lookup.
+  - **K1-K3** (timeseries Cypher) — `ts_sum(channel, 'YYYY')`,
+    `ts_at(channel, 'YYYY-M')`, and `ts_sum` across multiple
+    matched nodes. Asserts against the random-seeded values
+    in the fixture (TROLL oil 2019 sums to 1563.55; March 2019
+    spot is 177.12).
+  - **L1-L2** (procedures) — `CALL orphan_node({type:'Wellbore'})`
+    returns 3 isolated nodes; `CALL duplicate_title({type:'Prospect'})`
+    returns 4 duplicate-set members across two pairs.
+  97/97 mcp + schemas tests green (was 89 in this release before
+  the fixture wire-up).
 
 ### Changed
 

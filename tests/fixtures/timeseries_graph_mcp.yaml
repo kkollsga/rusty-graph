@@ -1,0 +1,8 @@
+name: Cat K — Timeseries fixture
+instructions: |
+  Minimal fixture for Category K tests (timeseries Cypher).
+  3 Field nodes (TROLL, EKOFISK, SNORRE) with monthly oil + gas channels
+  for years 2018-2020 (36 timesteps per field).
+overview_prefix: |
+  Cat K targets: ts_sum(channel, year), ts_at(channel, 'YYYY-M'), ts_series(start, end).
+  Resolution: month. Channels: oil_col (MSm3), gas_col (BSm3).

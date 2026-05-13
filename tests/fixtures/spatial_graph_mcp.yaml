@@ -1,0 +1,8 @@
+name: Cat J — Spatial fixture
+instructions: |
+  Minimal fixture for Category J tests (spatial Cypher).
+  3 Area nodes with WKT polygons, 5 Well nodes with lat/lon point geometry.
+  3 of the 5 wells are inside one of the 3 areas; 2 are outside all areas.
+overview_prefix: |
+  Cat J targets: contains(area, point(lat, lon)), centroid(area), distance(p1, p2).
+  Expected: contains() returns 3 well/area matches.

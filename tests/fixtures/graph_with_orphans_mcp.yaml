@@ -1,0 +1,7 @@
+name: Cat L — Orphan-node fixture
+instructions: |
+  Minimal fixture for the CALL orphan_node procedure.
+  6 Wellbore nodes: 3 connected to a Field via IN_FIELD, 3 isolated.
+overview_prefix: |
+  Cat L targets: CALL orphan_node({type:'Wellbore'}) YIELD node.
+  Expected: returns 3 orphan Wellbores.
