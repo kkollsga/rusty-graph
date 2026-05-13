@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.27] — 2026-05-13
+
+Picks up the `tools[].bundled:` override shape from mcp-methods
+0.3.31 and the cross-binary `repo_management` gating fix that
+landed in the same framework release. Closes a customisation gap
+that had been forcing operators to stuff per-tool guidance into
+the global `instructions:` block.
+
+### Added
+
+- **`tools[].bundled:` override shape** — manifests can now
+  customise the agent-facing surface of bundled tools without
+  declaring them inline. Two override types:
+  - `description: "..."` — replaces the bundled tool's default
+    agent-facing description (what shows in `tools/list`).
+    Lets operators teach agents that `repo_management` is the
+    FIRST STEP, or that `cypher_query` returns a specific
+    dataset shape, without burying the guidance in the global
+    instructions blob.
+  - `hidden: true` — drops the tool from `tools/list` AND rejects
+    direct call attempts with `Error: tool 'X' is hidden by
+    manifest configuration.` Useful for narrowing the agent
+    surface (e.g. hiding `ping` on a production server, or
+    suppressing source tools when the auto-bound `source_root`
+    is wider than the operator wants).
+
+  Both validate against the kglite bundled-tool catalogue at
+  boot: a typo in the `bundled:` name exits 3 with
+  `ERROR: unknown bundled tool name(s) ... Valid names: [...]`
+  listing the full catalogue.
+
+  Example:
+
+  ```yaml
+  tools:
+    - bundled: repo_management
+      description: |
+        FIRST STEP for this server. Call repo_management('org/repo')
+        to clone + build a repo before any other tool.
+
+    - bundled: ping
+      hidden: true                # narrow the agent surface
+
+    - name: similar_sessions      # existing cypher-tool shape unchanged
+      cypher: ...
+  ```
+
+  Cypher tools (`tools[].cypher` entries) carry their own
+  description in the manifest entry and are NOT affected by
+  bundled overrides — those apply to the fixed bundled catalogue
+  only (`cypher_query`, `graph_overview`, `ping`,
+  `read_code_source`, `save_graph`, `read_source`, `grep`,
+  `list_source`, `repo_management`, `set_root_dir`,
+  `github_issues`, `github_api`).
+
+- **Four regression tests** in
+  `tests/test_mcp_server_python_entry.py`:
+  - **B10** — `bundled: cypher_query` with `description:` appears
+    in `tools/list` with the override text.
+  - **B11** — `bundled: ping` with `hidden: true` drops `ping`
+    from `tools/list` while leaving other tools intact.
+  - **B12** — calling a hidden bundled tool by name returns the
+    `hidden by manifest configuration` error rather than
+    falling through to "unknown tool."
+  - **B13** — an unknown bundled name (`bundled: cipher_query`)
+    fails at boot with an error listing the valid catalogue.
+
+  103/103 mcp + extensions_schemas tests green (was 99 in 0.9.26
+  + 4 new).
+
+### Changed
+
+- **mcp-methods pin: 0.3.30 → 0.3.31** (auto-resolved via
+  Cargo.toml's `version = "0.3"` constraint; Cargo.lock locks
+  the exact 0.3.31). The framework half of the bundled-override
+  work landed in 0.3.31 alongside our implementation; we did the
+  Rust changes ourselves and the maintainer reviewed + released
+  with no revisions. The same release also fixed the
+  `repo_management` cross-binary gating drift we'd flagged from
+  the operator's post-0.9.25 verification — `mcp-server` (bare
+  framework) and `kglite-mcp-server` now register the tool with
+  the same gating rules.
+
+### Internal
+
+- `BUNDLED_TOOL_NAMES` frozenset at `kglite/mcp_server/server.py`
+  defines the catalogue against which `tools[].bundled:` names
+  are validated. Adding or removing a bundled tool requires
+  updating this set; manifest overrides will surface "unknown
+  bundled tool" errors otherwise.
+
 ## [0.9.26] — 2026-05-13
 
 Operator-driven release combining a CLI fix that unblocks the

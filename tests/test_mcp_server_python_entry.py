@@ -612,6 +612,104 @@ def test_b7_graph_mode_rejects_arbitrary_directory_without_meta(tmp_path: Path) 
     )
 
 
+# ─── Bundled-tool overrides (0.9.27, mcp-methods 0.3.31) ─────
+
+
+def test_b10_bundled_override_description_appears_in_tools_list(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Manifest `tools[].bundled: <name>` with a `description:` field
+    replaces the bundled tool's default agent-facing description in
+    `tools/list`. Catches: override map built but not applied;
+    description swallowed; tool registered with stale text."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text(
+        "name: override_test\n"
+        "tools:\n"
+        "  - bundled: cypher_query\n"
+        '    description: "Custom description for cypher_query in this server."\n'
+    )
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        tools_raw = client.list_tools_full()
+    finally:
+        client.close()
+    cypher = next((t for t in tools_raw if t["name"] == "cypher_query"), None)
+    assert cypher is not None, "cypher_query should always register"
+    assert cypher["description"] == "Custom description for cypher_query in this server."
+
+
+def test_b11_bundled_hidden_true_removes_tool_from_tools_list(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Manifest `tools[].bundled: ping / hidden: true` removes the
+    tool from `tools/list`. Catches: hidden flag parsed but not
+    enforced; tool still visible."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: hide_test\ntools:\n  - bundled: ping\n    hidden: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        tools = client.list_tools()
+    finally:
+        client.close()
+    assert "ping" not in tools, f"ping should be hidden, but tools/list has: {tools!r}"
+    # cypher_query still present (only ping was hidden)
+    assert "cypher_query" in tools, f"non-hidden tools must still register: {tools!r}"
+
+
+def test_b12_hidden_bundled_tool_call_returns_clear_error(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """An agent that calls a hidden bundled tool by name (despite it
+    not being in tools/list) gets `Error: tool 'X' is hidden by
+    manifest configuration.` rather than fall-through to
+    'unknown tool'. Catches: dispatcher hidden-check missing."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: hide_test\ntools:\n  - bundled: ping\n    hidden: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool("ping", {})
+    finally:
+        client.close()
+    assert "hidden by manifest" in body.lower(), f"expected hidden-tool error message, got: {body!r}"
+
+
+def test_b13_unknown_bundled_tool_name_fails_at_boot(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Manifest `tools[].bundled: foo_not_a_tool` exits 3 at boot
+    with a clear error listing the valid bundled tool names.
+    Catches: typo in operator's override block reaching runtime."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text(
+        "name: typo_test\n"
+        "tools:\n"
+        "  - bundled: cipher_query\n"  # typo: cipher vs cypher
+        '    description: "x"\n'
+    )
+
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run(
+        [server, "--graph", str(target), "--mcp-config", str(manifest)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0, (
+        f"unknown bundled tool name should fail boot; stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    combined = (result.stdout + result.stderr).lower()
+    assert "unknown bundled tool" in combined, f"missing operator-facing error: {result.stderr!r}"
+    assert "cipher_query" in combined, f"error should name the offending tool: {result.stderr!r}"
+    # And the valid-names list should appear so the operator can find the typo fast.
+    assert "cypher_query" in combined, f"error should list valid names: {result.stderr!r}"
+
+
 def test_b4_save_graph_gated_on_manifest_flag(
     mutable_graph_path: Path, graph_without_savegraph_flag: Path, tiny_graph_path: Path
 ) -> None:

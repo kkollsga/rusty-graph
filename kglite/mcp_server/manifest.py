@@ -60,6 +60,26 @@ class CypherTool:
 
 
 @dataclass
+class BundledOverride:
+    """Operator-declared customisation of a bundled tool's agent-
+    facing surface. Comes from a `tools[].bundled: <name>` entry in
+    the manifest (mcp-methods 0.3.31+).
+
+    - `description=None` means "keep the default description."
+    - `description=""` means "explicitly clear the description"
+      (rare but preserved as distinct from None).
+    - `hidden=True` means "omit from tools/list AND reject calls."
+
+    Validation against the actual bundled-tool catalogue happens
+    in `server.py` at boot — the framework doesn't know what
+    bundled tools kglite provides."""
+
+    name: str
+    description: str | None = None
+    hidden: bool = False
+
+
+@dataclass
 class Manifest:
     yaml_path: Path
     base_dir: Path
@@ -72,6 +92,7 @@ class Manifest:
     extensions: dict[str, Any] = field(default_factory=dict)
     workspace: WorkspaceCfg | None = None
     tools: list[CypherTool] = field(default_factory=list)
+    bundled_overrides: list[BundledOverride] = field(default_factory=list)
     trust: Trust = field(default_factory=Trust)
 
 
@@ -129,19 +150,34 @@ def load_manifest(path: Path) -> Manifest:
         )
 
     for t in data.get("tools") or []:
-        # kglite only registers cypher tools at this layer; mcp-methods
-        # accepts `python:` tools too, but those are a framework
-        # feature kglite's Python entry point does not consume.
-        if t.get("kind") != "cypher":
-            continue
-        m.tools.append(
-            CypherTool(
-                name=t["name"],
-                cypher=t["cypher"],
-                description=t.get("description"),
-                parameters=t.get("parameters") or {},
+        kind = t.get("kind")
+        if kind == "cypher":
+            m.tools.append(
+                CypherTool(
+                    name=t["name"],
+                    cypher=t["cypher"],
+                    description=t.get("description"),
+                    parameters=t.get("parameters") or {},
+                )
             )
-        )
+        elif kind == "bundled":
+            # mcp-methods 0.3.31+: `tools[].bundled:` overrides. The
+            # framework records the operator's declared customisation;
+            # kglite validates the name against its actual bundled-
+            # tool catalogue at boot in server.py.
+            m.bundled_overrides.append(
+                BundledOverride(
+                    name=t["name"],
+                    description=t.get("description"),
+                    hidden=bool(t.get("hidden", False)),
+                )
+            )
+        else:
+            # `python:` tools (kind == "python") are a framework
+            # feature kglite's Python entry point does not consume.
+            # Other unknown kinds (future additions, etc.) are
+            # silently ignored — forward-compatible.
+            continue
 
     return m
 

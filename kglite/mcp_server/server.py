@@ -362,6 +362,29 @@ def _print_boot_summary(mode: dict[str, Any], manifest: Any, state: Any) -> None
     sys.stderr.write("kglite-mcp-server: " + "; ".join(parts) + "\n")
 
 
+BUNDLED_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "cypher_query",
+        "graph_overview",
+        "ping",
+        "read_code_source",
+        "save_graph",
+        "read_source",
+        "grep",
+        "list_source",
+        "repo_management",
+        "set_root_dir",
+        "github_issues",
+        "github_api",
+    }
+)
+"""Set of bundled tool names kglite-mcp-server can register. The
+manifest's `tools[].bundled:` overrides (mcp-methods 0.3.31+) are
+validated against this set at boot: any name not in here surfaces
+as a clear `ERROR: unknown bundled tool ...` so operators catch
+typos before runtime."""
+
+
 def _build_server(
     graph_state: Any,
     manifest: Any,
@@ -385,6 +408,30 @@ def _build_server(
     fallback = _fallback_name(mode["kind"])
     server_name = (manifest.name if manifest else None) or fallback
     server: Any = Server(server_name)
+
+    # 0.9.27: bundled-tool overrides from manifest. Validate names
+    # against the catalogue at boot — unknown names error out with
+    # the full list of valid bundled tools (matches the strict-key
+    # validation pattern operators expect from manifest parsing).
+    bundled_overrides_list = manifest.bundled_overrides if manifest else []
+    unknown_bundled = {b.name for b in bundled_overrides_list} - BUNDLED_TOOL_NAMES
+    if unknown_bundled:
+        sys.stderr.write(
+            "ERROR: unknown bundled tool name(s) in manifest `tools[].bundled:`: "
+            f"{sorted(unknown_bundled)}. Valid names: {sorted(BUNDLED_TOOL_NAMES)}\n"
+        )
+        sys.exit(3)
+    bundled_overrides: dict[str, Any] = {b.name: b for b in bundled_overrides_list}
+    hidden_bundled_names: set[str] = {b.name for b in bundled_overrides_list if b.hidden}
+
+    def _apply_override(tool: types.Tool) -> types.Tool:
+        """Apply a manifest `bundled:` override to a freshly-built
+        tool, returning a new Tool with the override applied (or the
+        original if no override exists for this tool name)."""
+        override = bundled_overrides.get(tool.name)
+        if override is None or override.description is None:
+            return tool
+        return tool.model_copy(update={"description": override.description})
 
     builtins = manifest.builtins if manifest else None
     save_graph_enabled = bool(builtins and builtins.save_graph)
@@ -529,12 +576,36 @@ def _build_server(
         if is_local_workspace:
             tools.append(_framework_set_root_dir_tool())
 
-        # YAML-declared cypher tools.
+        # 0.9.27: apply manifest `tools[].bundled:` overrides.
+        # `hidden: true` drops the tool from tools/list (and is also
+        # rejected at call time in `_call` below). `description: "..."`
+        # replaces the agent-facing description without touching the
+        # input schema.
+        tools = [_apply_override(t) for t in tools if t.name not in hidden_bundled_names]
+
+        # YAML-declared cypher tools (overrides do NOT apply here —
+        # cypher tools carry their own description in the manifest
+        # entry; the override block is for the bundled catalogue
+        # only).
         tools.extend(cypher_tool_attrs(manifest_cypher_tools))
         return tools
 
     @server.call_tool()
     async def _call(name: str, args: dict[str, Any]) -> list[types.TextContent]:
+        # 0.9.27: hidden bundled tools (manifest declared
+        # `tools[].bundled: NAME / hidden: true`) are absent from
+        # `tools/list` but the dispatcher still needs to refuse
+        # calls if an agent tries the name directly. Reject early
+        # with a clear error rather than falling through to "unknown
+        # tool" (which would be confusing — the tool DOES exist in
+        # the catalogue, the manifest just hid it).
+        if name in hidden_bundled_names:
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Error: tool {name!r} is hidden by manifest configuration.",
+                )
+            ]
         if name == "cypher_query":
             body = run_cypher(
                 graph_state,
