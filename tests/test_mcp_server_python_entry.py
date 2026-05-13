@@ -461,17 +461,27 @@ def test_b6_graph_mode_accepts_disk_backed_graph_directory(tmp_path: Path) -> No
     (124M+ node) disk-backed graphs through the CLI. Reported by
     the mcp-servers project against 0.9.25; fix lands in 0.9.26.
 
-    The validator fix is what's anchored here: the server must boot
-    against the disk directory and serve a cypher_query that
-    counts the nodes. Property-value persistence on the disk
-    storage path is a separate concern not in scope for this test."""
+    The validator fix is what's anchored here. The fixture is
+    populated via `add_nodes()` (the supported disk-mode write path —
+    see B8 below for why Cypher CREATE is refused on disk graphs)."""
+    import pandas as pd
+
     import kglite
 
     disk_dir = tmp_path / "disk_graph"
     g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
-    g.cypher("CREATE (:Marker)")
-    g.cypher("CREATE (:Marker)")
-    g.cypher("CREATE (:Marker)")
+    g.add_nodes(
+        pd.DataFrame(
+            [
+                {"id": "m1", "title": "disk-d1"},
+                {"id": "m2", "title": "disk-d2"},
+                {"id": "m3", "title": "disk-d3"},
+            ]
+        ),
+        "Marker",
+        "id",
+        "title",
+    )
     g.save(str(disk_dir))
     del g  # release the mmap before booting the server
 
@@ -481,12 +491,87 @@ def test_b6_graph_mode_accepts_disk_backed_graph_directory(tmp_path: Path) -> No
     try:
         body = client.call_tool(
             "cypher_query",
-            {"query": "MATCH (n:Marker) RETURN count(n) AS c"},
+            {"query": "MATCH (n:Marker) RETURN n.title AS title ORDER BY title"},
         )
     finally:
         client.close()
     assert "Error" not in body and "ERROR" not in body, f"disk graph caused an error: {body!r}"
-    assert "3" in body, f"expected 3 Marker nodes via count(): {body!r}"
+    assert "disk-d1" in body and "disk-d2" in body and "disk-d3" in body, (
+        f"expected all three Markers in cypher_query result: {body!r}"
+    )
+
+
+def test_b9_disk_graph_still_supports_cypher_set_and_delete(tmp_path: Path) -> None:
+    """0.9.26 guards CREATE / MERGE on disk graphs (B8) but SET and
+    DELETE go through `node_weight_mut` → `node_mut_cache` →
+    `clear_arenas` flush — that path works on disk and must keep
+    working.
+
+    Catches: over-eager gating that accidentally blocks the working
+    mutation paths. The disk-graph guard is narrow by design.
+
+    Note on REMOVE: also probed against disk graphs and found
+    silently no-op as of 0.9.26 (separate bug from CREATE, documented
+    under Known Limitations in docs/guides/mcp-servers.md). Not
+    asserted here pending a fix in a future release."""
+    import pandas as pd
+
+    import kglite
+
+    disk_dir = tmp_path / "disk_set"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.add_nodes(
+        pd.DataFrame([{"id": "m1", "title": "first"}, {"id": "m2", "title": "second"}]),
+        "Marker",
+        "id",
+        "title",
+    )
+
+    # SET a new property — must not be blocked.
+    g.cypher("MATCH (n:Marker {title: 'first'}) SET n.note = 'tagged'")
+    rows = list(g.cypher("MATCH (n:Marker) RETURN n.title AS title, n.note AS note ORDER BY title"))
+    assert rows[0]["note"] == "tagged", f"SET on disk graph regressed: {rows!r}"
+    assert rows[1]["note"] is None, f"SET on disk graph regressed (other rows): {rows!r}"
+
+    # DELETE — also unblocked.
+    g.cypher("MATCH (n:Marker {title: 'second'}) DELETE n")
+    count_rows = list(g.cypher("MATCH (n:Marker) RETURN count(n) AS c"))
+    assert count_rows[0]["c"] == 1, f"DELETE on disk graph regressed: {count_rows!r}"
+
+
+def test_b8_disk_graph_refuses_cypher_create_with_clear_error(tmp_path: Path) -> None:
+    """0.9.26 guards against silent data loss on disk-backed graphs:
+    Cypher CREATE / MERGE return a clear error directing users at
+    `add_nodes()` or `to_disk()` instead. SET / REMOVE / DELETE still
+    work normally.
+
+    Catches: regressions in the disk add_node guard rail. Without
+    this guard the call succeeds-with-no-data (no properties or
+    title persist on disk-stored nodes). The proper write path is
+    tracked separately."""
+    import kglite
+
+    disk_dir = tmp_path / "disk_guard"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+
+    # CREATE must fail with the operator-facing message.
+    try:
+        result = g.cypher("CREATE (:Marker {title: 'x'})")
+    except Exception as e:  # noqa: BLE001 — guard returns via Python exception
+        msg = str(e)
+    else:
+        msg = str(result) if isinstance(result, str) else ""
+    assert "CREATE" in msg and "disk" in msg.lower(), f"expected disk-CREATE refusal, got: {msg!r}"
+    assert "add_nodes" in msg or "to_disk" in msg, f"expected workaround pointer in error: {msg!r}"
+
+    # MERGE must fail with the same shape of message.
+    try:
+        result = g.cypher("MERGE (n:Marker {title: 'x'}) RETURN n")
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+    else:
+        msg = str(result) if isinstance(result, str) else ""
+    assert "MERGE" in msg and "disk" in msg.lower(), f"expected disk-MERGE refusal, got: {msg!r}"
 
 
 def test_b7_graph_mode_rejects_arbitrary_directory_without_meta(tmp_path: Path) -> None:

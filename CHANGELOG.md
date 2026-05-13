@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.26] — 2026-05-13
 
-Operator-driven small release: one CLI fix that unblocks the
-wikidata pure-YAML migration, plus the docs-refresh commit from
-yesterday that was sitting on `main`.
+Operator-driven release combining a CLI fix that unblocks the
+wikidata pure-YAML migration, the Cat G-N fixture acceptance
+that closes the 0.9.16 → 0.9.25 arc, a disk-storage write-path
+guard that turns silent data loss into a clean error, and a
+significant docs sweep across `docs/guides/mcp-servers.md`.
 
 ### Fixed
 
@@ -33,16 +35,49 @@ yesterday that was sitting on `main`.
   couldn't boot via the CLI). Anyone deploying a
   `storage="disk"` graph (the documented kglite path for
   >50M nodes) hit this immediately.
+- **Cypher `CREATE` / `MERGE` on `storage="disk"` graphs now
+  fails loudly** (returns a clear `Cypher error` pointing at
+  `add_nodes()` / `to_disk()` workarounds) instead of silently
+  succeeding-with-no-data. Pre-0.9.26 the disk `add_node` path
+  only stored a slot (type + row_id) and dropped the
+  `NodeData.properties` / `title` / `id` fields, so `CREATE
+  (:Marker {title: 'x'})` against a disk graph completed without
+  error but every property and the auto-title vanished — both
+  in-memory (the column store was never told) and after
+  save/reload. Discovered while writing the B6 regression test;
+  not on any reported issue list but a silent-corruption class
+  worth surfacing. Affects only `CREATE` and the create-path of
+  `MERGE`; `SET` / `DELETE` on disk-backed graphs work
+  correctly. The proper disk write-path implementation is on
+  the roadmap.
+
+### Known limitations (new in 0.9.26)
+
+- **Cypher `REMOVE n.prop` on `storage="disk"` graphs is a silent
+  no-op.** Discovered separately during the disk-CREATE guard
+  work. `REMOVE` completes without error but the property is not
+  actually dropped — a subsequent read returns the old value.
+  Workaround: `SET n.prop = null` instead. Affects only
+  `storage="disk"`; in-memory and `storage="mapped"` `REMOVE`
+  work normally. Documented under "Known limitations" in
+  `docs/guides/mcp-servers.md`. Tracked for a future release.
 
 ### Added
 
-- **B6 / B7 regression tests** in
+- **B6 / B7 / B8 / B9 regression tests** in
   `tests/test_mcp_server_python_entry.py`:
   - B6 — `--graph <disk-graph-dir>` boots the server and serves
-    a `cypher_query` against the persisted nodes.
+    a `cypher_query` against the persisted nodes (built via
+    `add_nodes()`, the supported disk-mode write path).
   - B7 — `--graph <arbitrary-directory-without-meta>` is still
     rejected with the new error message, so the validator
     isn't too permissive.
+  - B8 — disk-mode Cypher `CREATE` / `MERGE` returns the new
+    loud-failure error pointing at `add_nodes` / `to_disk`,
+    not a silent no-op.
+  - B9 — disk-mode Cypher `SET` and `DELETE` still work normally
+    (the guard is narrow by design; existing mutation paths
+    must not regress).
 - **Cat J / K / L test fixtures and 8 forward-looking tests** —
   the mcp-servers operator delivered the fixture bundle that was
   the last open thread from the 0.9.16 → 0.9.25 arc. Four tiny
@@ -65,21 +100,43 @@ yesterday that was sitting on `main`.
 
 ### Changed
 
-- **`docs/guides/mcp-servers.md` — six accuracy fixes**
-  (commit `51436df`, landed yesterday between 0.9.25 and this
-  release): opening pitch now correctly says "Python entry
-  point" (was "single Rust binary" — stale since 0.9.20); the
-  manifest tiers customisation table replaced (was three rows
-  including the removed `tools: python:` option; now seven rows
-  matching what 0.9.25 actually ships); the end-to-end
-  conference example rewritten without the removed `python:`
-  feature; the "Building a downstream binary" Rust snippet
-  rewritten against mcp-methods 0.3.30 API with cross-link to
-  their docs site; the Common boot errors table pruned of stale
-  `--trust-tools` / python-tool rows and given two new rows for
-  the cypher_preprocessor failure modes. Fresh-user audit
-  identified these as the things a brand-new reader copying
-  examples would actually trip over.
+- **`docs/guides/mcp-servers.md` — significant sweep on top of
+  yesterday's six accuracy fixes** (`51436df`). 0.9.26 adds:
+  - Quick Start renumbered 1–4 (was 1, 2, 2½, 3); manifest
+    teaser moved after Claude registration so the install-and-
+    point happy path reads top-to-bottom.
+  - Stale `--embedder` CLI-flag reference (line 58) removed —
+    that flag doesn't exist; the supported path is
+    `extensions.embedder` in a manifest.
+  - "Custom embedders" subsection under Built-in patterns
+    rewritten as a 4-line pointer to the
+    `extensions.embedder` reference + worked example (was
+    using the removed-in-0.9.18 `embedder: { module, class }`
+    shape with `--trust-tools`).
+  - `read_source` / `grep` / `list_source` parameter docs
+    reformatted from dense single-line prose to per-tool
+    parameter tables.
+  - New "Deployment shapes" section with a "Large graphs
+    (disk-backed)" subsection covering the canonical Wikidata-
+    scale flow (ntriples loader → `storage="disk"` → CLI
+    pointed at the directory).
+  - New "Known limitations" section documenting the disk-
+    `CREATE`/`MERGE` refusal, the disk-`REMOVE` silent no-op,
+    and the `repo_management` cross-binary gating drift between
+    `kglite-mcp-server` and the bare `mcp-server` CLI.
+  - New "Troubleshooting" section gathering common post-boot
+    pitfalls (GITHUB_TOKEN discovery, `text_score()` returning
+    zero, warm-call slowness, conda PATH shadowing, tools
+    missing from `tools/list`, PyPI simple-index lag).
+  - Pre-0.9.20 migration sections (90 LoC) moved to
+    `docs/migrations/mcp-pre-0.9.20.md`, leaving a one-line
+    pointer in the main guide.
+- **`mcp-methods` dependency switched from git+rev to crates.io**
+  (commit `f53e8f1`, also between releases). mcp-methods 0.3.30
+  was the first crates.io publish; library binary surface is
+  functionally identical to 0.3.29's `71f7ba6`. The switch is
+  cosmetic Cargo.toml tidy — no behaviour change. Cargo.lock
+  locks the exact version for reproducible builds.
 - **`mcp-methods` dependency switched from git+rev to crates.io**
   (commit `f53e8f1`, also between releases). mcp-methods 0.3.30
   was the first crates.io publish; library binary surface is

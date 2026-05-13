@@ -76,4 +76,5 @@ contributing
 adding-a-storage-backend
 adding-a-query-language
 changelog
+migrations/mcp-pre-0.9.20
 ```

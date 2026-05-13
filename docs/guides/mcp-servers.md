@@ -41,33 +41,17 @@ you the graph engine without the server deps.
 kglite-mcp-server --graph /path/to/my_graph.kgl
 ```
 
-The server speaks MCP over stdio and exposes two tools out of the box:
+The server speaks MCP over stdio and exposes three tools out of the box:
 
 - `graph_overview(...)` — wraps `describe()` for progressive schema
   disclosure (types, connections, Cypher reference).
-- `cypher_query(query, timeout_ms=...)` — runs any Cypher query;
-  inline result up to 15 rows, append `FORMAT CSV` for a localhost-
-  served file export.
+- `cypher_query(query)` — runs any Cypher query; inline result up to
+  15 rows, append `FORMAT CSV` for a localhost-served file export.
+- `ping(message?)` — liveness probe; echoes the message or returns `pong`.
 
-Optional: `--embedder all-MiniLM-L6-v2` to register a
-`sentence-transformers` model so `text_score()` works inside Cypher.
-
-### 2½. Five tools from one yaml line
-
-Drop a sibling YAML file next to your graph and you get three more
-tools without writing any Python:
-
-```yaml
-# my_graph_mcp.yaml
-source_root: ./data
-```
-
-That auto-registers `read_source`, `grep`, and `list_source` over the
-`./data` directory (sandboxed, ripgrep-backed, gitignore-aware) — five
-tools total. Cypher narrows the search at the graph level; the agent
-follows up with `read_source` for the top hits or `grep` for context
-the graph didn't lift. Full reference is in
-[Customising with a manifest](#customising-with-a-manifest) below.
+Want semantic search (`text_score()` inside Cypher) or source-file
+access tools? Drop a manifest — see step 4 below or the
+[Customising with a manifest](#customising-with-a-manifest) section.
 
 ### 3. Register with Claude Desktop
 
@@ -87,6 +71,23 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 For Claude Code, add to `.claude/settings.json` with the same shape.
 The agent can now call `graph_overview()` to learn the schema and
 `cypher_query()` to query.
+
+### 4. (Optional) Add a manifest for more tools
+
+Drop a sibling YAML file next to your graph and you get three more
+tools without writing any Python:
+
+```yaml
+# my_graph_mcp.yaml
+source_root: ./data
+```
+
+That auto-registers `read_source`, `grep`, and `list_source` over the
+`./data` directory (sandboxed, ripgrep-backed, gitignore-aware). Cypher
+narrows the search at the graph level; the agent follows up with
+`read_source` for the top hits or `grep` for context the graph didn't
+lift. Full reference is in
+[Customising with a manifest](#customising-with-a-manifest) below.
 
 ## Customising with a manifest
 
@@ -149,9 +150,40 @@ source_roots:
 This auto-registers three tools, all sandboxed to the configured
 roots:
 
-- **`read_source(file_path, start_line=, end_line=, grep=, grep_context=2, max_chars=, max_matches=)`** — read a file relative to the source root. Use `grep="pattern"` to filter to matching lines instead of dumping everything (essential for large files — agents can search a 50 MB JSON without exhausting context).
-- **`grep(pattern, glob="*", context=0, max_results=50, case_insensitive=False)`** — regex search across all files in the source roots. Backed by ripgrep crates, gitignore-aware by default.
-- **`list_source(path=".", depth=1, glob=None, dirs_only=False)`** — directory tree under the first source root. `path="."` lists the root itself; `depth=2+` produces a recursive tree.
+**`read_source(file_path, ...)`** — read a file relative to the
+source root. Use `grep="pattern"` to filter to matching lines
+instead of dumping everything (essential for large files — agents
+can search a 50 MB JSON without exhausting context).
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `file_path` | string | (required) | Relative to a configured source root. |
+| `start_line` / `end_line` | int / int | `1` / EOF | 1-indexed line slice. |
+| `grep` | string | `None` | Filter to lines matching this regex. |
+| `grep_context` | int | `2` | Lines of context around each match. |
+| `max_matches` | int | (none) | Cap matches when `grep` is set. |
+| `max_chars` | int | (none) | Cap output size. |
+
+**`grep(pattern, ...)`** — regex search across all files in the
+source roots. Backed by ripgrep crates, gitignore-aware by default.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `pattern` | string | (required) | Regex pattern. |
+| `glob` | string | `*` | File-name glob filter. |
+| `context` | int | `0` | Lines of context around matches. |
+| `max_results` | int | `50` | Cap result count. |
+| `case_insensitive` | bool | `false` | Toggle case sensitivity. |
+
+**`list_source(...)`** — tree-formatted directory listing under
+the first source root.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `path` | string | `.` | Directory relative to source root. |
+| `depth` | int | `1` | Tree depth; `2+` is recursive. |
+| `glob` | string | `None` | Filter entries by name. |
+| `dirs_only` | bool | `false` | Hide files; directories only. |
 
 All path resolution is sandboxed — `..` traversal that escapes the
 configured roots is rejected.
@@ -405,12 +437,10 @@ of hardcoding thousands of rows into the artifact source.
 (single-graph mode), the tool registers automatically and persists
 post-mutation graph state to the source `.kgl` path.
 
-### Custom embedders
+### Semantic search (`text_score()`)
 
-The manifest's `embedder: { module, class, kwargs }` block — gated
-by `trust.allow_embedder: true` + `--trust-tools` — instantiates a
-user-supplied class and binds it to the active graph via
-`graph.set_embedder()`. The agent can then write queries like:
+`extensions.embedder` in the manifest registers an embedder so
+`text_score()` works inside Cypher. The agent can then write:
 
 ```cypher
 MATCH (a:Article)
@@ -419,7 +449,11 @@ RETURN a.title, text_score(a, 'summary', 'renewable energy') AS score
 ORDER BY score DESC LIMIT 10
 ```
 
-See [Semantic Search](semantic-search.md) for the embedder protocol.
+Full schema in the
+[`extensions:` schema reference](#extensions-schema-reference)
+below; worked example at
+{doc}`../examples/manifest_with_embedder`. The embedder protocol
+itself is in [Semantic Search](semantic-search.md).
 
 ### Security
 
@@ -436,6 +470,191 @@ See [Semantic Search](semantic-search.md) for the embedder protocol.
 ```python
 graph.cypher("MATCH (n) WHERE n.name = $name RETURN n", params={"name": user_input})
 ```
+
+## Deployment shapes
+
+### Small / medium graphs (`.kgl` file)
+
+The Quick Start path — graph fits in memory, load via
+`kglite.load(path)` or save via `g.save(path)`, point the CLI at
+the resulting `.kgl` file. Default storage. No special config.
+Suitable up to ~10M nodes on a developer laptop, larger on a
+beefier host.
+
+### Large graphs (disk-backed)
+
+For graphs that don't fit in memory or take too long to deserialise
+on every boot, build a disk-backed graph once and point the CLI at
+its directory:
+
+```python
+# One-off ingestion (e.g. from Wikidata's truthy.nt.bz2 dump):
+from kglite.datasets import wikidata
+
+# Streams the dump, materialises a disk graph in `/data/wikidata-graph/`.
+# Returns a Path to the directory.
+graph_dir = wikidata.fetch_truthy("/data/wikidata-graph/", predicates={"P31", "P279"})
+```
+
+Then run the MCP server against the directory (not a single file):
+
+```bash
+kglite-mcp-server --graph /data/wikidata-graph/
+```
+
+The CLI's `--graph` validator accepts both shapes — a `.kgl` file
+OR a directory containing `disk_graph_meta.json` (the disk-graph
+sentinel). For your own data, the API is
+`kglite.KnowledgeGraph(storage="disk", path="/data/graph/")` for
+the constructor and `g.add_nodes(...) / g.add_connections(...)`
+for population.
+
+Manifests work the same way for both shapes. For example,
+`wikidata_mcp.yaml` next to (or pointed at via `--mcp-config` for)
+the graph dir:
+
+```yaml
+name: Wikidata
+trust:
+  allow_query_preprocessor: true
+extensions:
+  cypher_preprocessor:
+    module: ./wikidata_preprocessor.py
+    class: WikidataPreprocessor
+```
+
+See {doc}`../examples/manifest_cypher_preprocessor` for the full
+Wikidata example (Q-number → integer rewriting).
+
+## Known limitations
+
+Things that don't work today and need a workaround.
+
+### Cypher `CREATE` / `MERGE` on `storage="disk"` graphs
+
+The disk-storage write path doesn't yet support per-node property
+persistence for ad-hoc node creation. Cypher `CREATE` and `MERGE`
+against a disk-backed graph fail at execution with a clear error
+pointing at the supported alternatives.
+
+Workarounds:
+- **Bulk loading**: `g.add_nodes(df, type, id_field, title_field)`
+  and `g.add_connections(df, edge_type, ...)` go through the batched
+  write path which correctly persists properties on disk.
+- **Ad-hoc construction**: build the graph in default heap storage
+  with `kglite.KnowledgeGraph()` + `g.cypher("CREATE …")`, then call
+  `g.to_disk("/path/to/dir/")` to materialise the column stores.
+
+`SET` and `DELETE` on disk-backed graphs work normally. The proper
+disk `CREATE` write path is on the roadmap for a future release.
+
+### Cypher `REMOVE` is a silent no-op on `storage="disk"` graphs
+
+Separate from the CREATE limitation above, `REMOVE n.prop` against a
+disk-backed graph completes without error but the property is not
+actually dropped — a subsequent read returns the old value. SET
+(including `SET n.prop = null`) is unaffected and is the working
+workaround:
+
+```cypher
+-- Doesn't drop the property on disk graphs (silent no-op):
+MATCH (n:Item {id: 'x'}) REMOVE n.note
+
+-- Works on disk graphs (clears the property):
+MATCH (n:Item {id: 'x'}) SET n.note = null
+```
+
+Tracked for a future release. Affects only `storage="disk"` graphs;
+in-memory and `storage="mapped"` REMOVE work normally.
+
+### `repo_management` registers differently in `mcp-server` (bare framework)
+
+If you compare the tool surface between `kglite-mcp-server` and
+the bare `mcp-server` CLI shipped with the
+[mcp-methods](https://mcp-methods.readthedocs.io) crate, you'll
+see `repo_management` registered by `mcp-server` in bare mode
+(no `--workspace` flag) but only in workspace modes by
+`kglite-mcp-server`. kglite's stricter gating matches the
+[tool gating matrix](#tool-gating) below — bare-mode
+`repo_management` has no workspace state to manage, so we hide it.
+Tracked with mcp-methods for alignment in a future release; no
+operator-facing impact in the meantime if you only run
+`kglite-mcp-server`.
+
+## Troubleshooting
+
+Common post-boot pitfalls, grouped by symptom.
+
+### `github_issues` says "could not auto-detect from git remote"
+
+`GITHUB_TOKEN` (or `GH_TOKEN`) isn't in the server's environment.
+The token is loaded from:
+
+1. The process environment when the server boots.
+2. The manifest's `env_file:` path (explicit).
+3. A `.env` file discovered by walking up from the active mode's
+   directory.
+
+Existing process env never gets overwritten by the `.env` file. To
+verify: the server logs `loaded env file: <path>` on stderr when
+it finds a `.env`. Absence of that line means no `.env` was
+discovered, and process env is what's in effect.
+
+### `text_score()` returns 0.0 for every node
+
+The embedder isn't bound. Causes, in order of likelihood:
+
+- The manifest didn't declare `extensions.embedder`. See
+  [`extensions:` schema reference](#extensions-schema-reference).
+- The model couldn't download (network issue) or load (out-of-
+  memory). Look for tracebacks in the server's stderr at boot.
+- The property being scored doesn't exist on the matched nodes.
+  `text_score(n, 'summary', 'query')` returns 0.0 when `n.summary`
+  is null. Use `WHERE n.summary IS NOT NULL` to filter first.
+
+### Warm `text_score()` is slow (seconds, not milliseconds)
+
+bge-m3's cool-down may have released the ONNX session. The default
+`cooldown` is 900 seconds (15 min) — set
+`extensions.embedder.cooldown: 0` in the manifest to keep the
+session resident forever (heavy-use mode), or pick a larger value
+matching your usage pattern. See
+{doc}`../examples/manifest_with_embedder` for the tradeoff table.
+
+### Conda environment lifts an old `kglite-mcp-server`
+
+If `which kglite-mcp-server` resolves outside your active env,
+your shell PATH is finding an older install (typically from a
+prior `cargo install` or a different conda env). Drop the old
+install (`rm $(which kglite-mcp-server)` from outside the active
+env) or activate the right env explicitly.
+
+### Server boots but `tools/list` shows fewer tools than expected
+
+The [tool gating matrix](#tool-gating) shows the conditions each
+tool needs to register. Most common cases:
+
+- `repo_management` / `set_root_dir` missing — you're not in
+  `--workspace` mode (or the manifest doesn't declare
+  `workspace.kind: local`).
+- `read_source` / `grep` / `list_source` missing — no source root
+  is configured (no `source_root:` in the manifest, no `--source-root`
+  CLI flag, and `--graph` parent auto-bind didn't fire).
+- `github_issues` / `github_api` missing — no `GITHUB_TOKEN` in env.
+- `save_graph` missing — you're not in `--graph` mode OR the
+  manifest doesn't set `builtins.save_graph: true`.
+
+### PyPI says "No matching distribution found" immediately after a release
+
+PyPI's `simple/` index lags the JSON metadata by ~few minutes
+after publish. Workaround:
+
+```bash
+pip install --index-url https://pypi.org/simple/ --no-cache-dir 'kglite[mcp]==X.Y.Z'
+```
+
+Or wait a few minutes. This is a PyPI mirror-cache behaviour, not
+a kglite packaging issue.
 
 ## Reference
 
@@ -808,95 +1027,13 @@ trees over 100k LoC this costs a few seconds per rebuild. The
 rebuild runs on a background thread; queries against the previous
 graph keep working until the new graph atomically swaps in.
 
-## Migration: 0.9.19 → 0.9.20
+## Migrations
 
-`kglite-mcp-server` is now a Python entry point instead of a bundled
-Rust binary. Operator action:
-
-```bash
-pip install --upgrade 'kglite[mcp]'
-```
-
-YAMLs unchanged. Tool surface unchanged. fastembed cache directory
-unchanged (`~/.cache/fastembed/`). Performance unchanged (kglite's
-Python `cypher()` releases the GIL for execution, so the wrapping
-layer is sub-microsecond).
-
-What disappeared:
-- `kglite/_bin/kglite-mcp-server` binary inside the wheel (no
-  longer built).
-- `install_name_tool` / `patchelf` / mold / per-Python-version
-  wheel matrix in CI (no longer needed).
-- The 0.9.18 conda install_name regression (impossible by
-  construction — there's no binary to mis-link).
-
-Wheel matrix is back to 3 abi3 wheels per release, same as pre-0.9.18.
-
-## Migration: 0.9.17 → 0.9.18
-
-### Embedders: `embedder:` → `extensions.embedder:`
-
-The framework-level `embedder:` block (Python class factory) is gone.
-Replace with `extensions.embedder:` (Rust-native fastembed-rs):
-
-```yaml
-# Before (0.9.17 and earlier — no longer parsed)
-embedder:
-  module: ./embedder.py
-  class: BgeM3Embedder
-trust:
-  allow_embedder: true
-
-# After (0.9.18+)
-extensions:
-  embedder:
-    backend: fastembed
-    model: BAAI/bge-m3            # or any fastembed catalog name
-```
-
-Operators with custom `embedder.py` files don't need them any more —
-fastembed-rs supports BAAI/bge-m3, bge-small/base/large-en-v1.5,
-all-MiniLM-L6-v2, and the multilingual-e5 family natively, downloading
-ONNX weights on first use to `~/.cache/fastembed/`.
-
-### `tools[].python:` → Rust shim or Cypher template
-
-Python tool hooks are removed in 0.9.18. Two replacements depending
-on shape:
-
-- If the function is mostly Cypher with light parameter munging,
-  promote it to a `tools[].cypher` entry with a `$param` template.
-- If it has real logic (HTTP fetch, file parse), write a small
-  downstream Rust binary that embeds the kglite crate directly —
-  see **Building a downstream binary** above. The binary calls
-  `kglite::api::CypherExecutor` / `compute_description` / etc.
-  without any Python boundary.
-
-### Wheel install
-
-`pip install kglite` now lands `kglite-mcp-server` on `PATH` directly.
-The 0.9.17-era discovery flow (`otool -L`, `PYO3_PYTHON=`,
-`install_name_tool -add_rpath`) is unnecessary. If your shell still
-points at an old `cargo install` binary, drop it and let `pip` win.
-
-### CSV-over-HTTP
-
-The new `extensions.csv_http_server` block opts into a localhost HTTP
-listener that serves `FORMAT CSV` exports as URLs instead of inline
-strings:
-
-```yaml
-extensions:
-  csv_http_server:
-    port: 8765
-    dir: temp/                    # relative to the manifest
-    cors_origin: "*"              # optional, defaults to "*"
-```
-
-With this set, a `cypher_query` that ends in `FORMAT CSV` writes the
-result to `temp/kglite-<hash>.csv` and returns a `http://127.0.0.1:8765/...`
-URL the agent can fetch when ready. Useful for million-row exports
-that would otherwise blow the MCP response budget.
+Pre-0.9.20 operators upgrading from a bundled-binary install: see
+{doc}`../migrations/mcp-pre-0.9.20` for the 0.9.17→0.9.18 (Python
+embedder + tools[].python removal, csv_http_server introduction)
+and 0.9.19→0.9.20 (bundled-binary → Python entry point) migration
+notes.
 
 ## Worked examples
 

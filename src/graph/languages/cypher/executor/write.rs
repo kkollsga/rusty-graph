@@ -186,6 +186,41 @@ fn execute_create(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
 ) -> Result<ResultSet, String> {
+    // Refuse Cypher CREATE on disk-backed graphs. The disk-storage
+    // `add_node` path only writes a slot (node_type + row_id) and
+    // drops the per-node `NodeData.properties` / `title` / `id`
+    // fields — so a naive CREATE would silently lose every property
+    // and the auto-generated title. The supported paths for adding
+    // nodes to a disk graph are:
+    //   1. `graph.add_nodes(df, type, id_field, title_field=...)` —
+    //      goes through `batch.rs::flush_chunk`'s deferred-columnar
+    //      pass which writes properties to the ColumnStore before
+    //      calling `add_node` with `PropertyStorage::Columnar`.
+    //   2. Build the graph in default (heap) storage with `CREATE`,
+    //      then call `graph.to_disk(path)` to materialise the
+    //      column stores from the in-memory state.
+    // SET and DELETE on disk graphs work (they route through
+    // `node_weight_mut` → `node_mut_cache` → `clear_arenas` flush);
+    // only the new-node path is affected by this guard. Cypher MERGE
+    // is also refused (separate guard in execute_merge) when it would
+    // create new nodes. REMOVE on disk graphs is separately broken
+    // (silent no-op) and documented as a known limitation; not a
+    // regression introduced by this guard.
+    //
+    // Loud-fail rather than silent corruption was the explicit
+    // operator-facing call in 0.9.26 (see CHANGELOG known-issue
+    // entry). A proper write path is tracked for a future release.
+    if graph.graph.is_disk() {
+        return Err(
+            "Cypher CREATE is not supported on storage=\"disk\" graphs in 0.9.26. \
+             Use graph.add_nodes(...) for bulk loading, or build the graph in default \
+             (heap) storage with CREATE and call graph.to_disk(path) afterward. \
+             SET and DELETE on disk-backed graphs work as expected; REMOVE is \
+             currently a silent no-op (separate known limitation)."
+                .to_string(),
+        );
+    }
+
     let source_rows = if existing.rows.is_empty() {
         // No prior MATCH: execute once with an empty row
         vec![ResultRow::new()]
@@ -919,6 +954,22 @@ fn execute_merge(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
 ) -> Result<ResultSet, String> {
+    // Refuse MERGE on disk-backed graphs — when the match misses,
+    // MERGE creates new nodes through the same disk `add_node` path
+    // that CREATE uses, and silently loses properties. Refuse at the
+    // entry rather than partial-pattern-match-then-fail. See the
+    // `execute_create` guard for the full rationale + workaround.
+    if graph.graph.is_disk() {
+        return Err(
+            "Cypher MERGE is not supported on storage=\"disk\" graphs in 0.9.26 \
+             (MERGE can create new nodes through the same write path as CREATE). \
+             Use graph.add_nodes(...) / graph.add_connections(...) for bulk loading, \
+             or build the graph in default (heap) storage and call \
+             graph.to_disk(path) afterward."
+                .to_string(),
+        );
+    }
+
     let source_rows = if existing.rows.is_empty() {
         vec![ResultRow::new()]
     } else {
