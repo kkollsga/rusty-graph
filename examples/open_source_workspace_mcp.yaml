@@ -1,0 +1,85 @@
+# Example manifest for kglite-mcp-server in workspace mode — adapt and deploy.
+#
+# This is a github-clone-tracker workspace: the agent calls
+# repo_management('org/repo') to clone a repo into the workspace, kglite
+# builds its code-tree graph, and queries flow against that active repo
+# until you swap it.
+#
+# Deployment:
+#
+#     mkdir /path/to/my-workspace/
+#     cp examples/open_source_workspace_mcp.yaml /path/to/my-workspace/workspace_mcp.yaml
+#     kglite-mcp-server --workspace /path/to/my-workspace/
+#
+# The filename inside the workspace MUST be `workspace_mcp.yaml` — the
+# CLI auto-detects manifests by that name. All paths in this file
+# resolve relative to the manifest, so `env_file: ../.env` walks up
+# one level from the workspace dir.
+#
+# This shape is the open-source-explorer pattern: one workspace dir,
+# multiple repos cloned over time, idle repos auto-sweep after
+# `--stale-after-days` (default 7). For local-workspace (single fixed
+# directory + watch rebuild) see docs/examples/manifest_workspace.md.
+
+name: Open Source Explorer
+
+# .env walk-up loads GITHUB_TOKEN (or GH_TOKEN) for github_issues +
+# github_api. Without a token those tools don't register at boot.
+env_file: ../.env
+
+builtins:
+  temp_cleanup: on_overview
+
+# Localhost CSV server: `FORMAT CSV` in cypher_query writes to
+# `<workspace>/temp/kglite-<hash>.csv` and returns a fetch URL the
+# agent can stream from. Without this block, FORMAT CSV inlines the
+# CSV in the response (subject to the MCP transport's size limits —
+# fine for thousands of rows, painful for millions).
+extensions:
+  csv_http_server: true
+
+instructions: |
+  Code intelligence for open-source GitHub repositories via knowledge
+  graphs.
+
+  FIRST STEP: call repo_management('org/repo') to clone the repository
+  and build its knowledge graph. All other tools (cypher_query,
+  graph_overview, read_source, etc.) require an active repo.
+
+  Common repo_management invocations:
+  - repo_management()                          — list cloned repos
+  - repo_management('pydata/xarray')           — clone (if needed) + activate
+  - repo_management(update=True)               — git fetch + rebuild if changed
+  - repo_management(update=True, force_rebuild=True)
+                                               — rebuild graph regardless of SHA
+  - repo_management('pydata/xarray', delete=True)
+                                               — remove repo + graph
+
+  After repo_management():
+  - graph_overview()                           — inventory of node types
+  - graph_overview(types=['Function'])         — drill into a node type
+  - cypher_query("MATCH ... RETURN ...")       — query the active graph
+  - read_code_source(qualified_name='Type::method')
+                                               — name-based code lookup
+  - github_issues(number=N) / github_issues(query='...')
+                                               — issues, PRs, discussions
+  - github_api(path)                           — raw GitHub REST GET
+
+  Append `FORMAT CSV` to any cypher_query for a CSV-exported result
+  served from a localhost URL (CORS-enabled). Use for million-row
+  exports that would blow the MCP response budget.
+
+  Idle repos auto-sweep after 7 days. The active repo is exempt.
+
+overview_prefix: |
+  ## Two read paths
+
+  - `read_code_source(qualified_name='Type::method')` — collapses
+    cypher-then-read into one call when you know the entity name.
+    Returns the source slice plus a one-line header pinning
+    file_path:line range.
+  - `read_source(file_path='...')` — for files without graph nodes
+    (configs, build scripts, docs).
+
+  Cypher first to locate by predicate (callers of a function,
+  importers of a module), pass the qualified_name to read_code_source.

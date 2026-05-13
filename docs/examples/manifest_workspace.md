@@ -1,4 +1,24 @@
-# Example: code review with `workspace.kind: local` + `watch`
+# Examples: workspace mode (local + github-clone-tracker)
+
+`kglite-mcp-server --workspace <dir>` runs the server with a workspace
+backing it. Two flavours, picked by the manifest's `workspace.kind`
+field:
+
+- **`workspace.kind: local`** — a fixed local source directory, watch
+  mode for auto-rebuild on file changes, `set_root_dir(path)` to swap
+  between sibling subdirectories without restarting. Best for
+  code-review against a checked-out project tree.
+- **No `workspace:` block (default github-clone-tracker)** — the agent
+  calls `repo_management('org/repo')` to clone repos into the
+  workspace; kglite builds a code-tree graph over each; queries flow
+  against the active one. Best for exploring open-source codebases on
+  demand.
+
+Both share the same source tools (`read_source` / `grep` /
+`list_source`), the same `read_code_source` qualified-name lookup,
+and the same trust gates for extensions.
+
+## Variant 1 — `workspace.kind: local` + `watch`
 
 Bind a local source directory as the active source root for source
 tools (`read_source` / `grep` / `list_source`), build a code-tree
@@ -112,3 +132,100 @@ the fallback. The token still has to be in env / walked-up `.env`.
 - The `.mcp-workspace/` directory inside `workspace.root` stores
   inventory + last-built SHA. Safe to delete — the next boot
   re-seeds it.
+
+## Variant 2 — github-clone-tracker (no `workspace:` block)
+
+Run the server with `--workspace <dir>` (no `workspace.kind: local`
+in the manifest) and the agent gets `repo_management` for cloning,
+plus the standard source tools against the active clone. A copy-
+paste-ready manifest lives at
+[`examples/open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml).
+
+### Deployment
+
+```bash
+mkdir /path/to/my-workspace/
+cp examples/open_source_workspace_mcp.yaml /path/to/my-workspace/workspace_mcp.yaml
+kglite-mcp-server --workspace /path/to/my-workspace/
+```
+
+The filename inside the workspace dir MUST be `workspace_mcp.yaml` —
+that's the name the CLI auto-detects when given `--workspace <dir>`.
+
+### What the manifest enables
+
+Looking at the example file inline:
+
+```yaml
+name: Open Source Explorer
+env_file: ../.env             # walks up from workspace dir to find GITHUB_TOKEN
+builtins:
+  temp_cleanup: on_overview
+extensions:
+  csv_http_server: true       # FORMAT CSV → localhost URL (CORS-enabled)
+instructions: |
+  FIRST STEP: call repo_management('org/repo') to clone + build...
+  ... (full agent guidance — see the file)
+overview_prefix: |
+  ## Two read paths
+  ... (sticky context shown on bare graph_overview())
+```
+
+Key choices:
+
+- **`env_file: ../.env`** — manifest paths are manifest-relative, so
+  this walks up one level from the workspace dir to find the `.env`.
+  Loads `GITHUB_TOKEN` for `github_issues` + `github_api`. Without a
+  token those tools don't register at boot.
+- **`builtins.temp_cleanup: on_overview`** — wipes the temp/ dir on
+  every bare `graph_overview()` call. With `csv_http_server` enabled,
+  every `FORMAT CSV` export writes a file to temp/; without cleanup
+  they accumulate.
+- **`extensions.csv_http_server: true`** — enables the localhost
+  listener so `FORMAT CSV` exports return URLs the agent can fetch
+  (instead of inlining the CSV body, which blows out for large
+  results). Loopback-only, CORS-enabled.
+- **`instructions:`** — first-message guidance the agent reads on
+  `initialize`. The "FIRST STEP" framing teaches the
+  call-`repo_management`-first ordering; the bulleted
+  `repo_management` invocations cover the four common shapes
+  (list / clone-and-activate / update / delete) without forcing the
+  agent to discover via `tools/list` schema reads.
+- **`overview_prefix:`** — sticky context prepended to bare
+  `graph_overview()` output. Skipped for focused drill-downs
+  (`graph_overview(types=...)` etc.) so it doesn't bloat every
+  response. Good place for the "two-read-paths" mental model.
+
+### What gets registered
+
+For `--workspace <dir>` mode (no `workspace.kind: local`):
+
+```
+- cypher_query
+- graph_overview
+- read_code_source
+- ping
+- repo_management              # github clone tracker
+- read_source / grep / list_source   # against the active repo
+- github_issues / github_api   # if GITHUB_TOKEN was loaded
+```
+
+Note: `set_root_dir` is **only** in the `workspace.kind: local`
+variant above. `repo_management` is **only** in github-workspace
+mode. The two modes are mutually exclusive.
+
+### Lifecycle
+
+- First call: `repo_management('pydata/xarray')` does a shallow
+  `git clone --depth 1`, kglite builds the code-tree graph,
+  graph is active for subsequent queries.
+- Subsequent calls: `repo_management('pydata/xarray')` again
+  short-circuits to "already cloned, activated."
+  `repo_management(update=True)` does `git fetch --depth 1
+  origin` + reset to remote; graph rebuilds only if the SHA
+  moved (gated by `last_built_sha`).
+- Idle sweep: repos untouched for `--stale-after-days` (default
+  7) get tombstoned in `inventory.json`. The active repo is
+  exempt. Sweep happens on the next `repo_management` call.
+- Force rebuild: `repo_management(update=True, force_rebuild=True)`
+  bypasses the SHA gate — useful after a kglite upgrade.

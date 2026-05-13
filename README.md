@@ -262,14 +262,15 @@ The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
 directory has runnable, self-contained artifacts covering each of the
 use cases above:
 
-- **[`conference_graph_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/conference_graph_mcp.yaml)**
-  — annotated MCP manifest. Drop next to a `.kgl` file and
-  `kglite-mcp-server` auto-loads it: `source_root:` registers
-  sandboxed file-access tools, inline `tools[].cypher` templates
-  become typed MCP tools, and the commented `extensions.*` blocks
-  show the opt-in shapes for semantic search, CSV export over HTTP,
-  and query preprocessors. The zero-Python-fork starting point for
-  any new project.
+- **[`open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)**
+  — annotated workspace-mode manifest for the
+  github-clone-tracker pattern: agent calls
+  `repo_management('org/repo')`, kglite clones the repo and builds
+  its code-tree graph, queries flow against the active clone. Drop
+  the file into your workspace directory as `workspace_mcp.yaml`
+  and run `kglite-mcp-server --workspace /path/to/dir/`. Walked
+  through in
+  [the workspace manifest example](https://kglite.readthedocs.io/en/latest/examples/manifest_workspace.html).
 - **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
   — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
   covering laws, regulations, and court decisions with citation
