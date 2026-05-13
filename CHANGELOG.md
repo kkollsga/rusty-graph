@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.28] — 2026-05-14
+
+Fixes three bugs the mcp-servers operator surfaced in their 0.6.18 →
+0.9.27 deployment-verification audit: workspace mode wasn't actually
+building code-tree graphs on activate, `local_workspace` mode booted
+with an empty graph, and `kglite.code_tree` attribute-chain access
+raised at runtime. Two of the four servers they were migrating
+couldn't work end-to-end before this release; they can now.
+
+### Fixed (MCP server)
+
+- **`--workspace` mode now actually builds graphs on activate.** The
+  workspace's `post_activate` hook was registered as a Python wrapper
+  in 0.9.24 but never wired into `_build_server` — so
+  `repo_management('org/repo')` would clone the repo, no code-tree
+  build would fire, and the next `cypher_query` returned
+  `No active graph.` The hook is now wired and fires on both
+  `repo_management` activate and `set_root_dir`. Triggers
+  `graph_state.build_code_tree(active_path)` + `source_roots[:] =
+  [active_path]` so source tools (`read_source`, `grep`,
+  `list_source`) target the active clone.
+- **`workspace.kind: local` mode builds the code-tree at boot.**
+  Previously local-workspace booted with an empty graph until the
+  agent issued the first `set_root_dir`. Mirrors watch mode's
+  boot-time `build_code_tree(mode_path)` so the first
+  `cypher_query` against a freshly-booted local-workspace server
+  sees a populated graph.
+- **`kglite.code_tree` attribute-chain access works again.**
+  `kglite/mcp_server/tools.py::GraphState.build_code_tree` was
+  calling `kglite.code_tree.build(...)` as an attribute chain on the
+  kglite package, but `kglite/__init__.py` doesn't import the
+  submodule eagerly — so the call raised `AttributeError` at runtime
+  the first time the workspace post-activate hook tried to fire.
+  Now uses `from kglite import code_tree` to force the submodule
+  load, with a clean error if the bundled tree-sitter grammars
+  aren't available.
+
+### Added (MCP server)
+
+- **Migration guide for operators upgrading from 0.6.x – 0.8.x**
+  (`docs/migrations/mcp-0.6-to-0.9.md`). Covers the shift from
+  custom Python MCP scripts to the bundled manifest-driven
+  `kglite-mcp-server`: operating modes, tool surface differences
+  (`read_source` split, `grep_source` → `grep`, `ripgrep` is not
+  a bundled name), embedder transition
+  (sentence-transformers/torch/MPS → fastembed/ONNX), manifest
+  cheat-sheets, and common gotchas. Linked from `docs/index.md`.
+- **F6/F7/F8 regression tests.** F6: `local_workspace` mode builds
+  code-tree at boot. F7: `set_root_dir(child)` rebuilds the
+  code-tree for the new root via the post-activate hook. F8:
+  `from kglite import code_tree` loads successfully. 62/62 mcp
+  tests green (was 59 in 0.9.27).
+
 ## [0.9.27] — 2026-05-13
 
 Picks up the `tools[].bundled:` override shape from mcp-methods

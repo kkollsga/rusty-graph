@@ -1369,6 +1369,86 @@ def test_f5_workspace_post_activate_hook_fires_on_activate(tmp_path: Path) -> No
     assert fired_name.startswith("local/"), f"hook received unexpected name: {fired_name!r}"
 
 
+def test_f6_local_workspace_builds_code_tree_at_boot(local_workspace_yaml: Path) -> None:
+    """local_workspace mode must build a code-tree graph for the
+    workspace root at boot — the first cypher_query (before any
+    set_root_dir) must see populated nodes from the source tree.
+
+    Catches: pre-0.9.28 regression where local_workspace mode
+    instantiated Workspace but never called build_code_tree, so the
+    graph stayed empty until the agent issued set_root_dir. Operators
+    deploying code_review-style local-workspace manifests hit this
+    when their first agent action was cypher_query: it returned
+    'No active graph.' even though the manifest declared a workspace
+    root. Wired in 0.9.28 to mirror watch mode's boot-time build."""
+    client = _client(["--mcp-config", str(local_workspace_yaml)])
+    try:
+        body = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS n"})
+    finally:
+        client.close()
+    assert "No active graph" not in body, f"graph empty at boot: {body!r}"
+    # tiny_source_dir has alpha.py (def alpha + class A), beta.py (def
+    # beta), and nested/gamma.py (def gamma) — the code-tree builder
+    # produces at minimum a non-zero node count.
+    assert "n: 0" not in body and '"n":0' not in body.replace(" ", ""), (
+        f"code-tree built but produced zero nodes: {body!r}"
+    )
+
+
+def test_f7_set_root_dir_rebuilds_code_tree_for_new_root(
+    local_workspace_yaml: Path, tiny_source_dir: Path
+) -> None:
+    """After set_root_dir(child), the active code-tree must reflect
+    the new root's source files, not the original workspace root's.
+
+    Catches: pre-0.9.28 regression where set_root_dir rebound
+    source_roots (so read_source/grep targeted the new path) but
+    didn't trigger a code-tree rebuild — cypher_query kept returning
+    nodes from the original workspace root. Now the post_activate
+    hook fires on set_root_dir and rebuilds via build_code_tree."""
+    # Set up a sibling with a distinctively-named function so we can
+    # tell whether the active graph reflects the new root.
+    second = tiny_source_dir / "second_root"
+    second.mkdir()
+    (second / "uniquely_named.py").write_text(
+        "def function_only_in_second_root():\n    return 42\n"
+    )
+
+    client = _client(["--mcp-config", str(local_workspace_yaml)])
+    try:
+        swap = client.call_tool("set_root_dir", {"path": "second_root"})
+        assert "ERROR" not in swap, f"set_root_dir failed: {swap!r}"
+        body = client.call_tool(
+            "cypher_query",
+            {
+                "query": "MATCH (f:Function) WHERE f.name CONTAINS 'function_only_in_second_root' RETURN f.name AS name"
+            },
+        )
+    finally:
+        client.close()
+    assert "function_only_in_second_root" in body, (
+        f"set_root_dir didn't rebuild code-tree for new root: {body!r}"
+    )
+
+
+def test_f8_kglite_code_tree_loadable_via_from_import() -> None:
+    """`from kglite import code_tree` must succeed so the mcp_server
+    can call code_tree.build(...) on workspace activate.
+
+    Catches: pre-0.9.28 attribute-chain bug where
+    `kglite.code_tree.build(...)` raised AttributeError because
+    kglite/__init__.py never imported the submodule at module load.
+    The mcp_server's GraphState.build_code_tree path now does
+    `from kglite import code_tree` which forces the submodule load."""
+    from kglite import code_tree
+
+    assert callable(code_tree.build), "code_tree.build is not callable"
+    # Confirm the bundled Rust extension actually loads — if the
+    # native module is missing the build function will raise
+    # ImportError on use, which the mcp_server surfaces as a clean
+    # RuntimeError pointing at the install instructions.
+
+
 def test_w1_watch_callback_receives_changed_paths(tmp_path: Path) -> None:
     """`start_watch` invokes the Python callable with a list of
     changed path strings within `debounce_ms + grace`. Catches:

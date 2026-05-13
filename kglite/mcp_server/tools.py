@@ -51,7 +51,15 @@ class GraphState:
             self._active = ActiveGraph(graph=graph, source_path=path)
 
     def build_code_tree(self, dir_path: Path) -> None:
-        graph = kglite.code_tree.build(str(dir_path))
+        try:
+            from kglite import code_tree
+        except ImportError as e:
+            raise RuntimeError(
+                "code_tree graph building requires the `tree-sitter` "
+                "extra. Install with `pip install 'kglite[mcp,code-tree]'` "
+                "(or add `tree-sitter` to your environment)."
+            ) from e
+        graph = code_tree.build(str(dir_path))
         with self._lock:
             self._active = ActiveGraph(graph=graph, source_path=None)
 

@@ -180,6 +180,14 @@ async def _async_main(args: argparse.Namespace) -> None:
             kind="local",
             stale_after_days=args.stale_after_days,
         )
+        # 0.9.28: local-workspace mode binds the workspace root as the
+        # active root at construction (see mcp-methods workspace.rs
+        # open_local), but the post-activate hook is registered AFTER
+        # construction so the initial active-binding doesn't fire it.
+        # Build the code-tree explicitly at boot so the first
+        # cypher_query (before any set_root_dir) sees a populated graph
+        # — matches watch mode's boot-time build.
+        graph_state.build_code_tree(mode["path"])
 
     if embedder_adapter is not None:
         graph_state.bind_embedder(embedder_adapter)
@@ -477,6 +485,25 @@ def _build_server(
     def _live_source_roots() -> list[str]:
         return [str(p) for p in source_roots]
 
+    # 0.9.28: wire workspace post-activate so `repo_management(...)`
+    # and local-workspace `set_root_dir(...)` actually build the
+    # code-tree graph for the active path AND rebind source_roots so
+    # subsequent read_source/grep target the active clone. Prior to
+    # 0.9.28 the workspace was instantiated but this hook was never
+    # called — the activation tools were path-tracking-only, no graph
+    # build, source_roots stayed pointed at the workspace dir. That's
+    # why operator's open-source / code-review deployments couldn't
+    # migrate from 0.6.x.
+    if workspace is not None:
+        def _post_activate(repo_path: str, _repo_name: str) -> None:
+            # Hook signature: (repo_path, repo_name). The Rust wrapper
+            # passes path first (mcp_tools.rs::DeferredPyHook::invoke),
+            # which matches mcp-methods' Rust hook contract.
+            target = Path(repo_path)
+            graph_state.build_code_tree(target)
+            source_roots[:] = [target]
+        workspace.set_post_activate(_post_activate)
+
     # GithubIssues holds an ElementCache for drill-down across calls.
     # Constructed once per process; lives for the server's lifetime.
     github_token_present = mcp_internal.has_github_token()
@@ -677,13 +704,11 @@ def _build_server(
                 body = "Error: set_root_dir requires local-workspace mode."
             else:
                 body = workspace.set_root_dir_tool(args.get("path", ""))
-                # 0.9.23: rebind source_roots so subsequent source-tool
-                # calls operate on the new root. Without this, the
-                # workspace's `root` field updated but the captured
-                # source_roots list didn't — set_root_dir registered
-                # but didn't actually change anything.
-                if "Active root" in body and workspace.root not in source_roots:
-                    source_roots[:] = [workspace.root]
+                # source_roots rebind + code-tree rebuild happen via
+                # the workspace post-activate hook wired above (0.9.28).
+                # mcp-methods workspace.rs fires the hook on both
+                # repo_management(activate) AND set_root_dir success,
+                # so this branch no longer needs an inline rebind.
         # ── manifest-declared cypher tools ───────────────────────────
         elif name in cypher_tool_lookup:
             body = await call_cypher_tool(
