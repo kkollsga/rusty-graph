@@ -43,33 +43,9 @@ instructions: |
   graphs.
 
   FIRST STEP: call repo_management('org/repo') to clone the repository
-  and build its knowledge graph. All other tools (cypher_query,
-  graph_overview, read_source, etc.) require an active repo.
-
-  Common repo_management invocations:
-  - repo_management()                          — list cloned repos
-  - repo_management('pydata/xarray')           — clone (if needed) + activate
-  - repo_management(update=True)               — git fetch + rebuild if changed
-  - repo_management(update=True, force_rebuild=True)
-                                               — rebuild graph regardless of SHA
-  - repo_management('pydata/xarray', delete=True)
-                                               — remove repo + graph
-
-  After repo_management():
-  - graph_overview()                           — inventory of node types
-  - graph_overview(types=['Function'])         — drill into a node type
-  - cypher_query("MATCH ... RETURN ...")       — query the active graph
-  - read_code_source(qualified_name='Type::method')
-                                               — name-based code lookup
-  - github_issues(number=N) / github_issues(query='...')
-                                               — issues, PRs, discussions
-  - github_api(path)                           — raw GitHub REST GET
-
-  Append `FORMAT CSV` to any cypher_query for a CSV-exported result
-  served from a localhost URL (CORS-enabled). Use for million-row
-  exports that would blow the MCP response budget.
-
-  Idle repos auto-sweep after 7 days. The active repo is exempt.
+  and build its knowledge graph. Every other tool (cypher_query,
+  graph_overview, read_code_source, etc.) requires an active repo —
+  call them after repo_management has activated one.
 
 overview_prefix: |
   ## Two read paths
@@ -83,3 +59,47 @@ overview_prefix: |
 
   Cypher first to locate by predicate (callers of a function,
   importers of a module), pass the qualified_name to read_code_source.
+
+# ── Bundled tool overrides ───────────────────────────────────────────
+# kglite 0.9.27 / mcp-methods 0.3.31+: customise the agent-facing
+# `description:` of any bundled tool inline. Two override types:
+#
+# - description: replaces what the agent sees in `tools/list`.
+#   Useful for teaching tool-specific call patterns next to the tool
+#   itself, instead of burying them in the global `instructions:`
+#   block (which the agent reads once on initialize and can lose
+#   track of as the session grows).
+# - hidden: true — drop the tool from `tools/list` AND reject calls
+#   to it. Use to narrow the agent surface when a bundled tool isn't
+#   appropriate for your domain (e.g. hiding `ping` on a production
+#   server, or suppressing source-file tools when --graph auto-binds
+#   a source_root wider than you want exposed).
+#
+# Unknown bundled tool names error at boot with the valid list, so
+# typos are caught before runtime.
+
+tools:
+  - bundled: repo_management
+    description: |
+      Manage cloned repositories. FIRST STEP before any other tool.
+
+      Common invocations:
+      - repo_management()                          — list cloned repos
+      - repo_management('pydata/xarray')           — clone (if needed) + activate
+      - repo_management(update=True)               — git fetch + rebuild if changed
+      - repo_management(update=True, force_rebuild=True)
+                                                   — rebuild graph regardless of SHA
+      - repo_management('pydata/xarray', delete=True)
+                                                   — remove repo + graph
+
+      Idle repos auto-sweep after `--stale-after-days` (default 7).
+      The active repo is exempt from sweeping.
+
+  - bundled: cypher_query
+    description: |
+      Run a Cypher query against the active repo's knowledge graph.
+      Returns up to 15 rows inline.
+
+      Append `FORMAT CSV` to the query for a CSV-exported result
+      served from a localhost URL (CORS-enabled). Use for
+      million-row exports that would blow the MCP response budget.

@@ -158,17 +158,26 @@ Looking at the example file inline:
 
 ```yaml
 name: Open Source Explorer
-env_file: ../.env             # walks up from workspace dir to find GITHUB_TOKEN
+env_file: ../.env             # walks up to find GITHUB_TOKEN for github_*
 builtins:
   temp_cleanup: on_overview
 extensions:
   csv_http_server: true       # FORMAT CSV → localhost URL (CORS-enabled)
 instructions: |
-  FIRST STEP: call repo_management('org/repo') to clone + build...
-  ... (full agent guidance — see the file)
+  Code intelligence for open-source GitHub repositories ...
+  FIRST STEP: call repo_management('org/repo') to clone + build ...
 overview_prefix: |
   ## Two read paths
   ... (sticky context shown on bare graph_overview())
+tools:
+  - bundled: repo_management
+    description: |              # per-tool guidance lives with the tool
+      Manage cloned repositories. FIRST STEP before any other tool.
+      Common invocations: ... (full text in the file)
+  - bundled: cypher_query
+    description: |
+      Run a Cypher query against the active repo's knowledge graph.
+      Append `FORMAT CSV` for a CSV-exported result over localhost ...
 ```
 
 Key choices:
@@ -185,16 +194,37 @@ Key choices:
   listener so `FORMAT CSV` exports return URLs the agent can fetch
   (instead of inlining the CSV body, which blows out for large
   results). Loopback-only, CORS-enabled.
-- **`instructions:`** — first-message guidance the agent reads on
-  `initialize`. The "FIRST STEP" framing teaches the
-  call-`repo_management`-first ordering; the bulleted
-  `repo_management` invocations cover the four common shapes
-  (list / clone-and-activate / update / delete) without forcing the
-  agent to discover via `tools/list` schema reads.
+- **`instructions:`** — server-wide first-message orientation. Kept
+  short: the project pitch + the FIRST STEP framing. The detailed
+  per-tool guidance lives on the tools themselves (see
+  `tools[].bundled:` overrides below). Splitting reduces the
+  one-time-read context the agent has to retain through a long
+  session.
 - **`overview_prefix:`** — sticky context prepended to bare
   `graph_overview()` output. Skipped for focused drill-downs
   (`graph_overview(types=...)` etc.) so it doesn't bloat every
   response. Good place for the "two-read-paths" mental model.
+- **`tools[].bundled:` overrides** (kglite 0.9.27 / mcp-methods
+  0.3.31+) — replace the agent-facing `description:` for specific
+  bundled tools. The example overrides two:
+  - `repo_management` — its description carries the "FIRST STEP +
+    five common invocations" guidance that used to live in the
+    global `instructions:` blob. Now it rides `tools/list` next
+    to the tool's schema, so the agent sees the guidance every
+    time it considers which tool to call.
+  - `cypher_query` — description teaches the `FORMAT CSV` →
+    localhost URL pattern. Same principle: per-tool guidance
+    attached to the tool, not buried in a session-wide blob.
+
+  Override `description` works on any of the 12 bundled tools
+  (`cypher_query`, `graph_overview`, `ping`, `read_code_source`,
+  `save_graph`, `read_source`, `grep`, `list_source`,
+  `repo_management`, `set_root_dir`, `github_issues`,
+  `github_api`). Adding `hidden: true` drops a tool from
+  `tools/list` AND rejects calls — useful for narrowing the agent
+  surface when a bundled tool doesn't fit your deployment.
+  Unknown tool names fail at boot with the full valid catalogue
+  listed in the error message.
 
 ### What gets registered
 
