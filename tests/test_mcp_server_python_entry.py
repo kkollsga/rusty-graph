@@ -449,6 +449,68 @@ def test_b3_local_workspace_mode_registers_set_root_dir(local_workspace_yaml: Pa
     assert "repo_management" not in tools
 
 
+def test_b6_graph_mode_accepts_disk_backed_graph_directory(tmp_path: Path) -> None:
+    """--graph accepts a disk-backed graph directory (built via
+    `kglite.KnowledgeGraph(storage='disk', path=...)`), not just .kgl files.
+
+    Catches: 0.9.25 server.py:_validate_mode_paths rejecting any
+    non-file path, which blocked operators deploying Wikidata-scale
+    (124M+ node) disk-backed graphs through the CLI. Reported by
+    the mcp-servers project against 0.9.25; fix lands in 0.9.26.
+
+    The validator fix is what's anchored here: the server must boot
+    against the disk directory and serve a cypher_query that
+    counts the nodes. Property-value persistence on the disk
+    storage path is a separate concern not in scope for this test."""
+    import kglite
+
+    disk_dir = tmp_path / "disk_graph"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.cypher("CREATE (:Marker)")
+    g.cypher("CREATE (:Marker)")
+    g.cypher("CREATE (:Marker)")
+    g.save(str(disk_dir))
+    del g  # release the mmap before booting the server
+
+    # Server must boot with --graph pointing at the directory and
+    # serve a cypher_query that sees the persisted nodes.
+    client = _client(["--graph", str(disk_dir)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (n:Marker) RETURN count(n) AS c"},
+        )
+    finally:
+        client.close()
+    assert "Error" not in body and "ERROR" not in body, f"disk graph caused an error: {body!r}"
+    assert "3" in body, f"expected 3 Marker nodes via count(): {body!r}"
+
+
+def test_b7_graph_mode_rejects_arbitrary_directory_without_meta(tmp_path: Path) -> None:
+    """A directory that ISN'T a disk-backed graph (no disk_graph_meta.json)
+    must still be rejected with a clear error, not silently accepted.
+
+    Catches: a too-permissive fix that accepted any directory."""
+    not_a_graph = tmp_path / "random_dir"
+    not_a_graph.mkdir()
+    (not_a_graph / "stuff.txt").write_text("not a graph\n")
+
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run(
+        [server, "--graph", str(not_a_graph)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0, "arbitrary directory should fail --graph validation"
+    combined = (result.stdout + result.stderr).lower()
+    assert "not a .kgl file or disk-backed graph directory" in combined, (
+        f"expected the new validator message; got stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
 def test_b4_save_graph_gated_on_manifest_flag(
     mutable_graph_path: Path, graph_without_savegraph_flag: Path, tiny_graph_path: Path
 ) -> None:

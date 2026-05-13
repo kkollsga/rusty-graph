@@ -245,9 +245,21 @@ def _pick_mode(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _validate_mode_paths(mode: dict[str, Any]) -> None:
-    if mode["kind"] == "graph" and not mode["path"].is_file():
-        sys.stderr.write(f"--graph path does not exist: {mode['path']}\n")
-        sys.exit(1)
+    if mode["kind"] == "graph":
+        p = mode["path"]
+        # 0.9.26: `--graph` also accepts disk-backed graph directories
+        # (built via `kglite.KnowledgeGraph(storage="disk", path=...)`),
+        # not just single `.kgl` files. Disk graphs are a directory of
+        # column-store files identified by a `disk_graph_meta.json`
+        # sentinel — the same marker the Rust loader checks
+        # (src/graph/io/file.rs::load_file). Without this branch,
+        # operators deploying Wikidata-scale graphs (the documented
+        # `storage="disk"` path for graphs >50M nodes) hit a
+        # misleading "does not exist" error even though the path is
+        # a valid graph directory.
+        if not (p.is_file() or (p.is_dir() and (p / "disk_graph_meta.json").is_file())):
+            sys.stderr.write(f"--graph path is not a .kgl file or disk-backed graph directory: {p}\n")
+            sys.exit(1)
     if mode["kind"] in {"source_root", "watch", "workspace"} and not mode["path"].is_dir():
         sys.stderr.write(f"path does not exist or is not a directory: {mode['path']}\n")
         sys.exit(1)

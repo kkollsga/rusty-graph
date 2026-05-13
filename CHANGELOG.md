@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.26] — 2026-05-13
+
+Operator-driven small release: one CLI fix that unblocks the
+wikidata pure-YAML migration, plus the docs-refresh commit from
+yesterday that was sitting on `main`.
+
+### Fixed
+
+- **`kglite-mcp-server --graph` now accepts disk-backed graph
+  directories**, not just single `.kgl` files. Pre-0.9.26 the
+  validator (`server.py::_validate_mode_paths`) used
+  `Path.is_file()` which silently rejected any directory — even
+  though `kglite.load(path)` (the Python API) accepts both shapes
+  fine. The error message even read "does not exist" when the
+  path was demonstrably a valid graph directory, which was
+  misleading. The new validator accepts a path if EITHER it's a
+  regular file (the `.kgl` case) OR a directory containing the
+  `disk_graph_meta.json` sentinel (the disk-graph case, same
+  marker the Rust loader at `src/graph/io/file.rs::load_file`
+  uses). Reported by the mcp-servers operator after they shipped
+  the wikidata preprocessor migration against 0.9.25; the bug
+  blocked the last 84 lines of `wikidata_mcp_server.py` from
+  being deleted (their disk-backed 124M-node Wikidata graph
+  couldn't boot via the CLI). Anyone deploying a
+  `storage="disk"` graph (the documented kglite path for
+  >50M nodes) hit this immediately.
+
+### Added
+
+- **B6 / B7 regression tests** in
+  `tests/test_mcp_server_python_entry.py`:
+  - B6 — `--graph <disk-graph-dir>` boots the server and serves
+    a `cypher_query` against the persisted nodes.
+  - B7 — `--graph <arbitrary-directory-without-meta>` is still
+    rejected with the new error message, so the validator
+    isn't too permissive.
+
+### Changed
+
+- **`docs/guides/mcp-servers.md` — six accuracy fixes**
+  (commit `51436df`, landed yesterday between 0.9.25 and this
+  release): opening pitch now correctly says "Python entry
+  point" (was "single Rust binary" — stale since 0.9.20); the
+  manifest tiers customisation table replaced (was three rows
+  including the removed `tools: python:` option; now seven rows
+  matching what 0.9.25 actually ships); the end-to-end
+  conference example rewritten without the removed `python:`
+  feature; the "Building a downstream binary" Rust snippet
+  rewritten against mcp-methods 0.3.30 API with cross-link to
+  their docs site; the Common boot errors table pruned of stale
+  `--trust-tools` / python-tool rows and given two new rows for
+  the cypher_preprocessor failure modes. Fresh-user audit
+  identified these as the things a brand-new reader copying
+  examples would actually trip over.
+- **`mcp-methods` dependency switched from git+rev to crates.io**
+  (commit `f53e8f1`, also between releases). mcp-methods 0.3.30
+  was the first crates.io publish; library binary surface is
+  functionally identical to 0.3.29's `71f7ba6`. The switch is
+  cosmetic Cargo.toml tidy — no behaviour change. Cargo.lock
+  locks the exact version for reproducible builds.
+
 ## [0.9.25] — 2026-05-12
 
 Doc + feature release driven entirely by the mcp-servers operator's
