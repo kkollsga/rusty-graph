@@ -1395,9 +1395,7 @@ def test_f6_local_workspace_builds_code_tree_at_boot(local_workspace_yaml: Path)
     )
 
 
-def test_f7_set_root_dir_rebuilds_code_tree_for_new_root(
-    local_workspace_yaml: Path, tiny_source_dir: Path
-) -> None:
+def test_f7_set_root_dir_rebuilds_code_tree_for_new_root(local_workspace_yaml: Path, tiny_source_dir: Path) -> None:
     """After set_root_dir(child), the active code-tree must reflect
     the new root's source files, not the original workspace root's.
 
@@ -1410,9 +1408,7 @@ def test_f7_set_root_dir_rebuilds_code_tree_for_new_root(
     # tell whether the active graph reflects the new root.
     second = tiny_source_dir / "second_root"
     second.mkdir()
-    (second / "uniquely_named.py").write_text(
-        "def function_only_in_second_root():\n    return 42\n"
-    )
+    (second / "uniquely_named.py").write_text("def function_only_in_second_root():\n    return 42\n")
 
     client = _client(["--mcp-config", str(local_workspace_yaml)])
     try:
@@ -1420,15 +1416,11 @@ def test_f7_set_root_dir_rebuilds_code_tree_for_new_root(
         assert "ERROR" not in swap, f"set_root_dir failed: {swap!r}"
         body = client.call_tool(
             "cypher_query",
-            {
-                "query": "MATCH (f:Function) WHERE f.name CONTAINS 'function_only_in_second_root' RETURN f.name AS name"
-            },
+            {"query": "MATCH (f:Function) WHERE f.name CONTAINS 'function_only_in_second_root' RETURN f.name AS name"},
         )
     finally:
         client.close()
-    assert "function_only_in_second_root" in body, (
-        f"set_root_dir didn't rebuild code-tree for new root: {body!r}"
-    )
+    assert "function_only_in_second_root" in body, f"set_root_dir didn't rebuild code-tree for new root: {body!r}"
 
 
 def test_f8_kglite_code_tree_loadable_via_from_import() -> None:

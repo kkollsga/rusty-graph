@@ -495,6 +495,7 @@ def _build_server(
     # why operator's open-source / code-review deployments couldn't
     # migrate from 0.6.x.
     if workspace is not None:
+
         def _post_activate(repo_path: str, _repo_name: str) -> None:
             # Hook signature: (repo_path, repo_name). The Rust wrapper
             # passes path first (mcp_tools.rs::DeferredPyHook::invoke),
@@ -502,6 +503,7 @@ def _build_server(
             target = Path(repo_path)
             graph_state.build_code_tree(target)
             source_roots[:] = [target]
+
         workspace.set_post_activate(_post_activate)
 
     # GithubIssues holds an ElementCache for drill-down across calls.
