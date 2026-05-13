@@ -103,3 +103,29 @@ tools:
       Append `FORMAT CSV` to the query for a CSV-exported result
       served from a localhost URL (CORS-enabled). Use for
       million-row exports that would blow the MCP response budget.
+
+  - bundled: read_source
+    description: |
+      Read a file slice from the active repo's clone path. Use
+      `file_path` (relative to the active repo root), `start_line` /
+      `end_line` to narrow, `grep` + `grep_context` to filter.
+
+      Two read paths in this server:
+      - read_source(file_path=...)         — for any file (configs,
+                                             docs, build scripts).
+      - read_code_source(qualified_name=...) — collapses cypher-then-
+                                              read for entities the
+                                              graph already indexed
+                                              (functions, classes,
+                                              methods). Prefer when
+                                              you know the symbol.
+
+  - bundled: grep
+    description: |
+      Recursive regex search across the active repo's source tree.
+      .gitignore-aware. Returns `path:lineno:content` for matches
+      (and `path-lineno-content` for context lines).
+
+      Cypher is faster + more precise for locating functions /
+      classes / call sites — reach for grep when you need plain-text
+      search (string literals, config keys, comments).

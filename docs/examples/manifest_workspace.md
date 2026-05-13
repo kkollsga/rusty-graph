@@ -178,6 +178,14 @@ tools:
     description: |
       Run a Cypher query against the active repo's knowledge graph.
       Append `FORMAT CSV` for a CSV-exported result over localhost ...
+  - bundled: read_source
+    description: |
+      Read a file slice from the active repo. Prefer
+      read_code_source for graph-indexed symbols ...
+  - bundled: grep
+    description: |
+      .gitignore-aware regex search across the active repo's source.
+      Reach for cypher first for symbol lookups ...
 ```
 
 Key choices:
@@ -206,15 +214,21 @@ Key choices:
   response. Good place for the "two-read-paths" mental model.
 - **`tools[].bundled:` overrides** (kglite 0.9.27 / mcp-methods
   0.3.31+) — replace the agent-facing `description:` for specific
-  bundled tools. The example overrides two:
+  bundled tools. The example overrides four:
   - `repo_management` — its description carries the "FIRST STEP +
     five common invocations" guidance that used to live in the
     global `instructions:` blob. Now it rides `tools/list` next
     to the tool's schema, so the agent sees the guidance every
     time it considers which tool to call.
   - `cypher_query` — description teaches the `FORMAT CSV` →
-    localhost URL pattern. Same principle: per-tool guidance
-    attached to the tool, not buried in a session-wide blob.
+    localhost URL pattern.
+  - `read_source` — disambiguates against `read_code_source`
+    (prefer the latter for symbols the graph already indexed) and
+    pins `file_path` semantics to the active repo's clone path.
+  - `grep` — frames the regex-search workhorse against cypher
+    (cypher first for symbols; grep for plain text). Same
+    principle as the other three: per-tool guidance attached to
+    the tool, not buried in a session-wide blob.
 
   Override `description` works on any of the 12 bundled tools
   (`cypher_query`, `graph_overview`, `ping`, `read_code_source`,
