@@ -63,6 +63,12 @@ pub struct PropertyStatInfo {
     pub non_null: usize,
     pub unique: usize,
     pub values: Option<Vec<Value>>,
+    /// One example value when `values` is None (high-cardinality property).
+    /// Lets the schema output show what a property *looks like* even when
+    /// the full set is too large to enumerate. Added in 0.9.30 for
+    /// operator-reported friction where the agent had to guess the value
+    /// shape of properties like `file_path` from the name alone.
+    pub sample: Option<Value>,
 }
 
 /// A single neighbor connection: edge type, connected node type, and count.

@@ -528,6 +528,22 @@ fn write_connections_detail(
                         .map(|v| value_display_compact(v, truncate_at))
                         .collect();
                     format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
+                } else if unique > 0 {
+                    // 0.9.30: when cardinality exceeds MAX_PROP_VALUES we
+                    // can't list every distinct value, but the agent
+                    // still benefits from seeing ONE concrete example.
+                    // Catches the operator-reported friction where
+                    // properties like `file_path` had hundreds of values
+                    // (no `vals=` attr), forcing the agent to guess
+                    // value shape from the property name alone. A
+                    // sample="..." attribute means the prop line always
+                    // self-documents whether it's a low-cardinality enum
+                    // (vals) or a high-cardinality field (sample).
+                    let sample = stats.value_set.iter().next().map(|v| value_display_compact(v, truncate_at));
+                    match sample {
+                        Some(s) => format!(" sample=\"{}\"", xml_escape(&s)),
+                        None => String::new(),
+                    }
                 } else {
                     String::new()
                 };
@@ -812,6 +828,14 @@ fn write_type_detail(
                             .collect();
                         attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
                     }
+                } else if let Some(ref s) = prop.sample {
+                    // 0.9.30: high-cardinality props show one example
+                    // value so the agent can see what the property
+                    // looks like instead of guessing from the name.
+                    attrs.push_str(&format!(
+                        " sample=\"{}\"",
+                        xml_escape(&value_display_compact(s, truncate_at))
+                    ));
                 }
                 xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
             }

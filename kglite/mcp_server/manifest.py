@@ -77,6 +77,12 @@ class BundledOverride:
     - `description=""` means "explicitly clear the description"
       (rare but preserved as distinct from None).
     - `hidden=True` means "omit from tools/list AND reject calls."
+    - `rename=None` means "expose under the canonical bundled name."
+      `rename="foo_bar"` exposes the bundled tool to the agent as
+      `foo_bar`. mcp-methods 0.3.34+; per-deployment disambiguation
+      for ToolSearch when multiple kglite servers expose identical
+      surfaces. Server-side collision check (rename must not shadow
+      another registered tool) happens at boot in server.py.
 
     Validation against the actual bundled-tool catalogue happens
     in `server.py` at boot — the framework doesn't know what
@@ -85,6 +91,7 @@ class BundledOverride:
     name: str
     description: str | None = None
     hidden: bool = False
+    rename: str | None = None
 
 
 @dataclass
@@ -180,12 +187,16 @@ def load_manifest(path: Path) -> Manifest:
             # mcp-methods 0.3.31+: `tools[].bundled:` overrides. The
             # framework records the operator's declared customisation;
             # kglite validates the name against its actual bundled-
-            # tool catalogue at boot in server.py.
+            # tool catalogue at boot in server.py. mcp-methods 0.3.34+:
+            # `rename:` field for per-deployment disambiguation
+            # (multiple kglite servers sharing the same canonical
+            # bundled surface).
             m.bundled_overrides.append(
                 BundledOverride(
                     name=t["name"],
                     description=t.get("description"),
                     hidden=bool(t.get("hidden", False)),
+                    rename=t.get("rename"),
                 )
             )
         else:

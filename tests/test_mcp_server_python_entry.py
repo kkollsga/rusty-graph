@@ -710,6 +710,260 @@ def test_b13_unknown_bundled_tool_name_fails_at_boot(tmp_path: Path, tiny_graph_
     assert "cypher_query" in combined, f"error should list valid names: {result.stderr!r}"
 
 
+def test_b14_bundled_rename_exposes_tool_under_new_name(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Manifest `tools[].bundled: cypher_query / rename: legal_cypher_query`
+    makes the tool appear in `tools/list` as `legal_cypher_query` and
+    removes `cypher_query` from the listing.
+
+    Closes operator friction: three kglite servers (open_source / legal /
+    prospect) exposing identical bundled surfaces showed six copies of
+    `cypher_query` etc. in ToolSearch results. Per-deployment renames
+    disambiguate the namespace. mcp-methods 0.3.34 + kglite 0.9.30."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: rename_test\ntools:\n  - bundled: cypher_query\n    rename: legal_cypher_query\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        tools = client.list_tools()
+    finally:
+        client.close()
+    assert "legal_cypher_query" in tools, f"renamed tool should appear: {tools!r}"
+    assert "cypher_query" not in tools, f"canonical name should not appear when rename is set: {tools!r}"
+
+
+def test_b15_bundled_rename_dispatches_to_canonical_handler(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """A call to the renamed tool routes through the canonical
+    bundled handler. Catches: alias appears in tools/list but call-
+    site dispatch table never resolves the alias to its canonical
+    name, leaving the tool unreachable in practice."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text(
+        "name: rename_dispatch_test\ntools:\n  - bundled: cypher_query\n    rename: legal_cypher_query\n"
+    )
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool(
+            "legal_cypher_query",
+            {"query": "MATCH (p:Person) RETURN p.name LIMIT 1"},
+        )
+    finally:
+        client.close()
+    assert "p.name" in body, f"renamed cypher_query call should return cypher rows: {body!r}"
+    assert "unknown tool" not in body.lower()
+
+
+def test_b16_bundled_rename_collision_with_bundled_name_fails_at_boot(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Renaming `cypher_query` to `ping` (an existing bundled name)
+    should fail at boot with a clear collision error. Catches:
+    rename validation pass missing the bundled-name shadow case."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: collide_test\ntools:\n  - bundled: cypher_query\n    rename: ping\n")
+
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run(
+        [server, "--graph", str(target), "--mcp-config", str(manifest)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0, f"collision should fail boot; stdout={result.stdout!r} stderr={result.stderr!r}"
+    combined = (result.stdout + result.stderr).lower()
+    assert "shadow" in combined or "collide" in combined, f"missing collision error: {result.stderr!r}"
+    assert "ping" in combined
+
+
+def test_b17_bundled_rename_collision_with_cypher_tool_fails_at_boot(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Renaming a bundled tool to a name already used by a manifest-
+    declared cypher tool fails at boot. Same safety property as B16,
+    different collision shape."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text(
+        "name: collide_cypher_test\n"
+        "tools:\n"
+        "  - name: lookup\n"
+        '    cypher: "MATCH (p:Person) RETURN p"\n'
+        "  - bundled: cypher_query\n"
+        "    rename: lookup\n"
+    )
+
+    server = _which_server()
+    if server is None:
+        pytest.skip("server not on PATH")
+    result = subprocess.run(
+        [server, "--graph", str(target), "--mcp-config", str(manifest)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0, "rename->cypher-tool collision should fail boot"
+    combined = (result.stdout + result.stderr).lower()
+    assert "lookup" in combined and "shadow" in combined
+
+
+def test_i1_batch_load_hint_appears_in_instructions() -> None:
+    """The server's `instructions` (sent on `initialize`) carries the
+    ToolSearch batch-load hint so the agent learns how to load all
+    of this server's tools in one round trip.
+
+    Closes operator-reported friction: every search-by-name in
+    Claude Code's deferred-tool loader was one round trip; agents
+    had to make N searches to load N tools from one server, instead
+    of one search per server. 0.9.30 auto-injects the hint."""
+    from kglite.mcp_server.server import _BATCH_LOAD_HINT_MARKER, _compose_instructions
+
+    # No operator instructions: the hint stands alone.
+    out_alone = _compose_instructions(None)
+    assert _BATCH_LOAD_HINT_MARKER in out_alone
+    assert "ToolSearch" in out_alone
+
+    # With operator instructions: hint prefixed; operator text preserved.
+    operator_text = "Server-wide orientation: this server hosts the prospect graph."
+    out_combined = _compose_instructions(operator_text)
+    assert _BATCH_LOAD_HINT_MARKER in out_combined
+    assert operator_text in out_combined
+    # Hint comes BEFORE operator text so the batch-load primer is
+    # read first by the agent.
+    assert out_combined.index(_BATCH_LOAD_HINT_MARKER) < out_combined.index(operator_text)
+
+
+def test_i2_batch_load_hint_is_idempotent() -> None:
+    """Re-composing instructions that already contain the hint marker
+    does not duplicate the hint. Catches: server boot path running
+    _compose_instructions twice (e.g. through a refactor) leaves a
+    double hint in the agent's initialize payload."""
+    from kglite.mcp_server.server import _compose_instructions
+
+    first_pass = _compose_instructions("Operator text.")
+    second_pass = _compose_instructions(first_pass)
+    assert first_pass == second_pass
+
+
+def test_i3_batch_load_hint_marker_in_operator_text_suppresses_auto_inject() -> None:
+    """An operator who writes the marker literally into their
+    `instructions:` text suppresses the auto-injection — useful for
+    deployments that want full control over the first-message
+    surface."""
+    from kglite.mcp_server.server import _BATCH_LOAD_HINT_MARKER, _compose_instructions
+
+    operator_text = f"{_BATCH_LOAD_HINT_MARKER}\nMy custom orientation only."
+    out = _compose_instructions(operator_text)
+    assert out == operator_text  # auto-inject skipped
+
+
+def test_s1_module_property_uniform_across_code_tree_node_types() -> None:
+    """code_tree.build() populates a `module` property on Function /
+    Class / Constant / Module / File nodes — the same dotted path
+    across types so `WHERE n.module STARTS WITH 'foo.bar'` works
+    regardless of which entity label `n` matches.
+
+    Closes operator-reported friction: `module` was previously only
+    on File and Module nodes, so cross-type module filters silently
+    returned zero rows. 0.9.30 normalises the property via a
+    file_path → module_path lookup at code_tree build time."""
+    import kglite
+    from kglite import code_tree
+
+    # Build a tiny in-memory project to keep this test fast (the
+    # kglite codebase itself works but takes longer; for a regression
+    # gate we just need a few files with distinct modules).
+    src = Path(__file__).parent / "fixtures_code_tree"
+    if src.exists():
+        shutil.rmtree(src)
+    src.mkdir()
+    (src / "alpha.py").write_text("def foo():\n    return 1\nclass Alpha:\n    pass\n")
+    nested = src / "nested"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("")
+    (nested / "beta.py").write_text("DELTA = 42\n\ndef bar():\n    return 2\n")
+    try:
+        g = code_tree.build(str(src))
+
+        # Function: must carry a non-null `module` matching the file
+        rows = list(g.cypher("MATCH (f:Function) RETURN f.title AS t, f.module AS m"))
+        assert rows, "code_tree should produce Function nodes"
+        for row in rows:
+            assert row["m"] is not None, f"Function missing module: {row}"
+
+        # Cross-type WHERE on module — the operator's reproducer.
+        # code_tree prefixes the project root dir name, so for a
+        # fixture rooted at ".../fixtures_code_tree" the function
+        # `bar` in `nested/beta.py` has module `fixtures_code_tree.nested.beta`.
+        # The WHERE clause uses the partial module path that locates
+        # the nested submodule regardless of project-root prefix.
+        rows_starts_with = list(g.cypher("MATCH (f:Function) WHERE f.module CONTAINS '.nested.' RETURN f.title"))
+        assert any("bar" in r.get("f.title", "") for r in rows_starts_with), (
+            f"WHERE f.module CONTAINS '.nested.' should find bar(): {rows_starts_with!r}"
+        )
+
+        # Class also carries module
+        cls_rows = list(g.cypher("MATCH (c:Class) RETURN c.title AS t, c.module AS m"))
+        assert cls_rows
+        assert all(r["m"] is not None for r in cls_rows)
+
+        # Constant also
+        const_rows = list(g.cypher("MATCH (c:Constant) RETURN c.title AS t, c.module AS m"))
+        assert const_rows
+        for r in const_rows:
+            assert r["m"] is not None
+
+        # Module nodes carry module (== qualified_name)
+        mod_rows = list(g.cypher("MATCH (m:Module) RETURN m.title AS t, m.module AS mod"))
+        for r in mod_rows:
+            assert r["mod"] is not None
+    finally:
+        if src.exists():
+            shutil.rmtree(src)
+    # Suppress unused-import warning when the test runs without the
+    # kglite module being referenced elsewhere in the file scope.
+    _ = kglite
+
+
+def test_s2_describe_emits_sample_attr_for_high_cardinality_props() -> None:
+    """`describe()` emits a `sample="..."` attribute on properties
+    whose unique count exceeds the vals threshold. Lets the agent
+    see ONE example value of every property — not just the property
+    name — closing the operator-reported "guess the value shape
+    from the name alone" friction."""
+    import kglite
+    from kglite import code_tree
+
+    src = Path(__file__).parent / "fixtures_code_tree_s2"
+    if src.exists():
+        shutil.rmtree(src)
+    src.mkdir()
+    # Enough files to push high-cardinality props past the vals
+    # threshold (>15 unique values for things like docstring,
+    # signature, line_number).
+    for i in range(20):
+        (src / f"mod_{i:02d}.py").write_text(
+            f'"""Module docstring {i}."""\n\n'
+            f"def function_{i:02d}():\n"
+            f'    """Function {i} doing things."""\n'
+            f"    return {i}\n"
+        )
+    try:
+        g = code_tree.build(str(src))
+        xml = g.describe(types=["Function"])
+        # docstring should be high-cardinality (20 unique) and carry sample=
+        # (not the lower-cardinality vals= path which only fires when unique <= 15)
+        assert "sample=" in xml, f"high-cardinality property should carry sample= attr; got:\n{xml}"
+    finally:
+        if src.exists():
+            shutil.rmtree(src)
+    _ = kglite
+
+
 def test_b4_save_graph_gated_on_manifest_flag(
     mutable_graph_path: Path, graph_without_savegraph_flag: Path, tiny_graph_path: Path
 ) -> None:

@@ -100,7 +100,7 @@ overview_prefix: |
 
 # ── Bundled tool overrides ───────────────────────────────────────────
 # kglite 0.9.27 / mcp-methods 0.3.31+: customise the agent-facing
-# `description:` of any bundled tool inline. Two override types:
+# `description:` of any bundled tool inline. Three override types:
 #
 # - description: replaces what the agent sees in `tools/list`.
 #   Useful for teaching tool-specific call patterns next to the tool
@@ -112,9 +112,20 @@ overview_prefix: |
 #   appropriate for your domain (e.g. hiding `ping` on a production
 #   server, or suppressing source-file tools when --graph auto-binds
 #   a source_root wider than you want exposed).
+# - rename (0.9.30 / mcp-methods 0.3.34+): expose the bundled tool
+#   under a different name. Useful for operators running multiple
+#   kglite-mcp-servers (one per knowledge graph) where every server
+#   exposes identical `cypher_query` / `read_code_source` surfaces —
+#   ToolSearch results then show six near-identical matches across
+#   three servers, ambiguous to rank. Renaming to
+#   `<domain>_<bundled>` (e.g. `open_source_cypher_query`)
+#   disambiguates the namespace. The canonical handler still runs;
+#   only the agent-facing identifier changes.
 #
 # Unknown bundled tool names error at boot with the valid list, so
-# typos are caught before runtime.
+# typos are caught before runtime. Rename collisions (renaming to a
+# name already used by another bundled tool, another rename, or a
+# manifest-declared cypher tool) also error at boot.
 
 tools:
   - bundled: repo_management
@@ -134,6 +145,7 @@ tools:
       The active repo is exempt from sweeping.
 
   - bundled: cypher_query
+    # rename: open_source_cypher_query   # uncomment when running >1 kglite server
     description: |
       Run a Cypher query against the active repo's knowledge graph.
       Returns up to 15 rows inline.

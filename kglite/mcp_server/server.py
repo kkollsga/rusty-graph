@@ -225,6 +225,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     fallback_name = _fallback_name(mode["kind"])
     server_name = args.name or (manifest.name if manifest else None) or fallback_name
     instructions = manifest.instructions if manifest else None
+    instructions = _compose_instructions(instructions)
 
     async with stdio_server() as (read_stream, write_stream):
         init_opts = server.create_initialization_options(
@@ -238,6 +239,43 @@ async def _async_main(args: argparse.Namespace) -> None:
         if instructions is not None:
             init_opts.instructions = instructions
         await server.run(read_stream, write_stream, init_opts)
+
+
+# Marker the auto-injected hint carries so we don't duplicate it if an
+# operator's manifest already contains the same text (or if the
+# injection runs twice for any reason).
+_BATCH_LOAD_HINT_MARKER = "[kglite-batch-load-hint]"
+
+_BATCH_LOAD_HINT = f"""\
+{_BATCH_LOAD_HINT_MARKER}
+This server's tools are deferred-loaded by Claude Code: each tool
+appears in ToolSearch but its full schema only arrives after a
+search-by-name. To batch-load every tool on this server in one
+round trip, call:
+
+  ToolSearch(query="+<server-slug>", max_results=20)
+
+where <server-slug> is the substring between `mcp__` and the next
+`__` in this server's tool names (the key you used in your MCP
+client config). One ToolSearch call per server, not per tool.
+"""
+
+
+def _compose_instructions(operator_instructions: str | None) -> str:
+    """Combine the kglite batch-load hint with operator-declared
+    instructions. The hint teaches agents how to load all of this
+    server's tools in one ToolSearch round trip rather than serially
+    via per-tool searches (operator-reported friction in 0.9.29's
+    post-deploy audit).
+
+    Idempotent: if the marker is already present in operator_instructions
+    the hint is skipped (operators who want full control can include the
+    marker literally to suppress auto-injection)."""
+    if operator_instructions and _BATCH_LOAD_HINT_MARKER in operator_instructions:
+        return operator_instructions
+    if not operator_instructions:
+        return _BATCH_LOAD_HINT
+    return f"{_BATCH_LOAD_HINT}\n\n{operator_instructions}"
 
 
 def _pick_mode(args: argparse.Namespace) -> dict[str, Any]:
@@ -432,14 +470,64 @@ def _build_server(
     bundled_overrides: dict[str, Any] = {b.name: b for b in bundled_overrides_list}
     hidden_bundled_names: set[str] = {b.name for b in bundled_overrides_list if b.hidden}
 
+    # 0.9.30: collect `rename:` overrides and build a runtime lookup
+    # from agent-facing alias → canonical bundled name. mcp-methods
+    # 0.3.34+ ships the `rename:` field on bundled override entries;
+    # we validate collisions across the manifest's registered tool
+    # namespace (other bundled canonical names, other renames, cypher
+    # tools) at boot so operators see the error before serving.
+    alias_to_canonical: dict[str, str] = {}
+    cypher_tool_names: set[str] = {t.name for t in (manifest.tools if manifest else [])}
+    for b in bundled_overrides_list:
+        if b.rename is None:
+            continue
+        alias = b.rename
+        if alias == b.name:
+            # No-op rename — silently allow (operator might generate
+            # manifests programmatically and the equality case
+            # shouldn't be a hard error).
+            continue
+        if alias in alias_to_canonical:
+            sys.stderr.write(
+                f"ERROR: duplicate `tools[].bundled: rename:` value {alias!r} "
+                f"(would shadow another rename for {alias_to_canonical[alias]!r}).\n"
+            )
+            sys.exit(3)
+        if alias in BUNDLED_TOOL_NAMES:
+            sys.stderr.write(
+                f"ERROR: `tools[].bundled: rename:` value {alias!r} shadows "
+                f"an existing bundled tool name. Rename targets must not "
+                f"collide with canonical bundled names.\n"
+            )
+            sys.exit(3)
+        if alias in cypher_tool_names:
+            sys.stderr.write(
+                f"ERROR: `tools[].bundled: rename:` value {alias!r} shadows "
+                f"a manifest-declared cypher tool of the same name.\n"
+            )
+            sys.exit(3)
+        alias_to_canonical[alias] = b.name
+
     def _apply_override(tool: types.Tool) -> types.Tool:
         """Apply a manifest `bundled:` override to a freshly-built
         tool, returning a new Tool with the override applied (or the
-        original if no override exists for this tool name)."""
+        original if no override exists for this tool name).
+
+        Both `description:` and `rename:` are honoured — the latter
+        rewrites `tool.name` so the agent sees the override-declared
+        identifier in `tools/list`. Dispatch in `_call` reverses the
+        rename via `alias_to_canonical` before running the tool body."""
         override = bundled_overrides.get(tool.name)
-        if override is None or override.description is None:
+        if override is None:
             return tool
-        return tool.model_copy(update={"description": override.description})
+        updates: dict[str, Any] = {}
+        if override.description is not None:
+            updates["description"] = override.description
+        if override.rename is not None and override.rename != tool.name:
+            updates["name"] = override.rename
+        if not updates:
+            return tool
+        return tool.model_copy(update=updates)
 
     builtins = manifest.builtins if manifest else None
     save_graph_enabled = bool(builtins and builtins.save_graph)
@@ -621,6 +709,13 @@ def _build_server(
 
     @server.call_tool()
     async def _call(name: str, args: dict[str, Any]) -> list[types.TextContent]:
+        # 0.9.30: agents call bundled tools by their agent-facing name,
+        # which may be a `rename:` alias rather than the canonical
+        # name. Translate before dispatch so the rest of this function
+        # operates on canonical names only. The reverse map (canonical
+        # → alias) is used in `_list`; here we go alias → canonical.
+        if name in alias_to_canonical:
+            name = alias_to_canonical[name]
         # 0.9.27: hidden bundled tools (manifest declared
         # `tools[].bundled: NAME / hidden: true`) are absent from
         # `tools/list` but the dispatcher still needs to refuse

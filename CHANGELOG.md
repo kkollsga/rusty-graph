@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.30] — 2026-05-14
+
+Operator-reported friction from the 0.9.29 deployment audit:
+agent-facing schema clarity (Item 2), MCP tool-search round-trip
+counts (Item 1), and identical-tool-surface ambiguity across
+multiple kglite servers (Item 3). All four items fixed in one
+release.
+
+### Fixed (code_tree)
+
+- **`module` property is now populated on every code-tree entity
+  type, not just File and Module.** Operator reported
+  `MATCH (f:Function) WHERE f.module STARTS WITH 'xarray.core'
+  RETURN f` returned zero rows — the property only existed on
+  File/Module nodes. The code_tree builder now looks up each
+  Function/Class/Constant/Enum/Interface/Trait/Protocol/Struct's
+  file_path in a file → module_path map and populates a `module`
+  property derived from the parent file's module. Module nodes
+  also get a `module` alias of their `qualified_name` for cross-
+  type uniformity. Result: `WHERE n.module STARTS WITH '...'`
+  works against any node label without branching.
+
+### Added (introspection)
+
+- **`<prop sample="..." />` attribute on high-cardinality
+  properties in `describe()` / `graph_overview` output.**
+  Pre-0.9.30 the schema XML showed `vals="..."` for properties
+  with ≤15 unique values (low-cardinality enums); high-
+  cardinality properties (docstring, signature, file_path with
+  hundreds of values) showed only `unique=N` with no example.
+  Now one example value is emitted as a `sample="..."` attribute
+  whenever `vals=` would be omitted, so the agent always sees
+  what the property *looks like* (e.g. `signature` becomes
+  `sample="def to_list (self) -> list[dict[str, ..."` instead
+  of just `unique="16"`). Same logic applied to edge property
+  stats in `<connections>` blocks.
+
+### Added (MCP server)
+
+- **Auto-injected ToolSearch batch-load hint into the server's
+  `instructions:` field.** Operator reported deferred-tool loaders
+  (Claude Code's ToolSearch) gating each tool family per-tool,
+  forcing N round trips to load N tools from one server. The
+  server now prepends a one-paragraph hint to operator-declared
+  `instructions:` describing the
+  `ToolSearch(query='+<server-slug>', max_results=20)` batch-load
+  pattern (one round trip per server). Idempotent: composing
+  twice does not duplicate the hint. Operators who want full
+  control can include the literal marker `[kglite-batch-load-hint]`
+  in their instructions text to suppress auto-injection.
+- **`tools[].bundled: <name>` overrides accept a `rename:` field
+  (mcp-methods 0.3.34+).** Operator reported that running three
+  kglite servers exposing identical bundled surfaces produced
+  six near-identical entries in ToolSearch results, ambiguous
+  to rank. `rename:` lets operators expose a bundled tool under
+  a per-deployment name (e.g. `legal_cypher_query`,
+  `prospect_cypher_query`) while the canonical handler still
+  runs the body. Composes with the existing `description:` and
+  `hidden:` overrides. Boot-time validation refuses renames
+  that shadow another bundled tool, another rename, or a
+  manifest-declared cypher tool.
+
+### Changed
+
+- **mcp-methods pin bumped to 0.3.34** (was 0.3.33). Picks up
+  the `tools[].bundled: rename:` extension. The framework
+  patch was applied locally to mcp-methods, tested (16/16
+  bundled tests green; +6 new entries covering rename
+  validation and JSON shape), and proposed to the maintainer
+  via inbox note.
+
+### Added (regression tests)
+
+- **B14**: `bundled: cypher_query` + `rename: legal_cypher_query`
+  exposes the renamed identifier in `tools/list` and removes the
+  canonical name from the listing.
+- **B15**: Call to renamed tool dispatches through the canonical
+  handler (proves rename isn't visible-only).
+- **B16**: Renaming a bundled tool to a name that shadows
+  another bundled tool fails at boot with a clear collision
+  error.
+- **B17**: Renaming to a name that shadows a cypher tool fails
+  at boot.
+- **I1 / I2 / I3**: Batch-load hint appears in composed
+  instructions, idempotent across repeated composition,
+  suppressible by operator-supplied marker.
+- **S1**: `module` property is populated on Function / Class /
+  Constant / Module / File nodes uniformly (operator's literal
+  reproducer).
+- **S2**: `describe()` emits `sample="..."` for high-cardinality
+  properties.
+
+75/75 mcp tests green (was 66 in 0.9.29). 603/603 Rust unit
+tests green.
+
 ## [0.9.29] — 2026-05-14
 
 Two operator-reported fixes from the post-0.9.28 deployment audit:

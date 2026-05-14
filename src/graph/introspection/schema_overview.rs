@@ -599,6 +599,7 @@ pub fn compute_property_stats(
         non_null: total_nodes,
         unique: 1,
         values: Some(vec![Value::String(node_type.to_string())]),
+        sample: None,
     });
 
     // Canonical order for remaining: title, id first, then sorted discovered
@@ -627,12 +628,26 @@ pub fn compute_property_stats(
 
             let unique = pa.value_set.len();
             let non_null = (pa.non_null as f64 * scale_factor).round() as usize;
-            let values = if max_values > 0 && unique <= max_values && unique > 0 {
+            let (values, sample) = if max_values > 0 && unique <= max_values && unique > 0 {
                 let mut vals: Vec<Value> = pa.value_set.into_iter().collect();
                 vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                Some(vals)
+                (Some(vals), None)
+            } else if unique > 0 {
+                // 0.9.30: too many distinct values to enumerate, but
+                // pick one as a sample so the schema XML can still
+                // show what the property *looks like*. Closes the
+                // operator-reported friction where high-cardinality
+                // properties (file_path with hundreds of values,
+                // docstring with thousands) showed only `unique=N`
+                // and forced the agent to guess value shape from the
+                // property name. HashSet iteration order isn't
+                // deterministic, but for a sample value this is
+                // acceptable — the contract is "one real value",
+                // not "the same value every time."
+                let sample = pa.value_set.into_iter().next();
+                (None, sample)
             } else {
-                None
+                (None, None)
             };
 
             results.push(PropertyStatInfo {
@@ -641,6 +656,7 @@ pub fn compute_property_stats(
                 non_null,
                 unique,
                 values,
+                sample,
             });
         }
     }

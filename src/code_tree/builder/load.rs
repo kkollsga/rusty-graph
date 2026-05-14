@@ -239,6 +239,21 @@ fn modules_df(modules: &[ModuleRecord]) -> DataFrame {
                     .collect(),
             ),
         ),
+        // 0.9.30: `module` is an alias for qualified_name on Module
+        // nodes so the same property name works across File/Module/
+        // Function/Class/Constant/Enum/Interface — agents can write
+        // `MATCH (n) WHERE n.module STARTS WITH 'xarray.core' RETURN n`
+        // without branching on label.
+        (
+            "module",
+            ColumnType::String,
+            str_col(
+                modules
+                    .iter()
+                    .map(|m| Some(m.qualified_name.clone()))
+                    .collect(),
+            ),
+        ),
         (
             "name",
             ColumnType::String,
@@ -257,12 +272,32 @@ fn modules_df(modules: &[ModuleRecord]) -> DataFrame {
     ])
 }
 
-fn functions_df(fns: &[FunctionInfo], file_is_test: &HashMap<&str, bool>) -> DataFrame {
+fn functions_df(
+    fns: &[FunctionInfo],
+    file_is_test: &HashMap<&str, bool>,
+    file_to_module: &HashMap<&str, &str>,
+) -> DataFrame {
     build_df(vec![
         (
             "qualified_name",
             ColumnType::String,
             str_col(fns.iter().map(|f| Some(f.qualified_name.clone())).collect()),
+        ),
+        // 0.9.30: `module` is the dotted module path of the file this
+        // function lives in — the same key Files carry. Lets agents
+        // write `WHERE f.module STARTS WITH 'xarray.core'` against
+        // Function nodes the same way they would against File nodes.
+        // Pre-0.9.30 the property only existed on File + Module nodes,
+        // which silently returned zero rows for cross-type module
+        // filters.
+        (
+            "module",
+            ColumnType::String,
+            str_col(
+                fns.iter()
+                    .map(|f| file_to_module.get(f.file_path.as_str()).map(|m| (*m).to_string()))
+                    .collect(),
+            ),
         ),
         (
             "name",
@@ -475,6 +510,7 @@ fn functions_df(fns: &[FunctionInfo], file_is_test: &HashMap<&str, bool>) -> Dat
 fn classes_df(
     classes: &[ClassInfo],
     attrs_by_owner: &HashMap<String, Vec<&AttributeInfo>>,
+    file_to_module: &HashMap<&str, &str>,
 ) -> DataFrame {
     build_df(vec![
         (
@@ -484,6 +520,17 @@ fn classes_df(
                 classes
                     .iter()
                     .map(|c| Some(c.qualified_name.clone()))
+                    .collect(),
+            ),
+        ),
+        // 0.9.30: see functions_df for rationale on the `module` property.
+        (
+            "module",
+            ColumnType::String,
+            str_col(
+                classes
+                    .iter()
+                    .map(|c| file_to_module.get(c.file_path.as_str()).map(|m| (*m).to_string()))
                     .collect(),
             ),
         ),
@@ -590,7 +637,7 @@ fn classes_df(
     ])
 }
 
-fn enums_df(enums: &[EnumInfo]) -> DataFrame {
+fn enums_df(enums: &[EnumInfo], file_to_module: &HashMap<&str, &str>) -> DataFrame {
     build_df(vec![
         (
             "qualified_name",
@@ -599,6 +646,17 @@ fn enums_df(enums: &[EnumInfo]) -> DataFrame {
                 enums
                     .iter()
                     .map(|e| Some(e.qualified_name.clone()))
+                    .collect(),
+            ),
+        ),
+        // 0.9.30: see functions_df for rationale on the `module` property.
+        (
+            "module",
+            ColumnType::String,
+            str_col(
+                enums
+                    .iter()
+                    .map(|e| file_to_module.get(e.file_path.as_str()).map(|m| (*m).to_string()))
                     .collect(),
             ),
         ),
@@ -651,12 +709,22 @@ fn enums_df(enums: &[EnumInfo]) -> DataFrame {
     ])
 }
 
-fn interfaces_df(ifs: &[InterfaceInfo]) -> DataFrame {
+fn interfaces_df(ifs: &[InterfaceInfo], file_to_module: &HashMap<&str, &str>) -> DataFrame {
     build_df(vec![
         (
             "qualified_name",
             ColumnType::String,
             str_col(ifs.iter().map(|i| Some(i.qualified_name.clone())).collect()),
+        ),
+        // 0.9.30: see functions_df for rationale on the `module` property.
+        (
+            "module",
+            ColumnType::String,
+            str_col(
+                ifs.iter()
+                    .map(|i| file_to_module.get(i.file_path.as_str()).map(|m| (*m).to_string()))
+                    .collect(),
+            ),
         ),
         (
             "name",
@@ -701,7 +769,7 @@ fn interfaces_df(ifs: &[InterfaceInfo]) -> DataFrame {
     ])
 }
 
-fn constants_df(consts: &[ConstantInfo]) -> DataFrame {
+fn constants_df(consts: &[ConstantInfo], file_to_module: &HashMap<&str, &str>) -> DataFrame {
     build_df(vec![
         (
             "qualified_name",
@@ -710,6 +778,17 @@ fn constants_df(consts: &[ConstantInfo]) -> DataFrame {
                 consts
                     .iter()
                     .map(|c| Some(c.qualified_name.clone()))
+                    .collect(),
+            ),
+        ),
+        // 0.9.30: see functions_df for rationale on the `module` property.
+        (
+            "module",
+            ColumnType::String,
+            str_col(
+                consts
+                    .iter()
+                    .map(|c| file_to_module.get(c.file_path.as_str()).map(|m| (*m).to_string()))
                     .collect(),
             ),
         ),
@@ -1169,6 +1248,17 @@ pub fn load_into_graph(
 
     mark(t_start, "setup+project/deps");
     let t_nodes = std::time::Instant::now();
+    // 0.9.30: file_path → module_path lookup shared by every entity
+    // df builder so Function/Class/Constant/Enum/Interface/Trait/
+    // Protocol/Struct all carry a `module` property derived from the
+    // file they live in. Closes the operator-reported friction where
+    // `WHERE f.module STARTS WITH '...'` silently returned 0 rows on
+    // non-File node types pre-0.9.30.
+    let file_to_module: HashMap<&str, &str> = result
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.module_path.as_str()))
+        .collect();
     // ── Node insertions ─────────────────────────────────────────
     if !result.files.is_empty() {
         maintain::add_nodes(
@@ -1200,7 +1290,7 @@ pub fn load_into_graph(
             .collect();
         maintain::add_nodes(
             graph,
-            functions_df(&result.functions, &file_is_test),
+            functions_df(&result.functions, &file_is_test, &file_to_module),
             "Function".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1215,7 +1305,7 @@ pub fn load_into_graph(
         let structs_owned: Vec<ClassInfo> = structs.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&structs_owned, &attrs_by_owner),
+            classes_df(&structs_owned, &attrs_by_owner, &file_to_module),
             "Struct".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1227,7 +1317,7 @@ pub fn load_into_graph(
         let classes_owned: Vec<ClassInfo> = classes.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&classes_owned, &attrs_by_owner),
+            classes_df(&classes_owned, &attrs_by_owner, &file_to_module),
             "Class".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1238,7 +1328,7 @@ pub fn load_into_graph(
     if !result.enums.is_empty() {
         maintain::add_nodes(
             graph,
-            enums_df(&result.enums),
+            enums_df(&result.enums, &file_to_module),
             "Enum".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1255,7 +1345,7 @@ pub fn load_into_graph(
         let v: Vec<InterfaceInfo> = traits.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            interfaces_df(&v),
+            interfaces_df(&v, &file_to_module),
             "Trait".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1267,7 +1357,7 @@ pub fn load_into_graph(
         let v: Vec<InterfaceInfo> = protocols.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            interfaces_df(&v),
+            interfaces_df(&v, &file_to_module),
             "Protocol".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1279,7 +1369,7 @@ pub fn load_into_graph(
         let v: Vec<InterfaceInfo> = ifaces.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            interfaces_df(&v),
+            interfaces_df(&v, &file_to_module),
             "Interface".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1290,7 +1380,7 @@ pub fn load_into_graph(
     if !result.constants.is_empty() {
         maintain::add_nodes(
             graph,
-            constants_df(&result.constants),
+            constants_df(&result.constants, &file_to_module),
             "Constant".into(),
             "qualified_name".into(),
             Some("name".into()),
