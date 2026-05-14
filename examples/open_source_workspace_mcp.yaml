@@ -38,6 +38,32 @@
 
 name: Open Source Explorer
 
+# Opt-in skills surface (0.9.31 / mcp-methods 0.3.36+). When set,
+# the server exposes per-tool methodology via the MCP `prompts/`
+# namespace — agents can call `prompts/get cypher_query` to load
+# the bundled cypher_query.md skill (analogous for graph_overview,
+# save_graph, read_code_source). The four kglite-bundled skills
+# layer with framework defaults (grep / read_source / list_source /
+# github_issues / repo_management methodology) and any operator-
+# authored project layer in `<basename>.skills/`.
+#
+# Values:
+#   skills: true         — bundled defaults only (kglite + framework)
+#   skills: ./my-skills/ — bundled defaults + a single operator path
+#   skills:              — list form for layered operator packs
+#     - true             — bundled defaults
+#     - ./team-skills/   — shared layer
+#     - ./this-deploy/   — per-deployment overrides (highest priority)
+#
+# Without `skills:`, prompts/list returns empty — no behavioural
+# change from pre-0.9.31 deployments.
+#
+# read_code_source ships an `applies_when:` gate
+# (graph_has_node_type: [Function, Class]) so it stays out of
+# prompts/list on non-code graphs (legal, o&g). Agents in those
+# deployments don't see the skill at all.
+skills: true
+
 # Opt-in declaration for parent-walk manifest discovery (0.9.29 /
 # mcp-methods 0.3.33+). With this set, you can launch with
 # `--workspace <parent>/repos/` and the framework finds this manifest

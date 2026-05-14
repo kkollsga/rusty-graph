@@ -77,6 +77,38 @@ impl GraphState {
         Some((overview.node_count as u64, overview.edge_count as u64))
     }
 
+    /// Whether the active graph has at least one node of the named
+    /// type. Returns `false` when no graph is active. Backs the
+    /// `graph_has_node_type:` predicate for skill `applies_when:`
+    /// gating (0.9.31 / mcp-methods 0.3.36).
+    pub fn has_node_type(&self, node_type: &str) -> bool {
+        let guard = self.inner.read().unwrap();
+        guard
+            .as_ref()
+            .map(|active| active.kg.dir().has_node_type(node_type))
+            .unwrap_or(false)
+    }
+
+    /// Whether the active graph's node-type metadata for `node_type`
+    /// contains an entry for `prop_name`. Returns `false` when no
+    /// graph is active or the type doesn't exist. Backs the
+    /// `graph_has_property:` predicate for skill `applies_when:`
+    /// gating.
+    pub fn has_property(&self, node_type: &str, prop_name: &str) -> bool {
+        let guard = self.inner.read().unwrap();
+        guard
+            .as_ref()
+            .map(|active| {
+                active
+                    .kg
+                    .dir()
+                    .get_node_type_metadata(node_type)
+                    .map(|meta| meta.contains_key(prop_name))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
     fn with_active<F>(&self, f: F) -> String
     where
         F: FnOnce(&ActiveGraph) -> String,

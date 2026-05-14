@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.31] — 2026-05-14
+
+Skills-aware MCP. Ships kglite-authored methodology for the four
+custom tools (`cypher_query`, `graph_overview`, `save_graph`,
+`read_code_source`) plus the wiring to compose them with framework
+defaults + operator-side layers + predicate-gated filtering. Opt-in
+per manifest via `skills: true` (or a path list); existing
+deployments without that declaration see no behavioural change.
+
+### Added (MCP server)
+
+- **Four bundled skills** under `kglite/mcp_server/skills/`,
+  authored against mcp-methods 0.3.35's `writing-effective-skills.md`
+  guide (TRIGGER/SKIP descriptions, Overview → Quick Reference →
+  Common Pitfalls → When wrong body anatomy, ~150-220 lines each).
+  Shipped as Python package data; `include_str!`'d into the Rust
+  binary at `crates/kglite-mcp-server/src/main.rs`. One source of
+  truth across both shipping paths.
+- **`SkillRegistry` wiring in the standalone Rust binary**
+  (`crates/kglite-mcp-server/src/main.rs`): `add_bundled` for each
+  of the four kglite skills, `merge_framework_defaults`,
+  `auto_detect_project_layer`, `layer_dirs(manifest.skills)`,
+  predicate evaluator (`KglitePredicateEvaluator` consults
+  `graph_state.has_node_type` / `has_property` for the
+  `graph_has_node_type:` / `graph_has_property:` clauses),
+  `finalise`. Wired into `serve_prompts(&registry, &mut server)`
+  before the stdio loop.
+- **Python entry point prompts handlers** at
+  `kglite/mcp_server/server.py`. The lowlevel `mcp.server.Server`
+  surface doesn't have the framework's FastMCP-shaped
+  `register_skills_as_prompts` helper, so we hand-roll
+  `@server.list_prompts()` and `@server.get_prompt()` backed by
+  `skills_loader.build_active_skill_set(...)`. Predicate gating is
+  re-evaluated at request time so post-boot graph state changes
+  (workspace activation, watch rebuild) reflect immediately.
+- **`kglite/mcp_server/skills_loader.py`** — minimal frontmatter
+  parser, `Skill`/`AppliesWhen` dataclasses, three-layer merge
+  (kglite-bundled + framework + operator), and runtime
+  `applies_when:` evaluation. Lives entirely in Python; talks to
+  the framework via `mcp_methods.SkillRegistry.from_manifest(...)`
+  for the framework+operator layers.
+- **Auto-inject hint pass.** When a skill's `name` matches a
+  registered tool and `auto_inject_hint: true` (default), the tool's
+  `description` gains a `[See prompts/get <name> for full
+  methodology.]` pointer in `tools/list`. Agents that scan tools
+  first still discover the methodology surface.
+- **`Manifest.skills` field** on the Python dataclass
+  (`kglite/mcp_server/manifest.py`) parsed from the framework's
+  polymorphic JSON shape (`false` / array of `true`/path entries).
+
+### Changed
+
+- **mcp-methods pin bumped to 0.3.36** (was 0.3.34). Picks up
+  `applies_when:` predicate gating (0.3.36) and skills foundation
+  (0.3.35). Both shipped by the maintainer in response to our
+  design feedback within the same day; no design changes during
+  review.
+
+### Added (regression tests)
+
+- **SK1**: Manifest without `skills:` exposes no prompts (opt-in
+  property; pre-0.9.31 behaviour preserved by default).
+- **SK2**: `skills: true` exposes kglite-bundled skills via
+  `prompts/list`. read_code_source filtered out via
+  applies_when on non-code graph fixtures.
+- **SK3**: `prompts/get cypher_query` returns the bundled
+  markdown body with description.
+- **SK4**: Auto-inject hint appends `[See prompts/get ...]` to
+  matching tool descriptions when skills are enabled.
+- **SK5**: `read_code_source` skill ACTIVE on a code-tree graph
+  (Function/Class present); proves the predicate evaluator
+  consults live graph state.
+- **SK6**: `prompts/get` with unknown name returns a clean
+  JSON-RPC error.
+
+81/81 mcp Python tests green (was 75 in 0.9.30). Standalone Rust
+binary builds clean; `cargo fmt --check` + `cargo clippy -- -D
+warnings` clean across the workspace.
+
+### Example
+
+`examples/open_source_workspace_mcp.yaml` opts in with `skills:
+true` and carries explanatory comments covering the three value
+shapes (`true` / single path / list form) plus the `applies_when:`
+predicate behaviour for the legal / o&g / code deployment shape.
+
 ## [0.9.30] — 2026-05-14
 
 Operator-reported friction from the 0.9.29 deployment audit:

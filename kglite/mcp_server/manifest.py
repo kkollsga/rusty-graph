@@ -109,6 +109,16 @@ class Manifest:
     tools: list[CypherTool] = field(default_factory=list)
     bundled_overrides: list[BundledOverride] = field(default_factory=list)
     trust: Trust = field(default_factory=Trust)
+    # 0.9.31 / mcp-methods 0.3.36+: opt-in skills declaration.
+    # Polymorphic JSON shape:
+    #   None or False  → skills disabled
+    #   True           → bundled framework + downstream-binary defaults only
+    #   "./pack"       → single path source
+    #   [True, "./a"]  → list; True = bundled, str = path
+    # The framework's `SkillRegistry.from_manifest(...)` does the
+    # three-layer composition (project / domain-pack / bundled).
+    # kglite's wrapper passes this through to the framework.
+    skills: bool | str | list[bool | str] | None = None
 
 
 def load_manifest(path: Path) -> Manifest:
@@ -128,6 +138,22 @@ def load_manifest(path: Path) -> Manifest:
     def _resolve(s: str) -> Path:
         return (base_dir / s).resolve()
 
+    # 0.9.31: pass `skills` through verbatim. The framework's
+    # to_json shape is polymorphic — `False` for disabled, an array
+    # mixing `true` (bundled marker) and path strings otherwise.
+    # mcp_methods.SkillRegistry.from_manifest reads it back from
+    # the YAML directly; we keep the parsed shape on the dataclass
+    # for callers that want to inspect it without reopening the YAML.
+    skills_raw = data.get("skills", False)
+    if skills_raw is False:
+        skills_value: bool | str | list[bool | str] | None = None
+    elif isinstance(skills_raw, list):
+        skills_value = list(skills_raw)
+    else:
+        # Bool true or a path string. Framework normalises to a list
+        # at runtime; we pass the raw shape through.
+        skills_value = skills_raw
+
     m = Manifest(
         yaml_path=yaml_path,
         base_dir=base_dir,
@@ -137,6 +163,7 @@ def load_manifest(path: Path) -> Manifest:
         source_roots=[_resolve(s) for s in (data.get("source_roots") or [])],
         env_file=_resolve(data["env_file"]) if data.get("env_file") else None,
         extensions=data.get("extensions") or {},
+        skills=skills_value,
     )
 
     b = data.get("builtins") or {}

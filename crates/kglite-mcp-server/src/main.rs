@@ -23,10 +23,10 @@ use mcp_methods::server::manifest::{
     find_sibling_manifest, find_workspace_manifest, ManifestError,
 };
 use mcp_methods::server::{
-    init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, watch, workspace, Manifest,
-    WorkspaceKind,
+    init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, serve_prompts, watch,
+    workspace, BundledSkill, Manifest, McpServer, PredicateClause, ServerOptions,
+    SkillPredicateEvaluator, SkillRegistry, WorkspaceKind,
 };
-use mcp_methods::server::{McpServer, ServerOptions};
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
@@ -431,6 +431,53 @@ async fn main() -> Result<()> {
     };
     let _watch_handle = watch_handle;
 
+    // 0.9.31: SkillRegistry wiring. Bundled methodology for kglite's
+    // four custom tools (cypher_query / graph_overview / save_graph /
+    // read_code_source) plus framework defaults (grep / read_source /
+    // list_source / github_issues / repo_management), composed with
+    // the operator-side project layer and any operator-declared
+    // domain skill packs. The predicate evaluator gates
+    // `read_code_source` on `graph_has_node_type: [Function, Class]`
+    // so it stays out of prompts/list when the active graph isn't a
+    // code-tree (legal-corpus / o&g / etc. deployments).
+    if let Some(m) = manifest.as_ref() {
+        let registry_result = SkillRegistry::new()
+            .add_bundled(BundledSkill {
+                name: "cypher_query",
+                body: include_str!("../../../kglite/mcp_server/skills/cypher_query.md"),
+            })
+            .add_bundled(BundledSkill {
+                name: "graph_overview",
+                body: include_str!("../../../kglite/mcp_server/skills/graph_overview.md"),
+            })
+            .add_bundled(BundledSkill {
+                name: "save_graph",
+                body: include_str!("../../../kglite/mcp_server/skills/save_graph.md"),
+            })
+            .add_bundled(BundledSkill {
+                name: "read_code_source",
+                body: include_str!("../../../kglite/mcp_server/skills/read_code_source.md"),
+            })
+            .merge_framework_defaults()
+            .auto_detect_project_layer(&m.yaml_path)
+            .layer_dirs(&m.skills, &m.yaml_path)
+            .and_then(|r| {
+                r.with_predicate_evaluator(KglitePredicateEvaluator {
+                    state: graph_state.clone(),
+                })
+                .finalise()
+            });
+        match registry_result {
+            Ok(registry) => serve_prompts(&registry, &mut server),
+            Err(e) => {
+                tracing::warn!(error = %e, "skills registry build failed; skills disabled for this session");
+            }
+        }
+    }
+    // Bare-mode (no manifest) deployments don't get skills — the
+    // `skills:` declaration lives in the manifest. Operators who want
+    // skills must declare them in YAML.
+
     print_boot_summary(
         &mode,
         manifest.as_ref(),
@@ -444,6 +491,39 @@ async fn main() -> Result<()> {
         .context("failed to start MCP service over stdio")?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Evaluates `applies_when:` predicates that depend on kglite's
+/// runtime graph state. The framework dispatches `tool_registered:`
+/// and `extension_enabled:` itself; this evaluator only handles the
+/// two domain predicates that require knowing what node types and
+/// properties the active graph carries.
+///
+/// Returning `None` for an unrecognised clause marks the predicate
+/// `Unknown` upstream — the framework's safe default suppresses the
+/// skill when any clause is `Unknown`, which prevents a typo'd
+/// predicate from silently activating a skill against the wrong
+/// domain.
+struct KglitePredicateEvaluator {
+    state: GraphState,
+}
+
+impl SkillPredicateEvaluator for KglitePredicateEvaluator {
+    fn evaluate(&self, clause: &PredicateClause<'_>) -> Option<bool> {
+        match clause {
+            PredicateClause::GraphHasNodeType(types) => {
+                Some(types.iter().any(|t| self.state.has_node_type(t)))
+            }
+            PredicateClause::GraphHasProperty {
+                node_type,
+                prop_name,
+            } => Some(self.state.has_property(node_type, prop_name)),
+            // Framework-internal predicates — `tool_registered` and
+            // `extension_enabled` are dispatched against ServerOptions
+            // by the framework itself, not via this evaluator.
+            _ => None,
+        }
+    }
 }
 
 /// Read `manifest.extensions.embedder.{backend, model, cooldown}` and

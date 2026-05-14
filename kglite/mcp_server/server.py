@@ -605,6 +605,87 @@ def _build_server(
     is_workspace = mode["kind"] == "workspace"
     is_local_workspace = mode["kind"] == "local_workspace"
 
+    # 0.9.31: load + merge + filter skills. Manifest-gated: bare-mode
+    # deployments without a manifest get no skills (the framework's
+    # `SkillRegistry.from_manifest` needs a YAML to read `skills:`
+    # from). Manifests with `skills: false` (or unset) get the empty
+    # set. Manifests with `skills: true` get kglite-bundled + framework
+    # defaults; richer values pull in project + operator layers. The
+    # set is filtered by `applies_when:` against the *current* graph
+    # state — but the closure captures graph_state by reference, so
+    # subsequent calls re-evaluate the predicate live (post-activate
+    # workspace switches reflect immediately).
+    from kglite.mcp_server.skills_loader import Skill, build_active_skill_set
+
+    def _registered_tool_names() -> set[str]:
+        names = {"cypher_query", "graph_overview", "read_code_source", "ping"}
+        if save_graph_enabled:
+            names.add("save_graph")
+        if source_roots:
+            names.update({"read_source", "grep", "list_source"})
+        if github_token_present:
+            names.update({"github_issues", "github_api"})
+        if is_workspace:
+            names.add("repo_management")
+        if is_local_workspace:
+            names.add("set_root_dir")
+        for t in manifest_cypher_tools:
+            names.add(t.name)
+        return names
+
+    manifest_extensions: dict[str, Any] = manifest.extensions if manifest else {}
+    manifest_yaml_path: Path | None = manifest.yaml_path if manifest else None
+
+    def _has_node_type(node_type: str) -> bool:
+        active = graph_state.active()
+        if active is None:
+            return False
+        try:
+            return node_type in (active.graph.describe(types=[node_type]) or "")
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _has_property(node_type: str, prop_name: str) -> bool:
+        # Probe via a labeled MATCH that returns the property; an
+        # exception or empty result indicates the property doesn't
+        # exist on that node type (or the type doesn't exist). The
+        # check stays cheap because LIMIT 1 short-circuits.
+        active = graph_state.active()
+        if active is None:
+            return False
+        try:
+            rows = list(active.graph.cypher(f"MATCH (n:{node_type}) WHERE n.{prop_name} IS NOT NULL RETURN n LIMIT 1"))
+            return len(rows) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    # Skills are opt-in via manifest `skills:`. `None` or `False` →
+    # disabled. Any other value (`True`, a path string, or a list)
+    # enables the kglite-bundled + framework-defaults + project layers.
+    skills_opted_in: bool = bool(manifest and manifest.skills)
+    active_skills: dict[str, Skill] = build_active_skill_set(
+        manifest_yaml_path,
+        has_node_type=_has_node_type,
+        has_property=_has_property,
+        registered_tools=_registered_tool_names(),
+        extensions=manifest_extensions,
+        skills_opted_in=skills_opted_in,
+    )
+    skill_auto_hint_names: set[str] = {s.name for s in active_skills.values() if s.auto_inject_hint}
+
+    def _apply_skill_hint(tool: types.Tool) -> types.Tool:
+        """Append a `see prompts/get <name>` pointer to a tool's
+        description when an active skill with auto_inject_hint=True
+        shares its name. Idempotent: the pointer carries a literal
+        marker so repeated applications don't duplicate it."""
+        if tool.name not in skill_auto_hint_names:
+            return tool
+        hint = f"\n\n[See `prompts/get` `{tool.name}` for full methodology.]"
+        existing = tool.description or ""
+        if hint in existing:
+            return tool
+        return tool.model_copy(update={"description": existing + hint})
+
     @server.list_tools()
     async def _list() -> list[types.Tool]:
         # ───────────────────────────────────────────────────────────
@@ -705,6 +786,16 @@ def _build_server(
         # entry; the override block is for the bundled catalogue
         # only).
         tools.extend(cypher_tool_attrs(manifest_cypher_tools))
+
+        # 0.9.31: auto-inject "see prompts/get <name>" hint into
+        # matching tool descriptions when a skill exists for the tool
+        # name AND has auto_inject_hint=True. Mirrors the framework's
+        # auto-inject pass for the Rust binary path. Agents that
+        # discover tools first (tools/list) get a discoverability
+        # pointer to the skill body.
+        if skill_auto_hint_names:
+            tools = [_apply_skill_hint(t) for t in tools]
+
         return tools
 
     @server.call_tool()
@@ -818,6 +909,55 @@ def _build_server(
         else:
             body = f"unknown tool: {name!r}"
         return [types.TextContent(type="text", text=body)]
+
+    # 0.9.31: prompts/list + prompts/get for skills. The set of active
+    # skills was computed once at boot via `build_active_skill_set`;
+    # we expose them here as MCP prompts. Empty active set → both
+    # handlers return empty / not-found.
+    @server.list_prompts()
+    async def _list_prompts() -> list[types.Prompt]:
+        # Re-resolve at request time so applies_when predicates that
+        # depend on the active graph (graph_has_node_type, etc.)
+        # reflect any post-boot mutations (e.g. workspace activated
+        # a repo after server startup). Cheap — predicate evaluation
+        # is one Cypher LIMIT 1 per declared clause in the worst case.
+        live = build_active_skill_set(
+            manifest_yaml_path,
+            has_node_type=_has_node_type,
+            has_property=_has_property,
+            registered_tools=_registered_tool_names(),
+            extensions=manifest_extensions,
+            skills_opted_in=skills_opted_in,
+        )
+        return [
+            types.Prompt(name=s.name, description=s.description) for s in sorted(live.values(), key=lambda x: x.name)
+        ]
+
+    @server.get_prompt()
+    async def _get_prompt(name: str, arguments: dict[str, Any] | None) -> types.GetPromptResult:
+        live = build_active_skill_set(
+            manifest_yaml_path,
+            has_node_type=_has_node_type,
+            has_property=_has_property,
+            registered_tools=_registered_tool_names(),
+            extensions=manifest_extensions,
+            skills_opted_in=skills_opted_in,
+        )
+        skill = live.get(name)
+        if skill is None:
+            # mcp.server.lowlevel surfaces ValueError as a protocol-
+            # level error response to the agent. Use a clear message
+            # rather than KeyError so the agent sees actionable text.
+            raise ValueError(f"unknown prompt: {name!r} (active skills: {sorted(live.keys())})")
+        return types.GetPromptResult(
+            description=skill.description,
+            messages=[
+                types.PromptMessage(
+                    role="user",
+                    content=types.TextContent(type="text", text=skill.body),
+                )
+            ],
+        )
 
     return server
 

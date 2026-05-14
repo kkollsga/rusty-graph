@@ -156,6 +156,24 @@ class McpClient:
         content = resp.get("result", {}).get("content", [])
         return content[0].get("text", "") if content else ""
 
+    def list_prompts(self) -> list[dict[str, Any]]:
+        self._send({"jsonrpc": "2.0", "id": self._next_id, "method": "prompts/list", "params": {}})
+        self._next_id += 1
+        resp = self._recv()
+        return resp.get("result", {}).get("prompts", [])
+
+    def get_prompt(self, name: str) -> dict[str, Any]:
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": self._next_id,
+                "method": "prompts/get",
+                "params": {"name": name, "arguments": {}},
+            }
+        )
+        self._next_id += 1
+        return self._recv()
+
     def close(self) -> None:
         try:
             self._proc.terminate()
@@ -2315,3 +2333,150 @@ def test_l2_duplicate_title_procedure_counts_dupes(graph_with_duplicates: Path) 
     finally:
         client.close()
     assert "4" in body, f"expected 4 duplicate-title Prospects, got: {body!r}"
+
+
+# ---------------------------------------------------------------------------
+# Category SK — Skills wiring (0.9.31)
+# ---------------------------------------------------------------------------
+
+
+def test_sk1_skills_disabled_by_default_no_prompts_list(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """A manifest without `skills:` (the pre-0.9.31 default) must not
+    expose any prompts. Catches: skills always-on regression that
+    bloats the agent's prompts/list with unsolicited methodology."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: no_skills\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        prompts = client.list_prompts()
+    finally:
+        client.close()
+    assert prompts == [], f"prompts/list should be empty when skills not opted in: {prompts!r}"
+
+
+def test_sk2_skills_true_exposes_kglite_bundled(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """With `skills: true`, the four kglite-bundled skills land in
+    prompts/list (subject to applies_when filtering — only
+    read_code_source has a predicate, which requires Function/Class
+    in the graph)."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: skills_on\nskills: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        prompts = client.list_prompts()
+    finally:
+        client.close()
+    names = {p["name"] for p in prompts}
+    # cypher_query / graph_overview / save_graph are always-active.
+    # read_code_source is gated by applies_when graph_has_node_type
+    # [Function, Class] — tiny_graph_path is a Person/Article fixture
+    # with neither type, so the skill should be filtered out here.
+    assert "cypher_query" in names, f"cypher_query should appear: {names!r}"
+    assert "graph_overview" in names, f"graph_overview should appear: {names!r}"
+    # save_graph is gated by tool_registered:save_graph; we didn't
+    # set builtins.save_graph: true so the tool isn't registered,
+    # which means the skill's applies_when predicate filters it out.
+    # That's correct behaviour.
+    assert "read_code_source" not in names, f"read_code_source should be filtered out on non-code graph: {names!r}"
+
+
+def test_sk3_get_prompt_returns_skill_body(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """prompts/get cypher_query returns the bundled markdown body with
+    its description. Catches: handler registered but body not threaded
+    through."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: skill_body_test\nskills: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        resp = client.get_prompt("cypher_query")
+    finally:
+        client.close()
+    assert "error" not in resp, f"get_prompt returned error: {resp!r}"
+    result = resp["result"]
+    messages = result["messages"]
+    assert len(messages) == 1
+    body = messages[0]["content"]["text"]
+    # The bundled cypher_query skill body has a recognisable anchor.
+    assert "Quick Reference" in body, f"skill body missing expected section: {body[:200]!r}"
+    assert "cypher_query" in body.lower()
+
+
+def test_sk4_auto_inject_hint_appends_to_tool_description(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """When skills are on and a skill's name matches a registered tool
+    with auto_inject_hint=True, the tool's description gains a
+    `[See prompts/get ...]` pointer. Catches: discoverability
+    regression — agents that read tools/list first must learn that
+    methodology is available via prompts."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: hint_test\nskills: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        tools_raw = client.list_tools_full()
+    finally:
+        client.close()
+    cypher = next((t for t in tools_raw if t["name"] == "cypher_query"), None)
+    assert cypher is not None
+    assert "prompts/get" in (cypher["description"] or ""), (
+        f"auto-inject hint missing from cypher_query description: {cypher['description']!r}"
+    )
+
+
+def test_sk5_read_code_source_skill_active_on_code_tree(tmp_path: Path) -> None:
+    """When the active graph has Function/Class nodes, the
+    `read_code_source` skill's applies_when predicate evaluates to
+    true and the skill appears in prompts/list. Catches:
+    applies_when wired but always-false; predicate evaluator
+    not consulting the live graph."""
+    # Build a tiny code-tree graph via kglite.code_tree.build, save as
+    # .kgl, then point a server at it.
+    import kglite
+    from kglite import code_tree
+
+    src = tmp_path / "tiny_code"
+    src.mkdir()
+    (src / "main.py").write_text("def foo():\n    pass\n\nclass Bar:\n    pass\n")
+    g = code_tree.build(str(src))
+    kgl_path = tmp_path / "tiny_code.kgl"
+    g.save(str(kgl_path))
+
+    manifest = tmp_path / "tiny_code_mcp.yaml"
+    manifest.write_text("name: code_skills_test\nskills: true\n")
+
+    client = _client(["--graph", str(kgl_path), "--mcp-config", str(manifest)])
+    try:
+        prompts = client.list_prompts()
+    finally:
+        client.close()
+    names = {p["name"] for p in prompts}
+    assert "read_code_source" in names, f"read_code_source should be active on code-tree graph: {names!r}"
+    _ = kglite  # silence unused-import lint in this scope
+
+
+def test_sk6_unknown_prompt_returns_error(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """prompts/get with an unknown name returns a JSON-RPC error.
+    Catches: handler raising the wrong exception type, or the lowlevel
+    Server silently returning empty content."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: unknown_prompt_test\nskills: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        resp = client.get_prompt("not_a_real_skill")
+    finally:
+        client.close()
+    assert "error" in resp, f"expected error for unknown prompt, got: {resp!r}"
+    assert "unknown prompt" in resp["error"].get("message", "").lower()
