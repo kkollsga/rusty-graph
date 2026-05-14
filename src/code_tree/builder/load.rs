@@ -295,7 +295,11 @@ fn functions_df(
             ColumnType::String,
             str_col(
                 fns.iter()
-                    .map(|f| file_to_module.get(f.file_path.as_str()).map(|m| (*m).to_string()))
+                    .map(|f| {
+                        file_to_module
+                            .get(f.file_path.as_str())
+                            .map(|m| (*m).to_string())
+                    })
                     .collect(),
             ),
         ),
@@ -530,7 +534,11 @@ fn classes_df(
             str_col(
                 classes
                     .iter()
-                    .map(|c| file_to_module.get(c.file_path.as_str()).map(|m| (*m).to_string()))
+                    .map(|c| {
+                        file_to_module
+                            .get(c.file_path.as_str())
+                            .map(|m| (*m).to_string())
+                    })
                     .collect(),
             ),
         ),
@@ -656,7 +664,11 @@ fn enums_df(enums: &[EnumInfo], file_to_module: &HashMap<&str, &str>) -> DataFra
             str_col(
                 enums
                     .iter()
-                    .map(|e| file_to_module.get(e.file_path.as_str()).map(|m| (*m).to_string()))
+                    .map(|e| {
+                        file_to_module
+                            .get(e.file_path.as_str())
+                            .map(|m| (*m).to_string())
+                    })
                     .collect(),
             ),
         ),
@@ -722,7 +734,11 @@ fn interfaces_df(ifs: &[InterfaceInfo], file_to_module: &HashMap<&str, &str>) ->
             ColumnType::String,
             str_col(
                 ifs.iter()
-                    .map(|i| file_to_module.get(i.file_path.as_str()).map(|m| (*m).to_string()))
+                    .map(|i| {
+                        file_to_module
+                            .get(i.file_path.as_str())
+                            .map(|m| (*m).to_string())
+                    })
                     .collect(),
             ),
         ),
@@ -788,7 +804,11 @@ fn constants_df(consts: &[ConstantInfo], file_to_module: &HashMap<&str, &str>) -
             str_col(
                 consts
                     .iter()
-                    .map(|c| file_to_module.get(c.file_path.as_str()).map(|m| (*m).to_string()))
+                    .map(|c| {
+                        file_to_module
+                            .get(c.file_path.as_str())
+                            .map(|m| (*m).to_string())
+                    })
                     .collect(),
             ),
         ),

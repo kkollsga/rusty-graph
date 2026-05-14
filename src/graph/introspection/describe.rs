@@ -539,7 +539,11 @@ fn write_connections_detail(
                     // sample="..." attribute means the prop line always
                     // self-documents whether it's a low-cardinality enum
                     // (vals) or a high-cardinality field (sample).
-                    let sample = stats.value_set.iter().next().map(|v| value_display_compact(v, truncate_at));
+                    let sample = stats
+                        .value_set
+                        .iter()
+                        .next()
+                        .map(|v| value_display_compact(v, truncate_at));
                     match sample {
                         Some(s) => format!(" sample=\"{}\"", xml_escape(&s)),
                         None => String::new(),
