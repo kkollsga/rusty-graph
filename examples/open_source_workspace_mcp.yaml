@@ -5,16 +5,31 @@
 # builds its code-tree graph, and queries flow against that active repo
 # until you swap it.
 #
-# Deployment:
+# Two supported layouts (since kglite 0.9.29 / mcp-methods 0.3.33):
+#
+# Layout A — manifest inside the workspace dir (the simple case):
 #
 #     mkdir /path/to/my-workspace/
-#     cp examples/open_source_workspace_mcp.yaml /path/to/my-workspace/workspace_mcp.yaml
+#     cp examples/open_source_workspace_mcp.yaml \
+#        /path/to/my-workspace/workspace_mcp.yaml
 #     kglite-mcp-server --workspace /path/to/my-workspace/
 #
-# The filename inside the workspace MUST be `workspace_mcp.yaml` — the
-# CLI auto-detects manifests by that name. All paths in this file
-# resolve relative to the manifest, so `env_file: ../.env` walks up
-# one level from the workspace dir.
+# Layout B — manifest beside the workspace dir (the natural shape when
+# you want `repos/` as a dedicated clone sandbox):
+#
+#     mkdir -p /path/to/open_source/repos/
+#     cp examples/open_source_workspace_mcp.yaml \
+#        /path/to/open_source/workspace_mcp.yaml
+#     kglite-mcp-server --workspace /path/to/open_source/repos/
+#
+# For layout B the `workspace.applies_to:` declaration below is what
+# tells the framework "this manifest covers any child directory of my
+# parent dir." Without that declaration the parent-walk discovery is
+# refused (the safety property — prevents silent-wrong-manifest if
+# you point --workspace at any unrelated sibling).
+#
+# The filename MUST be `workspace_mcp.yaml` — the CLI auto-detects
+# manifests by that name. All paths resolve relative to the manifest.
 #
 # This shape is the open-source-explorer pattern: one workspace dir,
 # multiple repos cloned over time, idle repos auto-sweep after
@@ -22,6 +37,26 @@
 # directory + watch rebuild) see docs/examples/manifest_workspace.md.
 
 name: Open Source Explorer
+
+# Opt-in declaration for parent-walk manifest discovery (0.9.29 /
+# mcp-methods 0.3.33+). With this set, you can launch with
+# `--workspace <parent>/repos/` and the framework finds this manifest
+# one level up. Patterns are matched against the workspace dir's
+# basename:
+#   ./*        — any direct child (most permissive; use when the
+#                parent dir holds one workspace sandbox)
+#   ./repos    — literal "repos" only
+#   ./prod-*   — children starting with "prod-"
+#   [./repos, ./clones]   — list form, matches any entry
+#
+# Drop this field if your layout has the manifest INSIDE the workspace
+# dir (layout A in the header comment). Without applies_to, the
+# parent-walk discovery is refused — a deliberate safety property
+# (prevents silent-wrong-manifest if you point --workspace at any
+# unrelated sibling directory).
+workspace:
+  kind: github
+  applies_to: ./*
 
 # .env walk-up loads GITHUB_TOKEN (or GH_TOKEN) for github_issues +
 # github_api. Without a token those tools don't register at boot.
@@ -35,6 +70,9 @@ builtins:
 # agent can stream from. Without this block, FORMAT CSV inlines the
 # CSV in the response (subject to the MCP transport's size limits —
 # fine for thousands of rows, painful for millions).
+# 0.9.29: the localhost listener defaults to an OS-assigned port so
+# multiple kglite-mcp-server processes launched concurrently (e.g. by
+# Claude Desktop) don't collide. Set `port: 9000` here to override.
 extensions:
   csv_http_server: true
 

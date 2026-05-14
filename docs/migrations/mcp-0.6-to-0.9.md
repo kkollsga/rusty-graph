@@ -39,6 +39,45 @@ Rust extension and load with kglite itself.
 
 After install, `kglite-mcp-server` is on PATH.
 
+## Translation cheat-sheet
+
+If you're staring at a custom Python MCP server and trying to pick
+the equivalent flag, this maps the most common patterns:
+
+| Old pattern in your custom script                          | New mode                                |
+|------------------------------------------------------------|-----------------------------------------|
+| Loads a `.kgl` file at boot, serves it read-mostly         | `--graph path/to/X.kgl`                 |
+| Loads a disk-backed graph directory (`storage="disk"`)     | `--graph path/to/dir/` (auto-detected via `disk_graph_meta.json`) |
+| Clones GitHub repos at runtime and builds code-trees       | `--workspace path/to/workspace_dir/`    |
+| Uses `set_root_dir` to swap between sibling project dirs   | `--workspace path/` + manifest `workspace.kind: local`  |
+| Watches a single fixed directory and rebuilds on change    | `--watch path/`                         |
+| Exposes only `read_source` / `grep` / `list_source` (no graph) | `--source-root path/`               |
+| Reads `.env` walked-up from the manifest                   | `env_file:` field in your manifest (manifest-relative) |
+| Spawns its own CSV-over-HTTP listener                      | `extensions.csv_http_server: true` (auto-port since 0.9.29) |
+| Wires a custom embedder for `text_score`                   | `extensions.embedder.backend: fastembed` (or pre-compute via `g.embed_texts(...)` at build time) |
+
+A complete custom server typically maps onto one mode + a manifest
+with one or two `extensions:` entries. The "extra Python" you used
+to hand-write — listener setup, embedder wiring, watcher debounce,
+CSV write paths — all moves into manifest declarations.
+
+## .kgl format compatibility
+
+`.kgl` files written by 0.6.x – 0.8.x **cannot be loaded by 0.9.x**.
+The serialisation format changed across the storage-backend
+refactor (DirGraph traits, disk-backed mode, mapped-mode columnar
+layout) and graphs need to be rebuilt under 0.9.x. The error you
+get loading an old file is explicit ("unsupported format version"
+or similar) rather than silent corruption — that part works as
+intended.
+
+If your build pipeline lives in your own scripts, re-running them
+under the new kglite produces a fresh 0.9.x-compatible `.kgl`. If
+you don't have the build pipeline anymore, fluent-API or Cypher
+`CREATE` against an empty `KnowledgeGraph()` is the supported way
+to rebuild from source data — see the
+[Graph construction guide](https://kglite.readthedocs.io/en/latest/guides/graph-construction.html).
+
 ## Five operating modes
 
 The bundled server picks its mode from CLI flags (and `workspace.kind`
@@ -54,8 +93,49 @@ when a manifest is present):
 
 Manifest auto-detection: if `--graph X.kgl` is passed and
 `X_mcp.yaml` sits next to it, the manifest loads automatically. For
-`--workspace DIR`, the server looks for `workspace_mcp.yaml` inside
-the directory.
+`--workspace DIR`, the server looks for `workspace_mcp.yaml` first
+inside the directory, then (since 0.9.29 / mcp-methods 0.3.33) one
+level up — but only when the parent manifest opts in via
+`workspace.applies_to`. This lets operators use either of these
+layouts:
+
+```text
+# Layout 1: manifest inside the workspace dir (no opt-in needed)
+workspace_dir/
+├── workspace_mcp.yaml
+└── repos/                  # clones land here
+
+# Layout 2: manifest as a sibling (since 0.9.29)
+my_project/
+├── workspace_mcp.yaml      # declares `workspace.applies_to: ./*`
+└── repos/                  # --workspace points here
+```
+
+For layout 2, the parent manifest must declare which child directory
+(or directories) it covers:
+
+```yaml
+workspace:
+  kind: github
+  applies_to: ./*            # any direct child (most permissive)
+  # or:
+  applies_to: ./repos        # literal: only "repos" matches
+  # or:
+  applies_to: ./prod-*       # glob: matches "prod-api", "prod-web", etc.
+  # or:
+  applies_to: [./repos, ./clones]   # list form
+```
+
+Without the `applies_to` opt-in, the parent-walk discovery is
+refused — a deliberate safety property to prevent silent-wrong-
+manifest if the operator points `--workspace` at any unrelated
+sibling directory under a workspace-manifest parent. The framework
+emits a `tracing` log when it considers and rejects a parent-walk
+match (visible if you set `RUST_LOG=mcp_methods=debug`).
+
+Pattern syntax follows the `globset` crate (`*`, `?`, `[abc]`).
+Multi-segment paths and `..` are rejected at manifest parse time
+with explicit error messages.
 
 ## Tool surface differences from pre-0.9.x
 

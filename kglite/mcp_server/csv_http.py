@@ -4,8 +4,10 @@ Mirrors `crates/kglite-mcp-server/src/csv_http.rs` for the Python
 implementation. When the manifest declares
 
     extensions:
+      csv_http_server: true        # OS-assigned port (default)
+      # or:
       csv_http_server:
-        port: 8765
+        port: 9000                 # explicit port
         dir: temp/
         cors_origin: "*"
 
@@ -13,6 +15,17 @@ the server spawns an aiohttp listener bound to 127.0.0.1:<port> that
 serves CSV files out of the configured directory. The `cypher_query`
 tool, when it sees `FORMAT CSV`, writes the result to
 `<dir>/<hash>.csv` and returns the URL instead of inlining.
+
+0.9.29: default port changed from 8765 to 0 (OS-assigned). Multiple
+kglite-mcp-server instances launched concurrently (e.g. by Claude
+Desktop on startup) used to collide on port 8765 — the first server
+to boot grabbed the port and every subsequent one crashed with
+`OSError: address already in use`, surfaced to the user as a
+"Server disconnected" message with no actionable detail. Port 0
+lets the OS assign a free port per-process; the actual bound port
+is captured back into the config so `url_for()` produces correct
+URLs. Operators who need a stable port for an external integration
+can still set `port: 9000` explicitly.
 
 Only GETs of flat filenames inside `<dir>` are served. No directory
 listing, no upload, no write surface. Loopback-only.
@@ -57,10 +70,10 @@ def from_manifest_value(value: Any, base_dir: Path) -> CsvHttpConfig | None:
     if value is None or value is False:
         return None
     if value is True:
-        return CsvHttpConfig(port=8765, dir=(base_dir / "temp").resolve())
+        return CsvHttpConfig(port=0, dir=(base_dir / "temp").resolve())
     if not isinstance(value, dict):
         raise ValueError(f"extensions.csv_http_server must be a mapping or boolean (got {value!r})")
-    port = value.get("port", 8765)
+    port = value.get("port", 0)
     if not isinstance(port, int) or port < 0 or port > 65535:
         raise ValueError(f"csv_http_server.port must be a u16 (got {port!r})")
     dir_raw = value.get("dir", "temp")
@@ -170,4 +183,14 @@ async def spawn(config: CsvHttpConfig) -> None:
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", config.port)
     await site.start()
+    # When config.port is 0 the kernel picks a free port — capture the
+    # actual bound port back into the config so url_for() produces the
+    # right URL. Without this, FORMAT CSV → URL responses would point
+    # at http://127.0.0.1:0/... which is invalid. `runner.addresses`
+    # is the aiohttp-public way to read this; the first entry matches
+    # the TCPSite we just started (we register exactly one).
+    if config.port == 0:
+        addresses = list(runner.addresses)
+        if addresses:
+            config.port = addresses[0][1]
     log.info("csv_http_server listening on 127.0.0.1:%d (dir=%s)", config.port, config.dir)

@@ -886,6 +886,71 @@ def test_c7_format_csv_inline_fallback(tiny_graph_path: Path) -> None:
     assert body.count("\n") >= 2
 
 
+def test_c9_csv_http_server_true_uses_os_assigned_port(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """`csv_http_server: true` (no explicit port) must bind to an
+    OS-assigned port and produce a URL with a non-zero port.
+
+    Catches: pre-0.9.29 regression where the default port was 8765.
+    Claude Desktop launches all registered MCP servers in parallel
+    at startup; the first to boot grabbed 8765 and every subsequent
+    server crashed with `OSError: address already in use`, which the
+    user saw as "Server disconnected" with no actionable detail.
+    Operator workaround was to hand-assign distinct ports across
+    every manifest. Fix: default port → 0, post-bind capture writes
+    the OS-assigned port back into the config so url_for() works."""
+    target = tmp_path / "true_csv.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "true_csv_mcp.yaml"
+    manifest.write_text("name: true_csv\nextensions:\n  csv_http_server: true\n")
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (p:Person) RETURN p.name LIMIT 1 FORMAT CSV"},
+        )
+        m = re.search(r"http://127\.0\.0\.1:(\d+)/", body)
+        assert m, f"no localhost URL in FORMAT CSV response: {body!r}"
+        port = int(m.group(1))
+        assert port != 0, f"URL has port 0 — post-bind capture broken: {body!r}"
+        assert 1024 <= port <= 65535, f"OS-assigned port out of expected range: {port}"
+    finally:
+        client.close()
+
+
+def test_c10_two_csv_http_servers_can_coexist(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Two kglite-mcp-server processes booted concurrently with the
+    `csv_http_server: true` default must NOT collide on the listener
+    port — each gets its own OS-assigned port.
+
+    Catches: pre-0.9.29 hardcoded 8765 default that made parallel
+    server boot impossible. This is the operator-reported scenario:
+    Claude Desktop registers four kglite-mcp-servers and launches
+    them all at startup; with a fixed default the second through
+    fourth crashed silently."""
+    targets = []
+    manifests = []
+    for i in range(2):
+        t = tmp_path / f"co_{i}.kgl"
+        shutil.copy(tiny_graph_path, t)
+        m = tmp_path / f"co_{i}_mcp.yaml"
+        m.write_text(f"name: co_{i}\nextensions:\n  csv_http_server: true\n")
+        targets.append(t)
+        manifests.append(m)
+
+    clients = []
+    try:
+        for t, m in zip(targets, manifests):
+            clients.append(_client(["--graph", str(t), "--mcp-config", str(m)]))
+        # Each must be alive + responsive — neither died from a port
+        # collision at boot.
+        for c in clients:
+            tools = c.list_tools()
+            assert "cypher_query" in tools, f"client missing cypher_query (port-collision crash?): tools={tools!r}"
+    finally:
+        for c in clients:
+            c.close()
+
+
 def test_c8_save_graph_persists_to_disk(mutable_graph_path: Path) -> None:
     """save_graph actually writes to the .kgl file.
     Catches: save_graph registers but doesn't persist."""
@@ -1335,6 +1400,87 @@ def test_e5_manifest_extensions_passthrough_preserves_all_keys(tmp_path: Path) -
     assert ext["deeply"]["nested"]["list_value"] == [1, 2, 3]
     assert ext["deeply"]["nested"]["bool_value"] is False
     assert ext["deeply"]["nested"]["string_value"] == "hello"
+
+
+def test_e6_workspace_manifest_parent_walk_with_applies_to(tmp_path: Path) -> None:
+    """When the manifest at `<parent>/workspace_mcp.yaml` declares
+    `workspace.applies_to: ./*` (or a matching pattern),
+    `find_workspace_manifest(<parent>/<child>/)` walks one level up
+    and resolves to it.
+
+    Catches: pre-0.9.29 layout-mismatch where the natural folder
+    structure was
+
+        open_source/
+        ├── workspace_mcp.yaml     # config sits beside the sandbox
+        └── repos/                 # --workspace points here
+
+    but discovery only looked INSIDE `--workspace`. Operators had to
+    pass `--mcp-config` explicitly for every launch. The fix in
+    mcp-methods 0.3.33 added opt-in parent-walk via
+    `workspace.applies_to`; kglite 0.9.29 bumps the pin to pick it
+    up. The opt-in is *required* — see E7 for the safety property."""
+    from kglite.mcp_server.manifest import find_workspace_manifest
+
+    parent = tmp_path / "open_source"
+    parent.mkdir()
+    (parent / "workspace_mcp.yaml").write_text("name: parent_test\nworkspace:\n  kind: github\n  applies_to: ./*\n")
+    repos = parent / "repos"
+    repos.mkdir()
+
+    # Inside-the-dir layout still works (primary case is unaffected).
+    r_primary = find_workspace_manifest(parent)
+    assert r_primary is not None
+    assert r_primary.name == "workspace_mcp.yaml"
+
+    # Parent-of-dir layout with applies_to: ./* resolves to the same
+    # manifest.
+    r_fallback = find_workspace_manifest(repos)
+    assert r_fallback is not None, "applies_to: ./* should allow parent-walk"
+    assert r_fallback.resolve() == r_primary.resolve()
+
+
+def test_e7_workspace_manifest_parent_walk_refused_without_applies_to(tmp_path: Path) -> None:
+    """Without `workspace.applies_to` declared in the parent manifest,
+    parent-walk discovery is REFUSED — even if the parent has a
+    valid `workspace_mcp.yaml`. This is the safety property the
+    opt-in shape guarantees.
+
+    Catches: the silent-wrong-manifest failure mode an unconditional
+    parent-walk would introduce. If a user typos `--workspace
+    ~/projects/some_random_dir/` and `~/projects/workspace_mcp.yaml`
+    exists, the server should NOT silently inherit that manifest.
+    Pre-0.3.33 the framework refused on the primary location alone
+    (correct but inflexible); 0.3.33's opt-in is the middle ground —
+    the manifest *author* declares which child dirs the manifest
+    covers.
+
+    Also catches: literal `applies_to: ./allowed` correctly refuses
+    sibling dirs that don't match the pattern (extra layer beyond
+    the all-or-nothing opt-in)."""
+    from kglite.mcp_server.manifest import find_workspace_manifest
+
+    # Case 1: parent manifest exists but has no applies_to — refuse.
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    (closed / "workspace_mcp.yaml").write_text("name: closed\nworkspace:\n  kind: github\n")
+    inner = closed / "inner"
+    inner.mkdir()
+    assert find_workspace_manifest(inner) is None, "parent manifest without applies_to should refuse parent-walk"
+
+    # Case 2: applies_to is a literal that doesn't match this child's
+    # basename — refuse.
+    literal = tmp_path / "literal"
+    literal.mkdir()
+    (literal / "workspace_mcp.yaml").write_text("name: literal\nworkspace:\n  kind: github\n  applies_to: ./allowed\n")
+    mismatch = literal / "forbidden"
+    mismatch.mkdir()
+    assert find_workspace_manifest(mismatch) is None, "applies_to literal mismatch should refuse parent-walk"
+
+    # Case 3: positive control — same shape but matching basename works.
+    matching = literal / "allowed"
+    matching.mkdir()
+    assert find_workspace_manifest(matching) is not None, "applies_to literal MATCH should allow parent-walk"
 
 
 def test_f5_workspace_post_activate_hook_fires_on_activate(tmp_path: Path) -> None:

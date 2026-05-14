@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.29] — 2026-05-14
+
+Two operator-reported fixes from the post-0.9.28 deployment audit:
+a hardcoded port-collision default that made parallel server boot
+impossible, and a workspace manifest layout that forced explicit
+`--mcp-config` for the natural folder shape. The second is fixed
+upstream in mcp-methods 0.3.33 via an opt-in `workspace.applies_to`
+declaration — kglite 0.9.29 bumps the pin to pick it up.
+
+### Fixed (MCP server)
+
+- **`csv_http_server` default port changed from 8765 to 0
+  (OS-assigned).** When Claude Desktop launches multiple
+  kglite-mcp-servers concurrently at startup, the first server
+  to boot used to grab port 8765 and every subsequent server
+  crashed with `OSError: address already in use` — surfaced to
+  the user as "Server disconnected" with no actionable detail.
+  The default now binds to port 0 (kernel-assigned); the actual
+  bound port is captured back into the config so `url_for()`
+  produces correct URLs (via `runner.addresses`, aiohttp's
+  public API for this). Operators who need a stable port for
+  external integrations can still set `port: 9000` explicitly.
+- **Workspace manifest auto-discovery walks one level up when
+  the parent manifest opts in via `workspace.applies_to`.**
+  Operators with the natural layout
+
+  ```text
+  open_source/
+  ├── workspace_mcp.yaml      # declares `workspace.applies_to: ./*`
+  └── repos/                  # --workspace points here
+  ```
+
+  no longer have to pass `--mcp-config` explicitly. The opt-in
+  declaration accepts a literal name (`./repos`), a glob pattern
+  (`./prod-*`), or a list of patterns (`[./repos, ./clones]`).
+  Patterns match the workspace dir's basename; the parent walk
+  is bounded to one level. Without `applies_to` declared, the
+  parent-walk is refused — a deliberate safety property to
+  prevent silent-wrong-manifest if `--workspace` points at any
+  unrelated sibling under a workspace-manifest parent.
+
+  Implementation lives upstream in mcp-methods 0.3.33's
+  `server::manifest::find_workspace_manifest`. kglite's Python
+  wrapper is now a thin pass-through; the unconditional
+  parent-walk fallback we briefly considered for the wrapper
+  was abandoned after the maintainer flagged its silent-wrong-
+  manifest failure mode.
+
+### Changed
+
+- **mcp-methods pin bumped to 0.3.33** (was 0.3.31). Picks up
+  the `workspace.applies_to` opt-in (above) plus the cumulative
+  framework changes from 0.3.32 (initial `applies_to` design as
+  a single literal, superseded by 0.3.33's glob + list shape).
+- **`WorkspaceCfg` dataclass gains `applies_to: str | list[str]
+  | None`** (`kglite/mcp_server/manifest.py`) — parsed from the
+  framework's polymorphic JSON shape and passed through to
+  consumers verbatim.
+
+### Added (MCP server)
+
+- **C9 / C10 / E6 / E7 regression tests.** C9:
+  `csv_http_server: true` produces a URL with a non-zero port.
+  C10: two concurrent servers booted with the default both come
+  up alive without port collision. E6: parent-walk discovery
+  with `applies_to: ./*` resolves the parent manifest. E7
+  (safety property): parent-walk is refused when the parent
+  manifest has no `applies_to` AND when an `applies_to` literal
+  doesn't match the child's basename.
+- **Migration guide extended** (`docs/migrations/mcp-0.6-to-0.9.md`):
+  new "Translation cheat-sheet" section maps common pre-0.9.x
+  patterns to the new mode flags ("loads a .kgl at boot →
+  `--graph`", "uses set_root_dir → `workspace.kind: local`",
+  etc.). New ".kgl format compatibility" section calls out
+  that 0.6.x – 0.8.x graphs cannot be loaded by 0.9.x and must
+  be rebuilt. Workspace manifest auto-detection section
+  describes `applies_to` opt-in.
+- **Example manifest updated** (`examples/open_source_workspace_mcp.yaml`):
+  declares `workspace.applies_to: ./*` to demonstrate the
+  layout-B (manifest beside workspace dir) pattern. Header
+  comment shows both layouts side-by-side.
+
 ## [0.9.28] — 2026-05-14
 
 Fixes three bugs the mcp-servers operator surfaced in their 0.6.18 →

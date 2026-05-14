@@ -49,6 +49,14 @@ class WorkspaceCfg:
     kind: str = "local"
     root: Path | None = None
     watch: bool = False
+    # 0.9.29 / mcp-methods 0.3.33+: opt-in declaration for parent-walk
+    # manifest discovery. Single pattern (`"./repos"`, `"./prod-*"`),
+    # list of patterns (`["./repos", "./clones"]`), or None (no
+    # parent-walk allowed). Glob syntax follows the `globset` crate
+    # (`*` / `?` / `[abc]`). Matched against the workspace dir's
+    # basename — single-segment match only; multi-segment paths and
+    # `..` are rejected at parse time by the framework.
+    applies_to: str | list[str] | None = None
 
 
 @dataclass
@@ -143,10 +151,18 @@ def load_manifest(path: Path) -> Manifest:
 
     w = data.get("workspace")
     if w is not None:
+        # `applies_to` arrives polymorphic from mcp-methods: None |
+        # str (single pattern) | list[str] (multi-pattern). Pass through
+        # in the same shape rather than normalising — the framework's
+        # find_workspace_manifest interprets it.
+        applies_to = w.get("applies_to")
+        if applies_to is not None and not isinstance(applies_to, (str, list)):
+            raise ManifestError(f"workspace.applies_to must be a string or list of strings (got {applies_to!r})")
         m.workspace = WorkspaceCfg(
             kind=w["kind"],
             root=_resolve(w["root"]) if w.get("root") else None,
             watch=bool(w.get("watch", False)),
+            applies_to=applies_to,
         )
 
     for t in data.get("tools") or []:
@@ -189,6 +205,32 @@ def find_sibling_manifest(graph_path: Path) -> Path | None:
 
 
 def find_workspace_manifest(dir_path: Path) -> Path | None:
-    """Auto-detect `workspace_mcp.yaml` in a workspace directory."""
+    """Auto-detect `workspace_mcp.yaml` for a workspace directory.
+
+    Checks two locations in priority order (since mcp-methods 0.3.33,
+    picked up by kglite 0.9.29):
+
+    1. Inside the workspace dir itself
+       (`<workspace_dir>/workspace_mcp.yaml`). The documented primary
+       location — no opt-in required.
+    2. As a sibling of the workspace dir
+       (`<workspace_dir>/../workspace_mcp.yaml`) **iff** that parent
+       manifest declares `workspace.applies_to` and the workspace
+       dir's basename matches one of the declared patterns. The
+       natural layout for github-clone-tracker workspaces is
+       `parent/workspace_mcp.yaml` + `parent/repos/` — opt-in via
+       `applies_to: ./repos` (literal) or `applies_to: ./*` (any
+       child).
+
+    Without the `applies_to` opt-in the framework refuses the
+    parent fallback by design: an unconditional walk would silently
+    inherit the wrong manifest if the operator pointed `--workspace`
+    at any sibling of a workspace-manifest directory. The opt-in
+    declaration gives the manifest author explicit control over
+    discovery scope.
+
+    The opt-in check + glob matching happens inside the mcp-methods
+    Rust path (`server/manifest.rs::find_workspace_manifest`).
+    """
     result = _mcp_internal.Manifest.find_workspace(str(dir_path))
     return Path(result) if result else None
