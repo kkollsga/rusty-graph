@@ -2410,12 +2410,17 @@ def test_sk3_get_prompt_returns_skill_body(tmp_path: Path, tiny_graph_path: Path
     assert "cypher_query" in body.lower()
 
 
-def test_sk4_auto_inject_hint_appends_to_tool_description(tmp_path: Path, tiny_graph_path: Path) -> None:
+def test_sk4_auto_inject_embeds_full_skill_body_in_tool_description(tmp_path: Path, tiny_graph_path: Path) -> None:
     """When skills are on and a skill's name matches a registered tool
-    with auto_inject_hint=True, the tool's description gains a
-    `[See prompts/get ...]` pointer. Catches: discoverability
-    regression — agents that read tools/list first must learn that
-    methodology is available via prompts."""
+    with auto_inject_hint=True, the tool's description gains the FULL
+    skill body under a `## Methodology` header.
+
+    0.9.32 change: previously injected a `[See prompts/get NAME ...]`
+    pointer. Operator found that agents in Claude Code / Claude
+    Desktop / Cursor / Continue don't have prompts/get exposed —
+    the pointer was dangling. Embedding the body makes methodology
+    reachable in every MCP client that exposes tools/list to the
+    agent (which is all of them)."""
     target = tmp_path / "test.kgl"
     shutil.copy(tiny_graph_path, target)
     manifest = tmp_path / "test_mcp.yaml"
@@ -2428,9 +2433,11 @@ def test_sk4_auto_inject_hint_appends_to_tool_description(tmp_path: Path, tiny_g
         client.close()
     cypher = next((t for t in tools_raw if t["name"] == "cypher_query"), None)
     assert cypher is not None
-    assert "prompts/get" in (cypher["description"] or ""), (
-        f"auto-inject hint missing from cypher_query description: {cypher['description']!r}"
-    )
+    desc = cypher["description"] or ""
+    assert "## Methodology" in desc, f"auto-inject marker missing from cypher_query description: {desc[:300]!r}"
+    # Pull a recognisable substring from the bundled cypher_query
+    # body — the Quick Reference section header should be in there.
+    assert "Quick Reference" in desc, f"full skill body missing — got truncated description: {desc[:500]!r}"
 
 
 def test_sk5_read_code_source_skill_active_on_code_tree(tmp_path: Path) -> None:
@@ -2480,3 +2487,112 @@ def test_sk6_unknown_prompt_returns_error(tmp_path: Path, tiny_graph_path: Path)
         client.close()
     assert "error" in resp, f"expected error for unknown prompt, got: {resp!r}"
     assert "unknown prompt" in resp["error"].get("message", "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Category O — Overview prefix + auto-inject escape hatch (0.9.32)
+# ---------------------------------------------------------------------------
+
+
+def test_o1_overview_prefix_prepended_on_bare_overview(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Manifest `overview_prefix:` is prepended to bare graph_overview()
+    output. Pre-0.9.32 the field was parsed but never read in the
+    Python entry path — operator bug report 2026-05-14. Mirrors the
+    FastMCP path's behaviour."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: overview_prefix_test\noverview_prefix: |\n  ## ORIENTATION\n  Start with X then Y.\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool("graph_overview", {})
+    finally:
+        client.close()
+    assert "ORIENTATION" in body, f"overview_prefix should be prepended on bare overview: {body[:300]!r}"
+    assert "Start with X then Y." in body
+    # And the schema XML still follows the prefix.
+    assert "<graph" in body, f"schema XML missing from response: {body[:500]!r}"
+
+
+def test_o2_overview_prefix_not_prepended_on_drill_down(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """overview_prefix is only injected on BARE graph_overview()
+    calls — drill-downs (types=[...] / connections / cypher) skip it.
+    Catches: prefix bloating every drill-down response, wasting
+    context."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: overview_prefix_drill_test\noverview_prefix: |\n  ## SHOULD_NOT_APPEAR_HERE\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool("graph_overview", {"types": ["Person"]})
+    finally:
+        client.close()
+    assert "SHOULD_NOT_APPEAR_HERE" not in body, f"overview_prefix leaked into drill-down response: {body[:300]!r}"
+
+
+def test_o3_auto_inject_respects_auto_inject_hint_false(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Skills with `auto_inject_hint: false` should NOT inject their
+    body into the matching tool's description. Operator's escape
+    hatch for cases where context cost matters more than retrieval."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    # Manifest's project layer with auto_inject_hint: false on cypher_query.
+    skills_dir = tmp_path / "test_mcp.skills"
+    skills_dir.mkdir()
+    (skills_dir / "cypher_query.md").write_text(
+        "---\n"
+        "name: cypher_query\n"
+        'description: "Short opt-out skill."\n'
+        "auto_inject_hint: false\n"
+        "---\n\n"
+        "# UNIQUE_BODY_MARKER\n\nshouldn't appear in tools/list.\n"
+    )
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: opt_out_test\nskills: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        tools_raw = client.list_tools_full()
+    finally:
+        client.close()
+    cypher = next((t for t in tools_raw if t["name"] == "cypher_query"), None)
+    assert cypher is not None
+    desc = cypher["description"] or ""
+    assert "UNIQUE_BODY_MARKER" not in desc, (
+        f"auto_inject_hint: false skill body leaked into tool description: {desc[:300]!r}"
+    )
+    assert "## Methodology" not in desc, "auto_inject_hint: false should suppress the Methodology header too"
+
+
+def test_o4_auto_inject_idempotent_via_methodology_header_marker(tmp_path: Path, tiny_graph_path: Path) -> None:
+    """Running _apply_skill_hint twice on the same tool doesn't
+    duplicate the body — the `## Methodology` marker is the
+    idempotency check. Catches: handler re-resolving on every
+    request and stacking duplicates."""
+    target = tmp_path / "test.kgl"
+    shutil.copy(tiny_graph_path, target)
+    manifest = tmp_path / "test_mcp.yaml"
+    manifest.write_text("name: idempotent_test\nskills: true\n")
+
+    client = _client(["--graph", str(target), "--mcp-config", str(manifest)])
+    try:
+        # Call list_tools twice — the handler re-evaluates each time.
+        # If injection isn't idempotent, the second call would carry
+        # a double-injected body.
+        first = client.list_tools_full()
+        second = client.list_tools_full()
+    finally:
+        client.close()
+    cypher_first = next((t for t in first if t["name"] == "cypher_query"), None)
+    cypher_second = next((t for t in second if t["name"] == "cypher_query"), None)
+    assert cypher_first and cypher_second
+    assert cypher_first["description"] == cypher_second["description"], (
+        "tool description should be stable across list_tools calls"
+    )
+    # And only ONE methodology header should be present.
+    assert cypher_first["description"].count("## Methodology") == 1, (
+        f"methodology header duplicated: {cypher_first['description'][:500]!r}"
+    )

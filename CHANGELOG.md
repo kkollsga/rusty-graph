@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.32] — 2026-05-14
+
+Two same-day operator bug reports from the 0.9.31 deployment.
+Both confirmed root-cause; one is kglite-side and shipped here,
+the other is a framework-design issue forwarded to mcp-methods
+with our reading of the trade-offs.
+
+### Fixed (MCP server)
+
+- **`overview_prefix:` from the manifest is now prepended to bare
+  `graph_overview()` output.** Pre-0.9.32 the field was parsed by
+  `manifest.py` but never read by `tools.py::run_overview` in the
+  Python entry path. The FastMCP path at
+  `mcp_methods/fastmcp/_overview.py` had honoured it correctly;
+  kglite's Python entry didn't. Operators authoring documented
+  `overview_prefix:` blocks were getting silently-dropped content.
+  `run_overview` now accepts an optional `overview_prefix` keyword,
+  prepended only on bare-overview calls (no `types=...` /
+  `connections=...` / `cypher=...` drill-down args), matching the
+  framework's behaviour and the documented contract.
+- **`_apply_skill_hint` injects the full skill body, not a dangling
+  `prompts/get` pointer.** Operator empirically confirmed that
+  agents in Claude Code, Claude Desktop, Cursor, and Continue
+  don't expose `prompts/get` to the model — the MCP `prompts/*`
+  plane was designed for human slash commands in chat UIs, not
+  agentic retrieval. The pre-0.9.32 bracketed pointer
+  (`[See prompts/get NAME for full methodology.]`) was a dangling
+  reference in those clients. 0.9.32 embeds the skill body under
+  a `## Methodology` header in the matching tool's description so
+  it reaches the agent via `tools/list`, which every MCP client
+  exposes. Capped at the framework's 16 KB hard limit / 4 KB soft
+  target. Operators can still set `auto_inject_hint: false`
+  per-skill to suppress the embed (useful for clients that DO
+  expose prompts/get, or where context cost matters more than
+  reachability).
+
+  This is a kglite Python-entry stop-gap; the framework's
+  canonical fix is being discussed with the mcp-methods maintainer
+  (their `serve_prompts` auto-inject pass would benefit from the
+  same upgrade for the Rust binary path + every other framework
+  consumer). When that lands, this kglite-side implementation
+  will converge.
+
+### Added (regression tests)
+
+- **O1**: `overview_prefix:` is prepended to bare `graph_overview()`.
+- **O2**: `overview_prefix:` is NOT prepended to drill-down calls
+  (`types=[...]` etc.).
+- **O3**: `auto_inject_hint: false` per-skill suppresses the body
+  embed in the matching tool's description.
+- **O4**: Re-calling `list_tools` doesn't double-inject (the
+  `## Methodology` header is the idempotency marker).
+- **SK4** updated to assert the full-body embed semantics
+  (previously asserted the dangling-pointer shape).
+
+85/85 mcp Python tests green (was 81 in 0.9.31).
+
+### Acknowledged but not yet fixed (forwarded to mcp-methods)
+
+- **`SkillRegistry.from_manifest` silently drops files with YAML
+  frontmatter parse errors.** Operator hit this with a
+  colon-in-value in an unquoted `description:` field; spent 25
+  minutes debugging because no log line surfaces. Framework owns
+  the parser; mcp-methods inbox has the bug report with operator-
+  ranked fixes (log.warning on each skipped file; return
+  parse_warnings on the registry; scaffold helper hints).
+- **Skills via `prompts/get` are unreachable in real MCP clients.**
+  Forwarded as a framework-wide design issue with the operator's
+  ranked fixes (auto-inject full body — adopted here as a
+  stop-gap; expose `get_skill` as a tool; document the
+  limitation). Maintainer decides the canonical shape; we'll
+  converge once they ship.
+
 ## [0.9.31] — 2026-05-14
 
 Skills-aware MCP. Ships kglite-authored methodology for the four

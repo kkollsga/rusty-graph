@@ -179,14 +179,18 @@ def run_overview(
     connections: Any,
     cypher: Any,
     temp_cleanup_dir: Path | None,
+    *,
+    overview_prefix: str | None = None,
 ) -> str:
     active = state.active()
     if active is None:
         return NO_GRAPH
 
+    is_bare = types is None and connections is None and cypher is None
+
     # Wipe the temp dir on bare overview when temp_cleanup is on. "Bare"
     # = no drill-down args. Matches the Rust shim's P4 behaviour.
-    if temp_cleanup_dir is not None and types is None and connections is None and cypher is None:
+    if temp_cleanup_dir is not None and is_bare:
         _wipe_dir(temp_cleanup_dir)
 
     kwargs: dict[str, Any] = {}
@@ -197,9 +201,19 @@ def run_overview(
     if cypher is not None:
         kwargs["cypher"] = cypher
     try:
-        return active.graph.describe(**kwargs)
+        body = active.graph.describe(**kwargs)
     except Exception as e:  # noqa: BLE001
         return f"graph_overview error: {e}"
+
+    # 0.9.32: manifest's `overview_prefix:` text is prepended ONLY on
+    # bare-overview calls (no drill-down args). Mirrors the FastMCP
+    # path's behaviour at mcp_methods/fastmcp/_overview.py and the
+    # documented contract in docs/guides/mcp-servers.md. Pre-0.9.32
+    # the Python entry parsed the field but never used it — operator
+    # bug report 2026-05-14.
+    if overview_prefix and is_bare:
+        return f"{overview_prefix}\n\n{body}"
+    return body
 
 
 def run_save(state: GraphState) -> str:

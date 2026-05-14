@@ -673,18 +673,52 @@ def _build_server(
     )
     skill_auto_hint_names: set[str] = {s.name for s in active_skills.values() if s.auto_inject_hint}
 
+    # 0.9.32: cap auto-injected skill bodies to match the framework's
+    # lint thresholds — 16 KB hard ceiling, 4 KB soft target. Beyond
+    # the hard ceiling we truncate with a trailing marker so the
+    # injected body stays a bounded fraction of every tools/list
+    # payload. (16 KB × N tools is still meaningful context cost; the
+    # 4 KB soft target keeps most well-authored skills under this cap
+    # with room to spare.)
+    _SKILL_INJECT_HARD_LIMIT = 16 * 1024
+    _SKILL_INJECT_TRUNCATE_MARKER = "\n\n[skill body truncated — full text via prompts/get]"
+
+    # Marker the injected `## Methodology` section carries so we don't
+    # duplicate it if `_apply_skill_hint` runs twice for any reason.
+    _SKILL_INJECT_HEADER = "\n\n## Methodology\n\n"
+
     def _apply_skill_hint(tool: types.Tool) -> types.Tool:
-        """Append a `see prompts/get <name>` pointer to a tool's
+        """Inject the active skill's full body into a tool's
         description when an active skill with auto_inject_hint=True
-        shares its name. Idempotent: the pointer carries a literal
-        marker so repeated applications don't duplicate it."""
+        shares the tool's name.
+
+        0.9.32 change: the previous "[See prompts/get NAME ...]"
+        pointer was a dangling reference for agents in Claude Code /
+        Claude Desktop / Cursor / Continue — those clients don't
+        expose prompts/get to the model (the MCP prompts/* plane was
+        designed for human slash commands, not agentic retrieval).
+        Operators authored skills, agents never read them.
+
+        New shape: embed the body verbatim under a `## Methodology`
+        header. Reachable in every MCP client today. Operators who
+        want the smaller payload can set `auto_inject_hint: false`
+        per-skill; the skill still surfaces via prompts/list for
+        clients that DO expose prompts to agents.
+
+        Idempotent: a header marker in the existing description
+        suppresses re-injection."""
         if tool.name not in skill_auto_hint_names:
             return tool
-        hint = f"\n\n[See `prompts/get` `{tool.name}` for full methodology.]"
-        existing = tool.description or ""
-        if hint in existing:
+        skill = active_skills.get(tool.name)
+        if skill is None:
             return tool
-        return tool.model_copy(update={"description": existing + hint})
+        existing = tool.description or ""
+        if _SKILL_INJECT_HEADER in existing:
+            return tool
+        body = skill.body
+        if len(body) > _SKILL_INJECT_HARD_LIMIT:
+            body = body[: _SKILL_INJECT_HARD_LIMIT - len(_SKILL_INJECT_TRUNCATE_MARKER)] + _SKILL_INJECT_TRUNCATE_MARKER
+        return tool.model_copy(update={"description": existing + _SKILL_INJECT_HEADER + body})
 
     @server.list_tools()
     async def _list() -> list[types.Tool]:
@@ -835,6 +869,7 @@ def _build_server(
                 args.get("connections"),
                 args.get("cypher"),
                 temp_cleanup_dir,
+                overview_prefix=manifest.overview_prefix if manifest else None,
             )
         elif name == "save_graph":
             body = run_save(graph_state)
