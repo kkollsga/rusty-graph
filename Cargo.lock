@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.9.31"
+version = "0.9.33"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1882,9 +1882,9 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.36"
+version = "0.3.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f8f01ac6ee6ffb3fbdd8659a31920a8c3e8910e340b9cd6a5fb5d6400ae49b4"
+checksum = "3311b271f83665696c414582834f6a22b949d735c4cbf067ea7e531bfe281edd"
 dependencies = [
  "anyhow",
  "clap",

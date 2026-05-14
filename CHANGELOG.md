@@ -7,7 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.32] — 2026-05-14
+## [0.9.33] — 2026-05-14
+
+mcp-methods 0.3.37 adopted both operator-reported fixes from the
+0.9.31 deployment audit, including kglite's stop-gap full-body
+skill-inject shape verbatim as the framework canonical. This is a
+pin-bump release: the Rust binary path picks up the canonical
+behaviour automatically; the Python entry's `_apply_skill_hint`
+stays — same shape, no longer "stop-gap", now aligned with the
+framework's `serve_prompts` auto-inject pass.
+
+Folds in the unpublished 0.9.32 work (overview_prefix plumbing +
+auto-inject full-body) so the cumulative diff against 0.9.31 is
+one coherent release rather than two adjacent versions on PyPI.
+
+### Changed
+
+- **mcp-methods pin bumped to 0.3.37** (was 0.3.36). Picks up:
+  - The framework's `serve_prompts` auto-inject pass now embeds
+    the full skill body under a `## Methodology` header instead
+    of the dangling `[See prompts/get NAME ...]` pointer.
+    Operators running the standalone Rust binary
+    (`crates/kglite-mcp-server/`) get the canonical behaviour
+    without any kglite-side change.
+  - `ResolvedRegistry.parse_warnings()` Rust getter and
+    `SkillRegistry.parse_warnings` Python getter for the
+    silent-skill-drop visibility (mcp-methods bug 1). The
+    framework's `tracing::warn!` channel also continues to
+    fire. Operator-visible boot summary integration in the
+    Python entry queued for 0.9.34 (the PyPI publish of the
+    0.3.37 wheel is still in flight at release-cut time).
+
+### Fixed (MCP server)
+
+These fixes were drafted as 0.9.32 commits but folded into 0.9.33
+so a single coherent cut publishes to PyPI:
+
+- **`overview_prefix:` from the manifest is now prepended to bare
+  `graph_overview()` output.** Pre-0.9.32 the field was parsed by
+  `manifest.py` but never read by `tools.py::run_overview` in the
+  Python entry path. The FastMCP path at
+  `mcp_methods/fastmcp/_overview.py` had honoured it correctly;
+  kglite's Python entry didn't. Operators authoring documented
+  `overview_prefix:` blocks were getting silently-dropped content.
+  `run_overview` now accepts an optional `overview_prefix` keyword,
+  prepended only on bare-overview calls (no `types=...` /
+  `connections=...` / `cypher=...` drill-down args), matching the
+  framework's behaviour and the documented contract.
+- **`_apply_skill_hint` injects the full skill body, not a dangling
+  `prompts/get` pointer.** Operator empirically confirmed that
+  agents in Claude Code, Claude Desktop, Cursor, and Continue
+  don't expose `prompts/get` to the model — the MCP `prompts/*`
+  plane was designed for human slash commands in chat UIs, not
+  agentic retrieval. The pre-0.9.33 bracketed pointer
+  (`[See prompts/get NAME for full methodology.]`) was a dangling
+  reference in those clients. 0.9.33 embeds the skill body under
+  a `## Methodology` header in the matching tool's description so
+  it reaches the agent via `tools/list`, which every MCP client
+  exposes. Capped at the framework's 16 KB hard limit / 4 KB soft
+  target. Operators can still set `auto_inject_hint: false`
+  per-skill to suppress the embed.
+- **`mcp-methods` Python wheel added to `[mcp]` extras** (`pyproject.toml`).
+  Without the framework's Python wheel, `SkillRegistry.from_manifest`
+  is unavailable and `skills_loader.py::load_framework_skills`
+  silently returns the empty list — project-layer
+  `<basename>.skills/` overrides and operator-declared domain packs
+  silently don't load. CI surfaced the gap when test_o3 (the
+  `auto_inject_hint: false` escape-hatch test) failed against an
+  environment without the wheel manually installed.
+
+### Added (regression tests)
+
+- **O1**: `overview_prefix:` is prepended to bare `graph_overview()`.
+- **O2**: `overview_prefix:` is NOT prepended to drill-down calls
+  (`types=[...]` etc.).
+- **O3**: `auto_inject_hint: false` per-skill suppresses the body
+  embed in the matching tool's description.
+- **O4**: Re-calling `list_tools` doesn't double-inject (the
+  `## Methodology` header is the idempotency marker).
+- **SK4** updated to assert the full-body embed semantics.
+
+85/85 mcp Python tests green (was 81 in 0.9.31).
+
+### Sequencing notes
+
+The mcp-methods 0.3.37 wheel publish to PyPI is still in flight at
+release-cut time. CI's `pip install kglite[mcp]` resolves
+`mcp-methods>=0.3.36` against PyPI's current state — once 0.3.37
+lands there, `pip install --upgrade` on kglite will pull it
+through. The Cargo dep already resolves to 0.3.37 on crates.io, so
+the Rust binary path (and the wheel's bundled Rust extension) get
+the canonical inject behaviour today.
+
+### Yanked
+
+The 0.9.32 git commits (`50a41c6...54bd095`) describe the same
+fixes that ship in 0.9.33; 0.9.32 was never published to PyPI.
+Its CI workflow was cancelled in favour of the single 0.9.33 cut
+so PyPI's release history stays clean. Operators who pulled
+0.9.32 wheels from the in-flight build artifacts (if any) should
+upgrade directly to 0.9.33.
+
+## [0.9.32] — 2026-05-14 — unpublished
+
+Reserved version: the `Cargo.toml` line was bumped to `0.9.32`
+mid-day on 2026-05-14 in commits `50a41c6` and `54bd095`. CI was
+cancelled mid-flight in favour of a single 0.9.33 cut bundling
+the same fixes plus the 0.3.37 framework pin. No 0.9.32 wheel
+exists on PyPI. See 0.9.33 above for the actual operator-facing
+changes.
+
+## [0.9.31] — 2026-05-14
 
 Two same-day operator bug reports from the 0.9.31 deployment.
 Both confirmed root-cause; one is kglite-side and shipped here,

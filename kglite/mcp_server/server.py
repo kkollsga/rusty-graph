@@ -692,18 +692,23 @@ def _build_server(
         description when an active skill with auto_inject_hint=True
         shares the tool's name.
 
-        0.9.32 change: the previous "[See prompts/get NAME ...]"
-        pointer was a dangling reference for agents in Claude Code /
-        Claude Desktop / Cursor / Continue — those clients don't
-        expose prompts/get to the model (the MCP prompts/* plane was
-        designed for human slash commands, not agentic retrieval).
-        Operators authored skills, agents never read them.
+        Embeds the body verbatim under a `## Methodology` header.
+        Reachable in every MCP client (every client exposes
+        tools/list to the agent). Operators who want the smaller
+        payload can set `auto_inject_hint: false` per-skill; the
+        skill still surfaces via prompts/list for clients that DO
+        expose prompts to agents (custom MCP integrations building
+        on the protocol directly).
 
-        New shape: embed the body verbatim under a `## Methodology`
-        header. Reachable in every MCP client today. Operators who
-        want the smaller payload can set `auto_inject_hint: false`
-        per-skill; the skill still surfaces via prompts/list for
-        clients that DO expose prompts to agents.
+        This matches the framework's canonical `serve_prompts`
+        auto-inject pass (mcp-methods 0.3.37+) which adopted the
+        same shape after operator finding that `prompts/get` is
+        unreachable by agents in Claude Code / Claude Desktop /
+        Cursor / Continue. The MCP `prompts/*` plane was designed
+        for human slash commands in chat UIs, not agentic retrieval.
+        Pre-0.9.32 kglite emitted a bracketed pointer (`[See
+        prompts/get NAME for full methodology.]`) — a dangling
+        reference in those clients.
 
         Idempotent: a header marker in the existing description
         suppresses re-injection."""
