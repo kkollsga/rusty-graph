@@ -50,6 +50,13 @@ mcp = [
     "fastembed>=0.4",
     "aiohttp>=3.9",
     "watchdog>=4.0",
+    # 0.9.32: mcp-methods Python wheel powers skills' three-layer
+    # composition (project / domain-pack / bundled). Without it
+    # `SkillRegistry.from_manifest` is unavailable and project-layer
+    # `<basename>.skills/` overrides + operator-declared domain packs
+    # silently don't load. The Cargo dep on the same crate covers the
+    # Rust side; this is its Python-side companion.
+    "mcp-methods>=0.3.36",
 ]
 
 # `pip install kglite` → `kglite-mcp-server` on PATH. 0.9.20+: the
